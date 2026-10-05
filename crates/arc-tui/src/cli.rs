@@ -1,3 +1,4 @@
+use arc_context::EntryText;
 use arc_core::StoryId;
 use clap::builder::{BoolValueParser, TypedValueParser};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -83,6 +84,29 @@ pub enum Commands {
         )]
         mode: LinkMode,
     },
+
+    /// Append a session handoff entry to the story note's `## Sessions` section.
+    ///
+    /// The entry is headed with the local time and current git branch. Creates the section, and
+    /// the story note, if missing. Multi-line values are indented under their field.
+    #[command()]
+    Log {
+        /// Shortcut story id (`123` or `sc-123`). Defaults to the story resolved from the current git branch.
+        #[arg(long)]
+        story: Option<StoryId>,
+        /// What this session got done.
+        #[arg(long)]
+        done: EntryText,
+        /// Where things stand now.
+        #[arg(long)]
+        state: EntryText,
+        /// The next concrete steps.
+        #[arg(long)]
+        next: EntryText,
+        /// Unresolved questions or decisions.
+        #[arg(long)]
+        questions: Option<EntryText>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +161,20 @@ mod tests {
         ));
         assert!(parse(&["link", "0"]).is_err());
         assert!(parse(&["link", "sc-x"]).is_err());
+    }
+
+    #[test]
+    fn log_takes_handoff_fields() {
+        assert!(matches!(
+            parse(&["log", "--story", "sc-7", "--done", "a", "--state", "b", "--next", "c"]).unwrap(),
+            Commands::Log { story: Some(id), questions: None, .. } if id.get() == 7
+        ));
+        assert!(matches!(
+            parse(&["log", "--done", "a", "--state", "b", "--next", "c", "--questions", "q"]).unwrap(),
+            Commands::Log { story: None, questions: Some(_), .. }
+        ));
+        assert!(parse(&["log", "--done", " ", "--state", "b", "--next", "c"]).is_err());
+        assert!(parse(&["log", "--done", "a", "--state", "b"]).is_err());
     }
 
     #[test]

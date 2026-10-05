@@ -17,7 +17,7 @@ use crate::{
     cli::{Commands, ContextFormat, DaemonCommands, LinkMode},
     note::Note,
 };
-use arc_context::{LinkOutcome, NoteRename};
+use arc_context::{Handoff, LinkOutcome, NoteRename, StoryNote};
 use arc_core::{Config, dbg_file};
 use arc_shortcut::fetch_story;
 
@@ -234,6 +234,29 @@ pub async fn handle_command(
                     renamed.from, renamed.to
                 ),
             }
+            Ok(())
+        }
+
+        Commands::Log {
+            story,
+            done,
+            state,
+            next,
+            questions,
+        } => {
+            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+            let handoff = Handoff {
+                done,
+                state,
+                next,
+                questions,
+            };
+            let logged = arc_context::log_session(&env::current_dir()?, config, &mut cache, story, handoff)
+                .await?;
+            if let StoryNote::Created { rel, .. } = &logged.note {
+                println!("created {rel} for sc-{}", logged.story);
+            }
+            println!("logged to {}: {}", logged.note.rel(), logged.entry.header());
             Ok(())
         }
 
