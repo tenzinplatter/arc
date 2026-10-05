@@ -10,7 +10,7 @@ use arc_shortcut::api::story::{Story, iteration_of};
 use slugify::slugify;
 
 use crate::branch::LinkableBranch;
-use crate::sessions::{SessionEntry, append_session};
+use crate::sessions::{Breadcrumb, SessionEntry, append_breadcrumb, append_session};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoteLinks {
@@ -174,6 +174,15 @@ pub enum LinkOutcome {
 
 pub fn write_session(vault: &Vault, rel: &NoteRelPath, entry: &SessionEntry) -> anyhow::Result<()> {
     vault.edit(rel, |content| Ok(append_session(content, entry)))?;
+    Ok(())
+}
+
+pub fn write_breadcrumb(
+    vault: &Vault,
+    rel: &NoteRelPath,
+    crumb: &Breadcrumb,
+) -> anyhow::Result<()> {
+    vault.edit(rel, |content| Ok(append_breadcrumb(content, crumb)))?;
     Ok(())
 }
 

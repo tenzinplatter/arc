@@ -13,6 +13,8 @@ const TIME_FORMAT: &str = "%Y-%m-%d %H:%M %:z";
 const OFFSET_FORMATS: [&str; 2] = [TIME_FORMAT, "%Y-%m-%d %H:%M %z"];
 const LOCAL_FORMAT: &str = "%Y-%m-%d %H:%M";
 const CONTINUATION_INDENT: &str = "    ";
+const AUTO_TAG: &str = "[auto]";
+const SHOWN_COMMITS: usize = 10;
 
 fn starts_entry(line: &str) -> bool {
     line.starts_with(ENTRY_PREFIX)
@@ -49,10 +51,22 @@ pub fn latest_sessions(note: &str, count: usize) -> Vec<String> {
     entries.split_off(skip)
 }
 
-pub fn latest_session_at(note: &str) -> Option<SessionTime> {
+fn headers(note: &str) -> Vec<EntryHeader> {
     entries(note)
         .iter()
-        .filter_map(|entry| SessionTime::from_header(entry.lines().next()?))
+        .filter_map(|entry| EntryHeader::parse(entry.lines().next()?))
+        .collect()
+}
+
+pub fn latest_session_at(note: &str) -> Option<SessionTime> {
+    headers(note).into_iter().map(|h| h.at).max()
+}
+
+pub fn latest_handoff_at(note: &str) -> Option<SessionTime> {
+    headers(note)
+        .into_iter()
+        .filter(|h| h.kind == EntryKind::Handoff)
+        .map(|h| h.at)
         .max()
 }
 
@@ -62,6 +76,45 @@ pub fn activity_since(latest: SessionTime, activity: DateTime<FixedOffset>) -> b
 
 pub fn append_session(note: &str, entry: &SessionEntry) -> String {
     append_to_section(note, &SectionHeading::sessions(), &entry.to_string())
+}
+
+pub fn append_breadcrumb(note: &str, crumb: &Breadcrumb) -> String {
+    append_to_section(note, &SectionHeading::sessions(), &crumb.to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Handoff,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryHeader {
+    pub at: SessionTime,
+    pub kind: EntryKind,
+}
+
+impl EntryHeader {
+    pub fn parse(line: &str) -> Option<Self> {
+        let mut parts = line.strip_prefix(ENTRY_PREFIX)?.split(BRANCH_SEPARATOR);
+        let at = SessionTime::parse_stamp(parts.next()?.trim())?;
+        let kind = match parts.last().map(str::trim) {
+            Some(AUTO_TAG) => EntryKind::Auto,
+            _ => EntryKind::Handoff,
+        };
+        Some(Self { at, kind })
+    }
+}
+
+fn header(at: SessionTime, branch: Option<&BranchName>, kind: EntryKind) -> String {
+    let tag = match kind {
+        EntryKind::Handoff => String::new(),
+        EntryKind::Auto => format!("{BRANCH_SEPARATOR}{AUTO_TAG}"),
+    };
+    match branch {
+        Some(branch) => format!("{ENTRY_PREFIX}{at}{BRANCH_SEPARATOR}{branch}{tag}"),
+        None => format!("{ENTRY_PREFIX}{at}{tag}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,12 +137,7 @@ impl SessionTime {
         self.0
     }
 
-    fn from_header(line: &str) -> Option<Self> {
-        let stamp = line
-            .strip_prefix(ENTRY_PREFIX)?
-            .split(BRANCH_SEPARATOR)
-            .next()?
-            .trim();
+    fn parse_stamp(stamp: &str) -> Option<Self> {
         OFFSET_FORMATS
             .iter()
             .find_map(|format| DateTime::parse_from_str(stamp, format).ok())
@@ -155,10 +203,106 @@ pub struct SessionEntry {
 
 impl SessionEntry {
     pub fn header(&self) -> String {
-        match &self.branch {
-            Some(branch) => format!("{ENTRY_PREFIX}{}{BRANCH_SEPARATOR}{branch}", self.at),
-            None => format!("{ENTRY_PREFIX}{}", self.at),
+        header(self.at, self.branch.as_ref(), EntryKind::Handoff)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneLine(String);
+
+impl OneLine {
+    pub fn parse(text: &str) -> Option<Self> {
+        let joined = text
+            .split(|c: char| c.is_control())
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!joined.is_empty()).then_some(Self(joined))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for OneLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Breadcrumb {
+    Commits {
+        at: SessionTime,
+        branch: Option<BranchName>,
+        subjects: Vec<OneLine>,
+        uncommitted: Option<OneLine>,
+    },
+    Uncommitted {
+        at: SessionTime,
+        branch: Option<BranchName>,
+        summary: OneLine,
+    },
+}
+
+impl Breadcrumb {
+    pub fn new(
+        at: SessionTime,
+        branch: Option<BranchName>,
+        subjects: Vec<OneLine>,
+        uncommitted: Option<OneLine>,
+    ) -> Option<Self> {
+        match (subjects.is_empty(), uncommitted) {
+            (false, uncommitted) => Some(Breadcrumb::Commits {
+                at,
+                branch,
+                subjects,
+                uncommitted,
+            }),
+            (true, Some(summary)) => Some(Breadcrumb::Uncommitted {
+                at,
+                branch,
+                summary,
+            }),
+            (true, None) => None,
         }
+    }
+
+    pub fn header(&self) -> String {
+        match self {
+            Breadcrumb::Commits { at, branch, .. } | Breadcrumb::Uncommitted { at, branch, .. } => {
+                header(*at, branch.as_ref(), EntryKind::Auto)
+            }
+        }
+    }
+}
+
+impl fmt::Display for Breadcrumb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.header())?;
+        let uncommitted = match self {
+            Breadcrumb::Commits {
+                subjects,
+                uncommitted,
+                ..
+            } => {
+                f.write_str("\n**Commits:**")?;
+                subjects
+                    .iter()
+                    .take(SHOWN_COMMITS)
+                    .try_for_each(|s| write!(f, "\n- {s}"))?;
+                if let more @ 1.. = subjects.len().saturating_sub(SHOWN_COMMITS) {
+                    write!(f, "\n- and {more} more")?;
+                }
+                uncommitted.as_ref()
+            }
+            Breadcrumb::Uncommitted { summary, .. } => Some(summary),
+        };
+        uncommitted
+            .iter()
+            .try_for_each(|u| write!(f, "\n**Uncommitted:** {u}"))
     }
 }
 
@@ -495,6 +639,87 @@ mod tests {
                 .naive_local()
                 .to_string(),
             "2026-10-05 14:32:00"
+        );
+    }
+
+    fn line(s: &str) -> OneLine {
+        OneLine::parse(s).unwrap()
+    }
+
+    #[test]
+    fn one_line_flattens_control_characters() {
+        assert_eq!(line(" a\r\n## b\tc ").as_str(), "a ## b c");
+        assert_eq!(OneLine::parse(" \n\t"), None);
+    }
+
+    #[test]
+    fn golden_breadcrumb_rendering() {
+        let crumb = Breadcrumb::new(
+            at("2026-10-05 17:45:10"),
+            Some(BranchName::parse("tenzin/sc-7/x").unwrap()),
+            vec![line("add flow"), line("### not a heading")],
+            Some(line("2 files changed, 5 insertions(+); 1 untracked")),
+        )
+        .unwrap();
+        assert_eq!(
+            crumb.to_string(),
+            "### 2026-10-05 17:45 +10:00 · tenzin/sc-7/x · [auto]\n**Commits:**\n- add flow\n- ### not a heading\n**Uncommitted:** 2 files changed, 5 insertions(+); 1 untracked"
+        );
+        let dirty = Breadcrumb::new(
+            at("2026-10-05 17:45:00"),
+            None,
+            vec![],
+            Some(line("1 file changed")),
+        )
+        .unwrap();
+        assert_eq!(
+            dirty.to_string(),
+            "### 2026-10-05 17:45 +10:00 · [auto]\n**Uncommitted:** 1 file changed"
+        );
+        assert_eq!(
+            Breadcrumb::new(at("2026-10-05 17:45:00"), None, vec![], None),
+            None
+        );
+    }
+
+    #[test]
+    fn breadcrumbs_cap_commit_subjects() {
+        let subjects = (1..=13).map(|i| line(&format!("c{i}"))).collect();
+        let crumb = Breadcrumb::new(at("2026-10-05 17:45:00"), None, subjects, None).unwrap();
+        let rendered = crumb.to_string();
+        assert!(rendered.contains("- c10\n- and 3 more"), "{rendered}");
+        assert!(!rendered.contains("c11"), "{rendered}");
+    }
+
+    #[test]
+    fn breadcrumbs_read_back_as_auto_entries() {
+        let handoff = entry("2026-10-05 09:00:00", Some("auto"), None);
+        let crumb = Breadcrumb::new(
+            at("2026-10-05 18:00:00"),
+            Some(BranchName::parse("b").unwrap()),
+            vec![line("- ---"), line("===")],
+            None,
+        )
+        .unwrap();
+        let note = append_breadcrumb(&append_session("# S\n", &handoff), &crumb);
+        let note = append_to_section(&note, &SectionHeading::parse("After").unwrap(), "x");
+        assert_eq!(
+            latest_sessions(&note, 5),
+            vec![handoff.to_string(), crumb.to_string()]
+        );
+        assert_eq!(latest_session_at(&note), Some(at("2026-10-05 18:00:00")));
+        assert_eq!(latest_handoff_at(&note), Some(at("2026-10-05 09:00:00")));
+        assert_eq!(
+            EntryHeader::parse(&handoff.header()).map(|h| h.kind),
+            Some(EntryKind::Handoff)
+        );
+        assert_eq!(
+            EntryHeader::parse(&crumb.header()).map(|h| h.kind),
+            Some(EntryKind::Auto)
+        );
+        assert_eq!(
+            latest_handoff_at("## Sessions\n### 2026-10-05 10:00 · [auto]\n"),
+            None
         );
     }
 }

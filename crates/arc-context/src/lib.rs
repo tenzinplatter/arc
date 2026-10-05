@@ -21,13 +21,14 @@ pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails
 pub use git::GitHead;
 pub use note::{
     LinkOutcome, NoteLinks, NoteRename, StoryNote, Vault, create_story_note, link_branch,
-    rename_linked_branch, write_session,
+    rename_linked_branch, write_breadcrumb, write_session,
 };
 pub use resolve::{ResolvedStory, Via, resolve};
 pub use section::{Newline, SectionHeading, append_to_end, append_to_section};
 pub use sessions::{
-    EntryText, Handoff, SessionEntry, SessionTime, activity_since, append_session,
-    latest_session_at, latest_sessions,
+    Breadcrumb, EntryHeader, EntryKind, EntryText, Handoff, OneLine, SessionEntry, SessionTime,
+    activity_since, append_breadcrumb, append_session, latest_handoff_at, latest_session_at,
+    latest_sessions,
 };
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 
@@ -130,6 +131,43 @@ pub async fn link_current_branch(
     };
     let outcome = link_branch(&vault, &note, &branch)?;
     Ok((branch.into_branch(), note, outcome))
+}
+
+pub fn story_note_for(
+    resolved: &ResolvedStory,
+    config: &Config,
+) -> anyhow::Result<Option<(NoteRelPath, String)>> {
+    let conn = arc_index::open_for_reading(&config.cache_dir)?;
+    context::find_note(resolved, &conn, &config.notes_dir)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StackLink {
+    Linked(NoteRelPath, LinkOutcome),
+    NoNote,
+}
+
+pub fn link_stacked_branch(
+    config: &Config,
+    cache: &Cache,
+    parent: &ResolvedStory,
+    branch: &LinkableBranch,
+) -> anyhow::Result<StackLink> {
+    let conn = arc_index::open(&config.cache_dir)?;
+    let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
+    linked_note(&conn, branch.as_branch(), parent.id)?;
+    let note = match context::find_note(parent, &conn, &config.notes_dir)? {
+        Some((rel, _)) => rel,
+        None => match cache.find_story(parent.id) {
+            Some(story) => {
+                let links = NoteLinks::for_story(cache, story);
+                create_story_note(&vault, story, links, "")?.rel().clone()
+            }
+            None => return Ok(StackLink::NoNote),
+        },
+    };
+    let outcome = link_branch(&vault, &note, branch)?;
+    Ok(StackLink::Linked(note, outcome))
 }
 
 #[derive(Debug)]
@@ -1052,5 +1090,42 @@ mod tests {
             "{err}"
         );
         assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(br("taken")));
+    }
+
+    #[test]
+    fn stacked_links_use_the_parent_note_or_cached_story() {
+        let Some(env) = env_on("unused") else { return };
+        let parent = ResolvedStory {
+            id: 7.into(),
+            branch: br("tenzin/sc-7/x"),
+            via: Via::BranchId,
+        };
+        let stacked = LinkableBranch::parse(br("stacked"), None).unwrap();
+        let mut cache = cache_for(&env);
+        assert_eq!(
+            link_stacked_branch(&env.config, &cache, &parent, &stacked).unwrap(),
+            StackLink::NoNote
+        );
+        cache.upsert_story(story_seven());
+        let note = rel("stories/story-seven.md");
+        assert_eq!(
+            link_stacked_branch(&env.config, &cache, &parent, &stacked).unwrap(),
+            StackLink::Linked(note.clone(), LinkOutcome::Added)
+        );
+        assert_eq!(
+            link_stacked_branch(&env.config, &cache, &parent, &stacked).unwrap(),
+            StackLink::Linked(note.clone(), LinkOutcome::AlreadyLinked)
+        );
+        let resolved = ResolvedStory {
+            id: 7.into(),
+            branch: br("stacked"),
+            via: Via::LinkedNote(note.clone()),
+        };
+        assert_eq!(
+            story_note_for(&resolved, &env.config).unwrap().unwrap().0,
+            note
+        );
+        let other = LinkableBranch::parse(br("me/sc-12/y"), None).unwrap();
+        assert!(link_stacked_branch(&env.config, &cache, &parent, &other).is_err());
     }
 }
