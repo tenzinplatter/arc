@@ -752,4 +752,100 @@ mod tests {
         assert!(add_branch("# no fence\n", "b").is_err());
         assert!(add_branch("---\nid: s\n", "b").is_err());
     }
+
+    fn pinned_block(mut fm: Frontmatter) -> String {
+        assert_eq!(fm.created, Some(arc_core::time::today()));
+        fm.created = NaiveDate::from_ymd_opt(2026, 3, 31);
+        fm.to_block().unwrap()
+    }
+
+    #[test]
+    fn golden_story_block_with_iteration() {
+        let fm = Frontmatter::story(
+            "sc-7-slug".into(),
+            7,
+            "Story seven".into(),
+            "https://s/7".into(),
+            Some("https://it/3".into()),
+        );
+        assert_eq!(
+            pinned_block(fm),
+            "---\nid: sc-7-slug\ncreated: 2026-03-31\nstory_id: sc-7\nstory_link: https://s/7\nstory_name: Story seven\niteration: https://it/3\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_story_block_without_iteration() {
+        let fm = Frontmatter::story("sc-8-slug".into(), 8, "Story eight".into(), "https://s/8".into(), None);
+        assert_eq!(
+            pinned_block(fm),
+            "---\nid: sc-8-slug\ncreated: 2026-03-31\nstory_id: sc-8\nstory_link: https://s/8\nstory_name: Story eight\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_iteration_block() {
+        let fm = Frontmatter::iteration("it-3-slug".into(), 3, "Sprint 3".into(), "https://it/3".into());
+        assert_eq!(
+            pinned_block(fm),
+            "---\nid: it-3-slug\ncreated: 2026-03-31\niteration_id: it-3\niteration_link: https://it/3\niteration_name: Sprint 3\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_epic_block() {
+        let fm = Frontmatter::epic("ep-40-slug".into(), 40, "Epic forty".into(), "https://ep/40".into());
+        assert_eq!(
+            pinned_block(fm),
+            "---\nid: ep-40-slug\ncreated: 2026-03-31\nepic_id: ep-40\nepic_link: https://ep/40\nepic_name: Epic forty\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_general_block() {
+        let fm = Frontmatter::general("general-slug".into(), vec!["a".into(), "b".into()]);
+        assert_eq!(
+            pinned_block(fm),
+            "---\nid: general-slug\ntags:\n- a\n- b\ncreated: 2026-03-31\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_daily_block() {
+        assert_eq!(
+            pinned_block(Frontmatter::daily("2026-03-31".into())),
+            "---\nid: 2026-03-31\ncreated: 2026-03-31\ntype: daily\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_scratch_block() {
+        assert_eq!(
+            pinned_block(Frontmatter::scratch("scratch-slug".into())),
+            "---\nid: scratch-slug\ncreated: 2026-03-31\ntype: scratch\n---\n"
+        );
+    }
+
+    #[test]
+    fn golden_block_with_every_field_set() {
+        let fm = Frontmatter {
+            id: "sc-9-slug".into(),
+            created: NaiveDate::from_ymd_opt(2026, 3, 31),
+            note_type: Some("story".into()),
+            tags: vec!["t".into()],
+            aliases: vec!["alias".into()],
+            link: EntityLink::Story {
+                id: 9,
+                url: "https://s/9".into(),
+                name: Some("Story nine".into()),
+                iteration_url: Some("https://it/3".into()),
+                epic_url: Some("https://ep/40".into()),
+            },
+            branches: vec!["sc-9-branch".into()],
+        };
+        assert_eq!(
+            fm.to_block().unwrap(),
+            "---\nid: sc-9-slug\naliases:\n- alias\ntags:\n- t\ncreated: 2026-03-31\ntype: story\nstory_id: sc-9\nstory_link: https://s/9\nstory_name: Story nine\niteration: https://it/3\nepic: https://ep/40\nbranches:\n- sc-9-branch\n---\n"
+        );
+    }
 }

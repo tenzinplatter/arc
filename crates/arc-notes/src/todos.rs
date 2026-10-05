@@ -420,4 +420,62 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("no checkbox"));
     }
+
+    const GOLDEN_TODOS_JSON: &str = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "text": "manual todo",
+    "date": "2026-05-31",
+    "completed": false,
+    "source": {
+      "kind": "Manual"
+    }
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000002",
+    "text": "parsed todo",
+    "date": null,
+    "completed": true,
+    "source": {
+      "kind": "NoteParsed",
+      "file": "stories/a.md",
+      "line": 12,
+      "fingerprint": 18446744073709551615
+    }
+  }
+]"#;
+
+    fn golden_todos() -> Vec<Todo> {
+        vec![
+            Todo {
+                id: Uuid::from_u128(1),
+                text: "manual todo".into(),
+                date: Some(NaiveDate::from_ymd_opt(2026, 5, 31).unwrap()),
+                completed: false,
+                source: TodoSource::Manual,
+            },
+            Todo {
+                id: Uuid::from_u128(2),
+                text: "parsed todo".into(),
+                date: None,
+                completed: true,
+                source: TodoSource::NoteParsed {
+                    file: PathBuf::from("stories/a.md"),
+                    line: 12,
+                    fingerprint: u64::MAX,
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn golden_todos_json_format_is_stable() {
+        assert_eq!(serde_json::to_string_pretty(&golden_todos()).unwrap(), GOLDEN_TODOS_JSON);
+    }
+
+    #[test]
+    fn golden_todos_json_literal_deserializes() {
+        let todos: Vec<Todo> = serde_json::from_str(GOLDEN_TODOS_JSON).unwrap();
+        assert_eq!(todos, golden_todos());
+    }
 }

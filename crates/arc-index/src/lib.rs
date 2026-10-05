@@ -543,4 +543,125 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0);
     }
+
+    fn sqlite_master_rows(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        let mut stmt = conn
+            .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn golden_index_schema_is_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        let row = |kind: &str, name: &str, sql: Option<&str>| {
+            (kind.to_string(), name.to_string(), sql.map(str::to_string))
+        };
+        assert_eq!(
+            sqlite_master_rows(&conn),
+            vec![
+                row(
+                    "index",
+                    "idx_note_branches_branch",
+                    Some("CREATE INDEX idx_note_branches_branch ON note_branches(branch)"),
+                ),
+                row(
+                    "index",
+                    "idx_note_branches_path",
+                    Some("CREATE INDEX idx_note_branches_path ON note_branches(path)"),
+                ),
+                row(
+                    "index",
+                    "idx_note_tags_path",
+                    Some("CREATE INDEX idx_note_tags_path ON note_tags(path)"),
+                ),
+                row(
+                    "index",
+                    "idx_notes_entity",
+                    Some("CREATE INDEX idx_notes_entity ON notes(link_kind, entity_id)"),
+                ),
+                row(
+                    "table",
+                    "note_branches",
+                    Some("CREATE TABLE note_branches (\n    path   TEXT NOT NULL,\n    branch TEXT NOT NULL\n)"),
+                ),
+                row(
+                    "table",
+                    "note_tags",
+                    Some("CREATE TABLE note_tags (\n    path TEXT NOT NULL,\n    tag  TEXT NOT NULL\n)"),
+                ),
+                row(
+                    "table",
+                    "notes",
+                    Some("CREATE TABLE notes (\n    path          TEXT PRIMARY KEY,\n    id            TEXT,\n    title         TEXT,\n    created       TEXT,\n    type          TEXT,\n    link_kind     TEXT,\n    entity_id     INTEGER,\n    entity_url    TEXT,\n    entity_name   TEXT,\n    iteration_url TEXT,\n    epic_url      TEXT\n)"),
+                ),
+                row("index", "sqlite_autoindex_notes_1", None),
+                row("index", "sqlite_autoindex_todos_1", None),
+                row(
+                    "table",
+                    "todos",
+                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    source    TEXT,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER\n)"),
+                ),
+            ]
+        );
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+    }
+
+    #[test]
+    fn golden_index_rows_are_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = open(tmp.path()).unwrap();
+        reindex_note(&conn, Path::new("stories/sc-7.md"), "---\nid: sc-7\ntags: [t]\ncreated: 2026-03-31\ntype: story\nstory_id: sc-7\nstory_link: https://s/7\nstory_name: Seven\niteration: https://it/3\nepic: https://ep/40\nbranches: [sc-7-branch]\n---\n\n# Title seven\n").unwrap();
+        reindex_note(&conn, Path::new("iterations/it-3.md"), "---\nid: it-3\niteration_id: it-3\niteration_link: https://it/3\niteration_name: Sprint 3\n---\n").unwrap();
+        reindex_note(&conn, Path::new("epics/ep-40.md"), "---\nid: ep-40\nepic_id: ep-40\nepic_link: https://ep/40\nepic_name: Forty\n---\n").unwrap();
+        reindex_note(&conn, Path::new("scratch/plain.md"), "# Plain heading\nno frontmatter\n").unwrap();
+        mirror_todos(&mut conn, &[
+            Todo {
+                id: uuid::Uuid::from_u128(1),
+                text: "manual".into(),
+                date: NaiveDate::from_ymd_opt(2026, 5, 31),
+                completed: false,
+                source: TodoSource::Manual,
+            },
+            Todo {
+                id: uuid::Uuid::from_u128(2),
+                text: "parsed".into(),
+                date: None,
+                completed: true,
+                source: TodoSource::NoteParsed { file: "stories/sc-7.md".into(), line: 12, fingerprint: 5 },
+            },
+        ]).unwrap();
+        let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&query(&conn, sql).unwrap()).unwrap() };
+        assert_eq!(
+            rows("SELECT * FROM notes ORDER BY path"),
+            serde_json::json!([
+                {"path": "epics/ep-40.md", "id": "ep-40", "title": "ep-40", "created": null, "type": null, "link_kind": "epic", "entity_id": 40, "entity_url": "https://ep/40", "entity_name": "Forty", "iteration_url": null, "epic_url": null},
+                {"path": "iterations/it-3.md", "id": "it-3", "title": "it-3", "created": null, "type": null, "link_kind": "iteration", "entity_id": 3, "entity_url": "https://it/3", "entity_name": "Sprint 3", "iteration_url": null, "epic_url": null},
+                {"path": "scratch/plain.md", "id": null, "title": "Plain heading", "created": null, "type": null, "link_kind": null, "entity_id": null, "entity_url": null, "entity_name": null, "iteration_url": null, "epic_url": null},
+                {"path": "stories/sc-7.md", "id": "sc-7", "title": "Title seven", "created": "2026-03-31", "type": "story", "link_kind": "story", "entity_id": 7, "entity_url": "https://s/7", "entity_name": "Seven", "iteration_url": "https://it/3", "epic_url": "https://ep/40"}
+            ])
+        );
+        assert_eq!(
+            rows("SELECT * FROM note_tags"),
+            serde_json::json!([{"path": "stories/sc-7.md", "tag": "t"}])
+        );
+        assert_eq!(
+            rows("SELECT * FROM note_branches"),
+            serde_json::json!([{"path": "stories/sc-7.md", "branch": "sc-7-branch"}])
+        );
+        assert_eq!(
+            rows("SELECT * FROM todos ORDER BY position"),
+            serde_json::json!([
+                {"id": "00000000-0000-0000-0000-000000000001", "text": "manual", "date": "2026-05-31", "completed": 0, "source": "manual", "file": null, "line": null, "position": 0},
+                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "source": "note", "file": "stories/sc-7.md", "line": 12, "position": 1}
+            ])
+        );
+    }
 }

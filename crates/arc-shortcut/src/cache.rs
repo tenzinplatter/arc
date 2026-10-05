@@ -376,4 +376,224 @@ mod tests {
         assert_eq!(back.state_name(Some(11)), Some("only disk"));
         assert_eq!(back.member_name(&other_id), Some("disk member"));
     }
+
+    fn golden_full_cache_json() -> serde_json::Value {
+        serde_json::json!({
+            "current_iterations": [{
+                "id": 3,
+                "name": "Sprint 3",
+                "start_date": "2026-01-05",
+                "end_date": "2026-01-18",
+                "app_url": "https://app.shortcut.com/x/iteration/3",
+                "status": "started"
+            }],
+            "iterations": [{
+                "id": 2,
+                "name": "Sprint 2",
+                "start_date": "2025-12-22",
+                "end_date": "2026-01-04",
+                "app_url": "https://app.shortcut.com/x/iteration/2",
+                "status": "done"
+            }],
+            "iteration_stories": [{
+                "branches": [{"id": 11, "name": "sc-7-feature"}],
+                "completed": false,
+                "comments": [{
+                    "id": 99,
+                    "author_id": "12345678-1234-1234-1234-123456789abc",
+                    "created_at": "2026-01-06T10:00:00Z",
+                    "deleted": false,
+                    "position": 1,
+                    "text": "hello"
+                }],
+                "description": "desc",
+                "epic_id": 40,
+                "id": 7,
+                "iteration_id": 3,
+                "name": "story seven",
+                "app_url": "https://app.shortcut.com/x/story/7",
+                "workflow_state_id": 500,
+                "story_type": "feature",
+                "owner_ids": ["12345678-1234-1234-1234-123456789abc"],
+                "estimate": 3
+            }],
+            "epics": [{
+                "id": 40,
+                "name": "Epic forty",
+                "app_url": "https://app.shortcut.com/x/epic/40",
+                "owner_ids": ["12345678-1234-1234-1234-123456789abc"],
+                "created_at": "2025-11-01T00:00:00Z"
+            }],
+            "active_story": null,
+            "user_id": "12345678-1234-1234-1234-123456789abc",
+            "user_mention_name": "tenzin",
+            "cache_dir": "/tmp/arc-golden",
+            "stories_by_id": {
+                "5": {
+                    "branches": [],
+                    "completed": true,
+                    "comments": [{
+                        "id": 0,
+                        "author_id": null,
+                        "created_at": null,
+                        "deleted": true,
+                        "position": 2,
+                        "text": null
+                    }],
+                    "description": "",
+                    "epic_id": null,
+                    "id": 5,
+                    "iteration_id": null,
+                    "name": "five",
+                    "app_url": "https://app.shortcut.com/x/story/5",
+                    "workflow_state_id": null,
+                    "story_type": "bug",
+                    "owner_ids": [],
+                    "estimate": null
+                }
+            },
+            "workflow_states": {"500": "In Progress"},
+            "members": {"12345678-1234-1234-1234-123456789abc": "tenzin"}
+        })
+    }
+
+    fn golden_full_cache() -> Cache {
+        let member = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+        let iteration = |id: i32, name: &str, start: &str, end: &str, status| Iteration {
+            id,
+            name: name.into(),
+            start_date: start.parse().unwrap(),
+            end_date: end.parse().unwrap(),
+            app_url: format!("https://app.shortcut.com/x/iteration/{id}"),
+            status,
+        };
+        let seven = Story {
+            branches: vec![serde_json::from_value(serde_json::json!({"id": 11, "name": "sc-7-feature"})).unwrap()],
+            completed: false,
+            comments: vec![crate::api::story::comment::StoryComment {
+                id: 99,
+                author_id: Some(member),
+                created_at: Some("2026-01-06T10:00:00Z".parse().unwrap()),
+                deleted: false,
+                position: 1,
+                text: Some("hello".into()),
+            }],
+            description: "desc".into(),
+            epic_id: Some(40),
+            id: 7,
+            iteration_id: Some(3),
+            name: "story seven".into(),
+            app_url: "https://app.shortcut.com/x/story/7".into(),
+            workflow_state_id: Some(500),
+            story_type: "feature".into(),
+            owner_ids: vec![member],
+            estimate: Some(3),
+        };
+        let five = Story {
+            completed: true,
+            comments: vec![crate::api::story::comment::StoryComment {
+                id: 0,
+                author_id: None,
+                created_at: None,
+                deleted: true,
+                position: 2,
+                text: None,
+            }],
+            id: 5,
+            name: "five".into(),
+            app_url: "https://app.shortcut.com/x/story/5".into(),
+            story_type: "bug".into(),
+            ..Default::default()
+        };
+        let mut cache = Cache {
+            current_iterations: Some(vec![iteration(
+                3,
+                "Sprint 3",
+                "2026-01-05",
+                "2026-01-18",
+                crate::api::iteration::IterationStatus::Started,
+            )]),
+            iterations: vec![iteration(
+                2,
+                "Sprint 2",
+                "2025-12-22",
+                "2026-01-04",
+                crate::api::iteration::IterationStatus::Done,
+            )],
+            iteration_stories: Some(vec![seven]),
+            epics: vec![EpicSlim {
+                id: 40,
+                name: "Epic forty".into(),
+                app_url: "https://app.shortcut.com/x/epic/40".into(),
+                owner_ids: vec![member],
+                created_at: "2025-11-01T00:00:00Z".parse().unwrap(),
+            }],
+            active_story: None,
+            user_id: Some(member),
+            user_mention_name: Some("tenzin".into()),
+            cache_dir: PathBuf::from("/tmp/arc-golden"),
+            ..Default::default()
+        };
+        cache.stories_by_id.insert(5, five);
+        cache.workflow_states.insert(500, "In Progress".into());
+        cache.members.insert(member, "tenzin".into());
+        cache
+    }
+
+    #[test]
+    fn golden_cache_json_format_is_stable() {
+        assert_eq!(serde_json::to_value(golden_full_cache()).unwrap(), golden_full_cache_json());
+    }
+
+    #[test]
+    fn golden_cache_json_literal_deserializes() {
+        let member = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+        let cache: Cache = serde_json::from_value(golden_full_cache_json()).unwrap();
+        assert_eq!(cache.user_id, Some(member));
+        assert_eq!(cache.user_mention_name.as_deref(), Some("tenzin"));
+        assert_eq!(cache.cache_dir, PathBuf::from("/tmp/arc-golden"));
+        assert_eq!(cache.current_iterations.as_ref().unwrap()[0].id, 3);
+        assert_eq!(cache.iterations[0].id, 2);
+        assert_eq!(cache.epics[0].id, 40);
+        assert_eq!(cache.epics[0].owner_ids, vec![member]);
+        let seven = cache.find_story(7).unwrap();
+        assert_eq!(seven.epic_id, Some(40));
+        assert_eq!(seven.iteration_id, Some(3));
+        assert_eq!(seven.workflow_state_id, Some(500));
+        assert_eq!(seven.owner_ids, vec![member]);
+        assert_eq!(seven.comments[0].author_id, Some(member));
+        assert_eq!(seven.branches.len(), 1);
+        assert_eq!(cache.find_story(5).unwrap().name, "five");
+        assert_eq!(cache.state_name(Some(500)), Some("In Progress"));
+        assert_eq!(cache.member_name(&member), Some("tenzin"));
+        assert_eq!(
+            serde_json::to_value(&cache).unwrap(),
+            golden_full_cache_json()
+        );
+    }
+
+    #[test]
+    fn golden_minimal_cache_json_format_is_stable() {
+        let cache = Cache {
+            cache_dir: PathBuf::from("/tmp/arc-golden"),
+            ..Default::default()
+        };
+        let expected = serde_json::json!({
+            "current_iterations": null,
+            "iterations": [],
+            "iteration_stories": null,
+            "epics": [],
+            "active_story": null,
+            "user_id": null,
+            "user_mention_name": null,
+            "cache_dir": "/tmp/arc-golden",
+            "stories_by_id": {},
+            "workflow_states": {},
+            "members": {}
+        });
+        assert_eq!(serde_json::to_value(&cache).unwrap(), expected);
+        let back: Cache = serde_json::from_value(expected).unwrap();
+        assert!(back.user_id.is_none());
+        assert!(back.stories_by_id.is_empty());
+    }
 }

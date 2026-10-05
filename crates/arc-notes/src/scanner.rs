@@ -171,4 +171,9 @@ mod tests {
         assert_eq!(a[0].fingerprint, b[0].fingerprint);
         assert_ne!(a[0].line, b[0].line);
     }
+
+    #[test]
+    fn todo_ids_stay_stable_across_releases_because_fingerprint_value_is_pinned() {
+        assert_eq!(fingerprint(Path::new("stories/a.md"), "write the thing"), 9874501586080003358);
+    }
 }

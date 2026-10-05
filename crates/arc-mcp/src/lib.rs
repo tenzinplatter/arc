@@ -1010,4 +1010,93 @@ mod tests {
         assert_eq!(cache.stories_by_id[&6].name, "new");
         assert_eq!(cache.active_story.unwrap().name, "new");
     }
+
+    #[test]
+    fn golden_created_result_text() {
+        assert_eq!(
+            serde_json::to_value(created_result(("sc-7-slug".into(), "stories/sc-7-slug.md".into()))).unwrap(),
+            json!({
+                "content": [{"type": "text", "text": "id: sc-7-slug\npath: stories/sc-7-slug.md"}],
+                "isError": false
+            })
+        );
+    }
+
+    fn golden_detail_story() -> (Cache, Story) {
+        let known = uuid::Uuid::from_u128(1);
+        let unknown = uuid::Uuid::from_u128(2);
+        let mut cache = Cache::default();
+        cache.workflow_states.insert(500, "In Progress".into());
+        cache.members.insert(known, "tenzin".into());
+        let comment = |id: i64, author_id, deleted, position, text: &str| StoryComment {
+            id,
+            author_id,
+            created_at: Some("2026-01-06T10:00:00Z".parse().unwrap()),
+            deleted,
+            position,
+            text: Some(text.into()),
+        };
+        let s = Story {
+            branches: vec![serde_json::from_value(json!({"id": 11, "name": "sc-7-feature"})).unwrap()],
+            completed: true,
+            comments: vec![
+                comment(3, Some(unknown), false, 2, "second"),
+                comment(2, None, true, 1, "deleted"),
+                comment(1, Some(known), false, 0, "first"),
+            ],
+            description: "desc".into(),
+            epic_id: Some(40),
+            id: 7,
+            iteration_id: Some(3),
+            name: "story seven".into(),
+            app_url: "https://app.shortcut.com/x/story/7".into(),
+            workflow_state_id: Some(500),
+            story_type: "feature".into(),
+            owner_ids: vec![known, unknown],
+            estimate: Some(3),
+        };
+        (cache, s)
+    }
+
+    #[test]
+    fn golden_story_detail_json() {
+        let (cache, s) = golden_detail_story();
+        assert_eq!(
+            story_detail(&cache, &s, Some("note body".into())),
+            json!({
+                "id": 7,
+                "name": "story seven",
+                "state": "In Progress",
+                "type": "feature",
+                "url": "https://app.shortcut.com/x/story/7",
+                "completed": true,
+                "iteration_id": 3,
+                "epic_id": 40,
+                "estimate": 3,
+                "owners": ["tenzin", "00000000-0000-0000-0000-000000000002"],
+                "branches": ["sc-7-feature"],
+                "description": "desc",
+                "comments": [
+                    {"author": "tenzin", "created_at": "2026-01-06T10:00:00Z", "text": "first"},
+                    {"author": "00000000-0000-0000-0000-000000000002", "created_at": "2026-01-06T10:00:00Z", "text": "second"}
+                ],
+                "note": "note body"
+            })
+        );
+    }
+
+    #[test]
+    fn golden_slim_stories_json() {
+        let (_c, notes, conn) = setup();
+        let (mut cache, s) = golden_detail_story();
+        create_story_note(&conn, notes.path(), &s, None, None, "hi").unwrap();
+        cache.iteration_stories = Some(vec![s, story(8, "eight")]);
+        assert_eq!(
+            slim_stories(&cache, &conn).unwrap(),
+            json!([
+                {"id": 7, "name": "story seven", "state": "In Progress", "type": "feature", "url": "https://app.shortcut.com/x/story/7", "iteration_id": 3, "epic_id": 40, "estimate": 3, "has_note": true},
+                {"id": 8, "name": "eight", "state": null, "type": "", "url": "https://app.shortcut.com/x/story/8", "iteration_id": null, "epic_id": null, "estimate": null, "has_note": false}
+            ])
+        );
+    }
 }
