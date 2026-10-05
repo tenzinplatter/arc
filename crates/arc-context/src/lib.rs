@@ -27,8 +27,8 @@ pub use resolve::{ResolvedStory, Via, resolve};
 pub use section::{Newline, SectionHeading, append_to_end, append_to_section};
 pub use sessions::{
     Breadcrumb, EntryHeader, EntryKind, EntryText, Handoff, OneLine, SessionEntry, SessionTime,
-    activity_since, append_breadcrumb, append_session, latest_handoff_at, latest_session_at,
-    latest_sessions,
+    activity_since, append_breadcrumb, append_session, context_sessions, latest_handoff_at,
+    latest_session_at, latest_sessions,
 };
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 

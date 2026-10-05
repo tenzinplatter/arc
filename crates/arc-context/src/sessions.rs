@@ -51,6 +51,26 @@ pub fn latest_sessions(note: &str, count: usize) -> Vec<String> {
     entries.split_off(skip)
 }
 
+fn is_auto(entry: &str) -> bool {
+    entry
+        .lines()
+        .next()
+        .and_then(EntryHeader::parse)
+        .is_some_and(|h| h.kind == EntryKind::Auto)
+}
+
+pub fn context_sessions(note: &str, count: usize) -> Vec<String> {
+    let entries = entries(note);
+    let mut shown: Vec<usize> = (entries.len().saturating_sub(count)..entries.len()).collect();
+    let last_handoff = entries.iter().rposition(|entry| !is_auto(entry));
+    if let (Some(handoff), Some(oldest)) = (last_handoff, shown.first_mut())
+        && handoff < *oldest
+    {
+        *oldest = handoff;
+    }
+    shown.into_iter().map(|i| entries[i].clone()).collect()
+}
+
 fn headers(note: &str) -> Vec<EntryHeader> {
     entries(note)
         .iter()
@@ -497,6 +517,37 @@ mod tests {
                 "### 2026-10-03 · three\n**Done:** d",
                 "### 2026-10-04 · four\n**Done:** e",
             ]
+        );
+    }
+
+    #[test]
+    fn context_sessions_keep_the_latest_handoff() {
+        let note = "## Sessions\n### 2026-10-01 09:00 · a\n**Done:** first\n### 2026-10-02 09:00 · b\n**Done:** handoff\n### 2026-10-03 09:00 · b · [auto]\n**Commits:**\n- x\n### 2026-10-04 09:00 · [auto]\n**Uncommitted:** 1 file\n### 2026-10-05 09:00 · b · [auto]\n**Commits:**\n- y\n";
+        let heads = |sessions: Vec<String>| -> Vec<String> {
+            sessions
+                .iter()
+                .map(|s| s.lines().next().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            heads(context_sessions(note, 3)),
+            [
+                "### 2026-10-02 09:00 · b",
+                "### 2026-10-04 09:00 · [auto]",
+                "### 2026-10-05 09:00 · b · [auto]",
+            ]
+        );
+        assert_eq!(
+            heads(context_sessions(note, 1)),
+            ["### 2026-10-02 09:00 · b"]
+        );
+        assert!(context_sessions(note, 0).is_empty());
+        assert_eq!(context_sessions(note, 5), latest_sessions(note, 5));
+        assert_eq!(context_sessions(NOTE, 3), latest_sessions(NOTE, 3));
+        let only_auto = "## Sessions\n### 2026-10-03 09:00 · [auto]\n### 2026-10-04 09:00 · [auto]\n### 2026-10-05 09:00 · [auto]\n";
+        assert_eq!(
+            context_sessions(only_auto, 2),
+            latest_sessions(only_auto, 2)
         );
     }
 

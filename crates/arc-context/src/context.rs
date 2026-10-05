@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::branch::canonical_branch;
 use crate::resolve::{ResolvedStory, Via};
-use crate::sessions::latest_sessions;
+use crate::sessions::context_sessions;
 
 pub const SESSION_COUNT: usize = 3;
 
@@ -131,7 +131,7 @@ pub(crate) fn assemble(
         canonical_branch: canonical,
         sessions: note
             .as_ref()
-            .map(|(_, body)| latest_sessions(body, SESSION_COUNT))
+            .map(|(_, body)| context_sessions(body, SESSION_COUNT))
             .unwrap_or_default(),
         open_todos: note
             .as_ref()
