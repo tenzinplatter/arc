@@ -1,7 +1,4 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::{env, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -77,9 +74,9 @@ impl Config {
             anyhow::bail!("editor not set in config and $EDITOR is not set");
         }
 
-        let notes_dir = expand_tilde(&PathBuf::from(&config.notes_dir));
-        let cache_dir = expand_tilde(&PathBuf::from(&config.cache_dir));
-        let repositories_directory = expand_tilde(Path::new(&config.repositories_directory));
+        let notes_dir = expand_tilde(&config.notes_dir)?;
+        let cache_dir = expand_tilde(&config.cache_dir)?;
+        let repositories_directory = expand_tilde(&config.repositories_directory)?;
 
         Ok(Config {
             notes_dir,
@@ -105,8 +102,10 @@ impl Config {
     }
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
-    PathBuf::from(shellexpand::full(path.to_str().unwrap()).unwrap().into_owned())
+fn expand_tilde(path: &str) -> anyhow::Result<PathBuf> {
+    let expanded =
+        shellexpand::full(path).with_context(|| format!("can't expand config path '{path}'"))?;
+    Ok(PathBuf::from(expanded.into_owned()))
 }
 
 fn default_cache_dir() -> PathBuf {
