@@ -17,7 +17,7 @@ use slugify::slugify;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use arc_context::{NoteLinks, StoryNote};
+use arc_context::{EntryText, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
@@ -62,6 +62,9 @@ struct AppendNoteArgs {
     path: Option<String>,
     /// Markdown appended below the note's current content.
     content: String,
+    /// Optional `## ` section to append under, by its heading text without the `#`s (e.g. `Log`). The content goes at the end of that section, which is created at the end of the note if missing. Omit to append at the end of the note.
+    #[serde(default)]
+    section: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -83,6 +86,71 @@ struct CreateStoryNoteArgs {
     body: String,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoryIdInput {
+    Number(i64),
+    Text(String),
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(try_from = "StoryIdInput")]
+struct StoryRef(StoryId);
+
+impl TryFrom<StoryIdInput> for StoryRef {
+    type Error = anyhow::Error;
+
+    fn try_from(input: StoryIdInput) -> Result<Self> {
+        match input {
+            StoryIdInput::Number(n) => n.to_string().parse(),
+            StoryIdInput::Text(s) => s.trim().parse(),
+        }
+        .map(Self)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct LogSessionArgs {
+    /// Shortcut story id, as a number (`123`) or a string (`"sc-123"`). Defaults to the story resolved from the git branch of the server's working directory (an `sc-<id>` in the branch name, or a story note listing the branch under `branches:`).
+    #[serde(default)]
+    #[schemars(schema_with = "optional_story_id_schema")]
+    story_id: Option<StoryRef>,
+    /// What this session got done.
+    done: String,
+    /// Where things stand now: what works, what's half-done, anything uncommitted or broken.
+    state: String,
+    /// The next concrete steps for whoever picks this up.
+    next: String,
+    /// Unresolved questions or decisions, if any.
+    #[serde(default)]
+    questions: Option<String>,
+}
+
+fn optional_story_id_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": ["integer", "string", "null"] })
+}
+
+fn entry_field(name: &str, text: &str) -> Result<EntryText> {
+    EntryText::parse(text).map_err(|e| anyhow!("`{name}`: {e}"))
+}
+
+impl LogSessionArgs {
+    fn into_parts(self) -> Result<(Option<StoryId>, Handoff)> {
+        let handoff = Handoff {
+            done: entry_field("done", &self.done)?,
+            state: entry_field("state", &self.state)?,
+            next: entry_field("next", &self.next)?,
+            questions: self
+                .questions
+                .as_deref()
+                .filter(|q| !q.trim().is_empty())
+                .map(|q| entry_field("questions", q))
+                .transpose()?,
+        };
+        Ok((self.story_id.map(|StoryRef(id)| id), handoff))
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct AddTodoArgs {
     /// Todo text.
@@ -94,9 +162,8 @@ struct AddTodoArgs {
 
 #[derive(Clone)]
 pub struct ArcMcp {
-    cache_dir: PathBuf,
-    notes_dir: PathBuf,
-    api_token: String,
+    config: Config,
+    cwd: PathBuf,
     client: Arc<OnceCell<ApiClient>>,
     lookups_refreshed: Arc<AtomicBool>,
 }
@@ -112,11 +179,10 @@ macro_rules! tool_try {
 
 #[tool_router]
 impl ArcMcp {
-    pub fn new(cache_dir: PathBuf, notes_dir: PathBuf, api_token: String) -> Self {
+    pub fn new(config: Config, cwd: PathBuf) -> Self {
         Self {
-            cache_dir,
-            notes_dir,
-            api_token,
+            config,
+            cwd,
             client: Arc::new(OnceCell::new()),
             lookups_refreshed: Arc::new(AtomicBool::new(false)),
         }
@@ -135,7 +201,7 @@ impl ArcMcp {
                     .any(|s| s.workflow_state_id.is_some() && c.state_name(s.workflow_state_id).is_none())
             })
             .await;
-        let cache_dir = self.cache_dir.clone();
+        let cache_dir = self.config.cache_dir.clone();
         let json = tokio::task::spawn_blocking(move || -> Result<String> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             Ok(slim_stories(&cache, &conn)?.to_string())
@@ -166,7 +232,7 @@ impl ArcMcp {
             )));
         };
         let lookup_note = self.lookups(&mut cache, |c| lookup_miss(c, &story)).await;
-        let cache_dir = self.cache_dir.clone();
+        let cache_dir = self.config.cache_dir.clone();
         let json = tokio::task::spawn_blocking(move || -> Result<String> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             let note = arc_index::note_for_story(&conn, story_id)?.map(|p| p.to_string());
@@ -185,7 +251,7 @@ impl ArcMcp {
         Parameters(StoryIdArgs { story_id }): Parameters<StoryIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let story_id = StoryId::from(story_id);
-        let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
+        let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let found = tokio::task::spawn_blocking(move || -> Result<Option<(NoteRelPath, String)>> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             arc_index::story_note(&conn, &notes_dir, story_id)
@@ -208,7 +274,7 @@ impl ArcMcp {
         &self,
         Parameters(QueryArgs { sql }): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let cache_dir = self.cache_dir.clone();
+        let cache_dir = self.config.cache_dir.clone();
         let rows_truncated = tokio::task::spawn_blocking(move || -> Result<(String, bool)> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             arc_index::query_capped(&conn, &arc_index::ReadOnlySql::parse(&sql)?, QUERY_ROW_CAP)
@@ -228,7 +294,7 @@ impl ArcMcp {
         &self,
         Parameters(GetNoteArgs { id, path }): Parameters<GetNoteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
+        let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let body = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             let rel = resolve_note(&conn, NoteRef::from_args(id, path)?)?;
@@ -243,25 +309,31 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Append Markdown to an existing note (by notes-dir-relative `path`, or Obsidian `id`). Use this to persist context or progress into a note. Non-destructive — content is added below what's already there."
+        description = "Append Markdown to an existing note (by notes-dir-relative `path`, or Obsidian `id`). Use this to persist context or progress into a note. Non-destructive — content is added below what's already there, or at the end of the `## ` section named by `section` (created if missing). For session handoffs on the current story use `log_session`."
     )]
     async fn append_note(
         &self,
-        Parameters(AppendNoteArgs { id, path, content }): Parameters<AppendNoteArgs>,
+        Parameters(AppendNoteArgs { id, path, content, section }): Parameters<AppendNoteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
-        let rel = tokio::task::spawn_blocking(move || -> Result<NoteRelPath> {
+        let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
+        let appended = tokio::task::spawn_blocking(move || -> Result<String> {
+            let section = section.as_deref().map(SectionHeading::parse).transpose()?;
             let conn = arc_index::open(&cache_dir)?;
             let rel = resolve_note(&conn, NoteRef::from_args(id, path)?)?;
-            append_note(&conn, &notes_dir, &rel, &content)?;
-            Ok(rel)
+            Ok(match section {
+                Some(heading) => {
+                    append_note_section(&conn, &notes_dir, &rel, &content, &heading)?;
+                    format!("appended to {rel} under {heading}")
+                }
+                None => {
+                    append_note(&conn, &notes_dir, &rel, &content)?;
+                    format!("appended to {rel}")
+                }
+            })
         })
         .await
         .map_err(internal)?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "appended to {}",
-            tool_try!(rel)
-        ))]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(tool_try!(appended))]))
     }
 
     #[tool(
@@ -271,7 +343,7 @@ impl ArcMcp {
         &self,
         Parameters(CreateNoteArgs { title, body, tags }): Parameters<CreateNoteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
+        let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let created = tokio::task::spawn_blocking(move || {
             let conn = arc_index::open(&cache_dir)?;
             create_note(&conn, &notes_dir, &title, &body, tags)
@@ -302,7 +374,7 @@ impl ArcMcp {
         };
         let links = NoteLinks::for_story(&cache, &story);
 
-        let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
+        let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let created = tokio::task::spawn_blocking(move || {
             let conn = arc_index::open(&cache_dir)?;
             arc_context::create_story_note(&conn, &notes_dir, &story, links, &body)
@@ -310,6 +382,40 @@ impl ArcMcp {
         .await
         .map_err(internal)?;
         Ok(story_note_result(story_id, tool_try!(created)))
+    }
+
+    #[tool(
+        description = "Record a session handoff on a Shortcut story: appends a `### <local time> · <branch>` entry with Done / State / Next / Open questions to the end of the story note's `## Sessions` section, creating the section (and the story note) if missing. Use it at milestones and always before ending a session — it captures where things stand so the next session can pick up from it. The story defaults to the one resolved from the git branch of the server's working directory; pass `story_id` for any other story. Returns the note path and the entry heading."
+    )]
+    async fn log_session(
+        &self,
+        Parameters(args): Parameters<LogSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (story, handoff) = tool_try!(args.into_parts());
+        let mut cache = self.read_cache().await;
+        let logged = tool_try!(
+            arc_context::log_session(&self.cwd, &self.config, &mut cache, story, handoff)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        );
+        Ok(logged_result(&logged))
+    }
+
+    #[tool(
+        description = "The Shortcut story for the git branch of the server's working directory, as JSON: story id, name, state, type and url; the branch and how it resolved to the story; the canonical branch name; the story note path; the latest `## Sessions` handoff entries; and the note's open todos. Same payload as `arc context --format json` — use it when the context shown at session start has scrolled away. Returns a plain message, not an error, when no story resolves for the branch."
+    )]
+    async fn current_story(&self) -> Result<CallToolResult, ErrorData> {
+        let mut cache = self.read_cache().await;
+        let context = tool_try!(
+            arc_context::current_context(&self.cwd, &self.config, &mut cache)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        );
+        let text = match context {
+            Some(context) => tool_try!(serde_json::to_string_pretty(&context)),
+            None => format!("no story for this branch (working directory {})", self.cwd.display()),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
@@ -333,13 +439,13 @@ impl ArcMcp {
             source: TodoSource::Manual,
         };
         let updated = tool_try!(
-            arc_notes::todos::transform_with_lock(&self.cache_dir, move |list| {
+            arc_notes::todos::transform_with_lock(&self.config.cache_dir, move |list| {
                 list.into_iter().chain([todo]).collect()
             })
             .await
         );
 
-        let cache_dir = self.cache_dir.clone();
+        let cache_dir = self.config.cache_dir.clone();
         let mirrored = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = arc_index::open(&cache_dir)?;
             arc_index::mirror_todos(&mut conn, &updated)
@@ -354,14 +460,14 @@ impl ArcMcp {
 impl ArcMcp {
     async fn read_cache(&self) -> Cache {
         // a missing cache file defaults to ~/.cache/arc; writes must go to ours
-        Cache::read(self.cache_dir.clone())
+        Cache::read(self.config.cache_dir.clone())
             .await
-            .with_cache_dir(self.cache_dir.clone())
+            .with_cache_dir(self.config.cache_dir.clone())
     }
 
     async fn client(&self, cache: &mut Cache) -> Result<ApiClient> {
         self.client
-            .get_or_try_init(|| timed(ApiClient::from_token_and_cache(&self.api_token, cache)))
+            .get_or_try_init(|| timed(ApiClient::from_token_and_cache(&self.config.api_token, cache)))
             .await
             .cloned()
     }
@@ -417,6 +523,15 @@ fn story_note_result(story_id: StoryId, note: StoryNote) -> CallToolResult {
             "story {story_id} already has a note at '{rel}'; use append_note"
         )),
     }
+}
+
+fn logged_result(logged: &LoggedSession) -> CallToolResult {
+    let summary = format!("path: {}\nentry: {}", logged.note.rel(), logged.entry.header());
+    let created = match &logged.note {
+        StoryNote::Created { rel, .. } => Some(format!("note: created {rel} for story {}", logged.story)),
+        StoryNote::Existing(_) => None,
+    };
+    with_notes(summary, created)
 }
 
 fn with_notes(text: String, notes: impl IntoIterator<Item = String>) -> CallToolResult {
@@ -527,14 +642,37 @@ fn resolve_note(conn: &Connection, note: NoteRef) -> Result<NoteRelPath> {
     }
 }
 
-fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
+fn rewrite_note(
+    conn: &Connection,
+    notes_dir: &Path,
+    rel: &NoteRelPath,
+    edit: impl FnOnce(&str) -> String,
+) -> Result<()> {
     let existing = arc_index::read_note(notes_dir, rel)?
         .ok_or_else(|| anyhow!("no note at '{rel}'"))?;
-    let separator = if existing.ends_with('\n') { "\n" } else { "\n\n" };
-    let body = format!("{existing}{separator}{}\n", content.trim_end());
+    let body = edit(&existing);
     std::fs::write(rel.abs(notes_dir), &body)?;
     arc_index::reindex_note(conn, rel, &body)?;
     Ok(())
+}
+
+fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
+    rewrite_note(conn, notes_dir, rel, |existing| {
+        let separator = if existing.ends_with('\n') { "\n" } else { "\n\n" };
+        format!("{existing}{separator}{}\n", content.trim_end())
+    })
+}
+
+fn append_note_section(
+    conn: &Connection,
+    notes_dir: &Path,
+    rel: &NoteRelPath,
+    content: &str,
+    heading: &SectionHeading,
+) -> Result<()> {
+    rewrite_note(conn, notes_dir, rel, |existing| {
+        arc_context::append_to_section(existing, heading, content)
+    })
 }
 
 fn create_note(
@@ -575,9 +713,13 @@ impl ServerHandler for ArcMcp {
              `active_stories` (slim list of the current iterations), `get_story` (full \
              detail incl. description and comments), `get_story_note` (a story's note). \
              Notes: `query` (read-only SQL over notes, tags, branches, todos), `get_note` \
-             (full Markdown by path or id), `append_note` to add context to a note, \
-             `create_note` for a new note, `create_story_note` for a note linked to a \
-             story, `add_todo` for a todo. `active_stories` lists what the arc TUI last \
+             (full Markdown by path or id), `append_note` to add context to a note (optionally \
+             under a `## ` `section`), `create_note` for a new note, `create_story_note` for a \
+             note linked to a story, `add_todo` for a todo. Current work: `current_story` \
+             returns the story for the git branch of this server's working directory (story, \
+             note, recent `## Sessions` handoffs, open todos); `log_session` records a handoff \
+             (done / state / next / open questions) in that story's note — call it at milestones \
+             and before ending a session. `active_stories` lists what the arc TUI last \
              cached for the current iteration(s) and may be stale (use the Shortcut MCP \
              for live search); `get_story` refetches the story from Shortcut, falling back \
              to the cache when it's unreachable. Shortcut writes (creating stories, state changes, \
@@ -590,11 +732,7 @@ pub async fn run_stdio(config: &Config) -> Result<()> {
     // created up front so read-only opens work before the daemon's first run
     arc_index::open(&config.cache_dir)?;
 
-    let server = ArcMcp::new(
-        config.cache_dir.clone(),
-        config.notes_dir.clone(),
-        config.api_token.clone(),
-    );
+    let server = ArcMcp::new(config.clone(), std::env::current_dir()?);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -835,4 +973,199 @@ mod tests {
             ])
         );
     }
+
+    fn config_in(root: &Path) -> Config {
+        Config {
+            notes_dir: root.join("notes"),
+            cache_dir: root.join("cache"),
+            api_token: String::new(),
+            editor: String::new(),
+            repositories_directory: root.to_path_buf(),
+            mux: Default::default(),
+        }
+    }
+
+    fn git_repo_on(root: &Path, branch: &str) -> Option<PathBuf> {
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir).args(args).output()
+        };
+        if git(root, &["--version"]).is_err() {
+            eprintln!("git not found; skipping");
+            return None;
+        }
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [vec!["init", "-q"], vec!["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]] {
+            assert!(git(&repo, &args).unwrap().status.success(), "git {args:?}");
+        }
+        Some(repo)
+    }
+
+    async fn server_with_story(root: &Path, cwd: PathBuf) -> ArcMcp {
+        let config = config_in(root);
+        let mut cache = Cache::default().with_cache_dir(config.cache_dir.clone());
+        cache.upsert_story(story(7, "Story seven"));
+        cache.write().await.unwrap();
+        ArcMcp::new(config, cwd)
+    }
+
+    fn result_texts(result: &CallToolResult) -> (bool, Vec<String>) {
+        let v = serde_json::to_value(result).unwrap();
+        let texts = v["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["text"].as_str().unwrap().to_owned())
+            .collect();
+        (v["isError"] == true, texts)
+    }
+
+    fn log_args(v: Value) -> Parameters<LogSessionArgs> {
+        Parameters(serde_json::from_value(v).unwrap())
+    }
+
+    #[test]
+    fn story_ids_parse_from_numbers_and_strings() {
+        let id = |v: Value| serde_json::from_value::<StoryRef>(v).map(|StoryRef(id)| id.get()).ok();
+        assert_eq!(id(json!(7)), Some(7));
+        assert_eq!(id(json!("sc-7")), Some(7));
+        assert_eq!(id(json!(" SC-7 ")), Some(7));
+        assert_eq!(id(json!("7")), Some(7));
+        assert_eq!(id(json!(0)), None);
+        assert_eq!(id(json!(-3)), None);
+        assert_eq!(id(json!("x")), None);
+        assert_eq!(id(json!(1.5)), None);
+    }
+
+    #[test]
+    fn log_session_args_reject_empty_fields() {
+        let args = |v: Value| serde_json::from_value::<LogSessionArgs>(v).unwrap().into_parts();
+        let err = args(json!({"done": " ", "state": "s", "next": "n"})).unwrap_err();
+        assert_eq!(err.to_string(), "`done`: empty session field");
+        let (story, handoff) = args(json!({"story_id": "sc-3", "done": "d", "state": "s", "next": "n", "questions": "  "})).unwrap();
+        assert_eq!(story, Some(3.into()));
+        assert_eq!(handoff.questions, None);
+    }
+
+    #[test]
+    fn new_tools_are_registered_with_their_schemas() {
+        let tools = ArcMcp::tool_router().list_all();
+        let tool = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+        let log = serde_json::to_value(&tool("log_session").input_schema).unwrap();
+        assert_eq!(log["required"], json!(["done", "state", "next"]));
+        assert_eq!(log["properties"]["story_id"]["type"], json!(["integer", "string", "null"]));
+        let current = serde_json::to_value(&tool("current_story").input_schema).unwrap();
+        assert_eq!(current["properties"], json!({}));
+        let append = serde_json::to_value(&tool("append_note").input_schema).unwrap();
+        assert_eq!(append["required"], json!(["content"]));
+        assert!(append["properties"]["section"].is_object());
+    }
+
+    #[tokio::test]
+    async fn log_session_by_explicit_id_creates_the_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mcp = server_with_story(tmp.path(), outside.path().to_path_buf()).await;
+        let result = mcp
+            .log_session(log_args(json!({"story_id": "sc-7", "done": "a\nb", "state": "s", "next": "n", "questions": "q"})))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&result);
+        assert!(!is_error, "{texts:?}");
+        let [summary, created] = texts.as_slice() else { panic!("{texts:?}") };
+        assert_eq!(created, "note: created stories/story-seven.md for story 7");
+        let (path, header) = summary.split_once("\nentry: ").unwrap();
+        assert_eq!(path, "path: stories/story-seven.md");
+        assert!(header.starts_with("### ") && !header.contains(" · "), "{header}");
+        let body = std::fs::read_to_string(tmp.path().join("notes/stories/story-seven.md")).unwrap();
+        assert!(
+            body.ends_with(&format!("# Story seven\n\n## Sessions\n\n{header}\n**Done:** a\n    b\n**State:** s\n**Next:** n\n**Open questions:** q\n")),
+            "{body}"
+        );
+        let conn = arc_index::open_readonly(&tmp.path().join("cache")).unwrap();
+        assert_eq!(arc_index::note_for_story(&conn, 7.into()).unwrap(), Some(rel("stories/story-seven.md")));
+    }
+
+    #[tokio::test]
+    async fn log_session_resolves_the_story_from_the_cwd_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = git_repo_on(tmp.path(), "me/sc-7/x") else { return };
+        let mcp = server_with_story(tmp.path(), repo).await;
+        let conn = arc_index::open(&tmp.path().join("cache")).unwrap();
+        arc_context::create_story_note(&conn, &tmp.path().join("notes"), &story(7, "Story seven"), NoteLinks::default(), "b").unwrap();
+        let result = mcp
+            .log_session(log_args(json!({"done": "d", "state": "s", "next": "n"})))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&result);
+        assert!(!is_error, "{texts:?}");
+        let [summary] = texts.as_slice() else { panic!("{texts:?}") };
+        assert!(summary.starts_with("path: stories/story-seven.md\nentry: ### "), "{summary}");
+        assert!(summary.ends_with(" · me/sc-7/x"), "{summary}");
+        let body = std::fs::read_to_string(tmp.path().join("notes/stories/story-seven.md")).unwrap();
+        assert_eq!(arc_context::latest_sessions(&body, 3).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn log_session_without_a_story_is_a_tool_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mcp = server_with_story(tmp.path(), outside.path().to_path_buf()).await;
+        let result = mcp
+            .log_session(log_args(json!({"done": "d", "state": "s", "next": "n"})))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&result);
+        assert!(is_error);
+        assert!(texts[0].contains("pass a story id"), "{texts:?}");
+    }
+
+    #[tokio::test]
+    async fn current_story_reports_the_context_or_says_there_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mcp = server_with_story(tmp.path(), outside.path().to_path_buf()).await;
+        let (is_error, texts) = result_texts(&mcp.current_story().await.unwrap());
+        assert!(!is_error);
+        assert!(texts[0].starts_with("no story for this branch"), "{texts:?}");
+
+        let Some(repo) = git_repo_on(tmp.path(), "me/sc-7/x") else { return };
+        let mcp = ArcMcp::new(config_in(tmp.path()), repo.clone());
+        mcp.log_session(log_args(json!({"done": "d", "state": "s", "next": "n"})))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&mcp.current_story().await.unwrap());
+        assert!(!is_error, "{texts:?}");
+        let mut cache = mcp.read_cache().await;
+        let expected = arc_context::current_context(&repo, &mcp.config, &mut cache).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&texts[0]).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(expected.note, Some(rel("stories/story-seven.md")));
+        assert_eq!(expected.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn append_note_tool_appends_under_a_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::new(config_in(tmp.path()), tmp.path().to_path_buf());
+        let conn = arc_index::open(&tmp.path().join("cache")).unwrap();
+        create_note(&conn, &tmp.path().join("notes"), "N", "body", vec![]).unwrap();
+        let append = |content: &str, section: Option<&str>| {
+            mcp.append_note(Parameters(AppendNoteArgs {
+                id: None,
+                path: Some("n.md".into()),
+                content: content.into(),
+                section: section.map(Into::into),
+            }))
+        };
+        let (_, texts) = result_texts(&append("- one", Some("Log")).await.unwrap());
+        assert_eq!(texts, vec!["appended to n.md under ## Log"]);
+        let (_, texts) = result_texts(&append("tail", None).await.unwrap());
+        assert_eq!(texts, vec!["appended to n.md"]);
+        append("- two", Some("## Log")).await.unwrap();
+        let (is_error, texts) = result_texts(&append("x", Some(" ")).await.unwrap());
+        assert!(is_error, "{texts:?}");
+        let body = std::fs::read_to_string(tmp.path().join("notes/n.md")).unwrap();
+        assert!(body.ends_with("# N\n\nbody\n\n## Log\n\n- one\n\ntail\n\n- two\n"), "{body}");
+    }
+
 }
