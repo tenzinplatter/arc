@@ -3,13 +3,15 @@ use std::str::FromStr;
 
 use anyhow::bail;
 use arc_notes::BranchName;
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, Timelike};
 
 use crate::section::{SectionHeading, append_to_section, classify, section};
 
 const ENTRY_PREFIX: &str = "### ";
 const BRANCH_SEPARATOR: &str = " · ";
-const TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
+const TIME_FORMAT: &str = "%Y-%m-%d %H:%M %:z";
+const OFFSET_FORMATS: [&str; 2] = [TIME_FORMAT, "%Y-%m-%d %H:%M %z"];
+const LOCAL_FORMAT: &str = "%Y-%m-%d %H:%M";
 const CONTINUATION_INDENT: &str = "    ";
 
 fn starts_entry(line: &str) -> bool {
@@ -47,12 +49,15 @@ pub fn latest_sessions(note: &str, count: usize) -> Vec<String> {
     entries.split_off(skip)
 }
 
-pub fn latest_session_at(note: &str) -> Option<NaiveDateTime> {
+pub fn latest_session_at(note: &str) -> Option<SessionTime> {
     entries(note)
         .iter()
         .filter_map(|entry| SessionTime::from_header(entry.lines().next()?))
-        .map(SessionTime::get)
         .max()
+}
+
+pub fn activity_since(latest: SessionTime, activity: DateTime<FixedOffset>) -> bool {
+    SessionTime::new(activity) > latest
 }
 
 pub fn append_session(note: &str, entry: &SessionEntry) -> String {
@@ -60,10 +65,10 @@ pub fn append_session(note: &str, entry: &SessionEntry) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SessionTime(NaiveDateTime);
+pub struct SessionTime(DateTime<FixedOffset>);
 
 impl SessionTime {
-    pub fn new(at: NaiveDateTime) -> Self {
+    pub fn new(at: DateTime<FixedOffset>) -> Self {
         Self(
             at.with_second(0)
                 .and_then(|at| at.with_nanosecond(0))
@@ -72,10 +77,10 @@ impl SessionTime {
     }
 
     pub fn now() -> Self {
-        Self::new(arc_core::time::now_naive())
+        Self::new(arc_core::time::now())
     }
 
-    pub fn get(self) -> NaiveDateTime {
+    pub fn get(self) -> DateTime<FixedOffset> {
         self.0
     }
 
@@ -83,10 +88,17 @@ impl SessionTime {
         let stamp = line
             .strip_prefix(ENTRY_PREFIX)?
             .split(BRANCH_SEPARATOR)
-            .next()?;
-        NaiveDateTime::parse_from_str(stamp.trim(), TIME_FORMAT)
-            .ok()
-            .map(Self)
+            .next()?
+            .trim();
+        OFFSET_FORMATS
+            .iter()
+            .find_map(|format| DateTime::parse_from_str(stamp, format).ok())
+            .or_else(|| {
+                NaiveDateTime::parse_from_str(stamp, LOCAL_FORMAT)
+                    .ok()
+                    .map(arc_core::time::assume_local)
+            })
+            .map(Self::new)
     }
 }
 
@@ -185,7 +197,15 @@ mod tests {
     }
 
     fn at(s: &str) -> SessionTime {
-        SessionTime::new(NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap())
+        SessionTime::new(
+            DateTime::parse_from_str(&format!("{s} +10:00"), "%Y-%m-%d %H:%M:%S %:z").unwrap(),
+        )
+    }
+
+    fn local(s: &str) -> SessionTime {
+        SessionTime::new(arc_core::time::assume_local(
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(),
+        ))
     }
 
     fn entry(stamp: &str, branch: Option<&str>, questions: Option<&str>) -> SessionEntry {
@@ -201,7 +221,7 @@ mod tests {
         }
     }
 
-    const FULL: &str = "### 2026-10-05 14:32 · tenzin/sc-16727/optical-flow\n**Done:** wired the flow\n**State:** tests green\n**Next:** tune the threshold\n**Open questions:** which camera?";
+    const FULL: &str = "### 2026-10-05 14:32 +10:00 · tenzin/sc-16727/optical-flow\n**Done:** wired the flow\n**State:** tests green\n**Next:** tune the threshold\n**Open questions:** which camera?";
 
     #[test]
     fn golden_entry_rendering() {
@@ -213,11 +233,11 @@ mod tests {
         assert_eq!(full.to_string(), FULL);
         assert_eq!(
             full.header(),
-            "### 2026-10-05 14:32 · tenzin/sc-16727/optical-flow"
+            "### 2026-10-05 14:32 +10:00 · tenzin/sc-16727/optical-flow"
         );
         assert_eq!(
             entry("2026-10-05 09:05:00", None, None).to_string(),
-            "### 2026-10-05 09:05\n**Done:** wired the flow\n**State:** tests green\n**Next:** tune the threshold"
+            "### 2026-10-05 09:05 +10:00\n**Done:** wired the flow\n**State:** tests green\n**Next:** tune the threshold"
         );
     }
 
@@ -230,7 +250,7 @@ mod tests {
         e.handoff.next = text("one line");
         assert_eq!(
             e.to_string(),
-            "### 2026-10-05 14:32\n**Done:** first\n    ## Injected\n    ### 2026-01-01 00:00 · fake\n    ```\n    # x\n      - item\n**State:** tests green\n**Next:** one line"
+            "### 2026-10-05 14:32 +10:00\n**Done:** first\n    ## Injected\n    ### 2026-01-01 00:00 · fake\n    ```\n    # x\n      - item\n**State:** tests green\n**Next:** one line"
         );
         let note = append_session("# S\n## Sessions\n", &e);
         let note = append_session(&note, &entry("2026-10-05 15:00:00", None, None));
@@ -238,10 +258,7 @@ mod tests {
         let sessions = latest_sessions(&note, 5);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0], e.to_string());
-        assert_eq!(
-            latest_session_at(&note),
-            Some(at("2026-10-05 15:00:00").get())
-        );
+        assert_eq!(latest_session_at(&note), Some(at("2026-10-05 15:00:00")));
         assert!(EntryText::parse(" \n\t\n").is_err());
         assert!("".parse::<EntryText>().is_err());
     }
@@ -312,10 +329,7 @@ mod tests {
             latest_sessions(&note, 5),
             entries.iter().map(ToString::to_string).collect::<Vec<_>>()
         );
-        assert_eq!(
-            latest_session_at(&note),
-            Some(at("2026-10-05 11:30:00").get())
-        );
+        assert_eq!(latest_session_at(&note), Some(at("2026-10-05 11:30:00")));
     }
 
     #[test]
@@ -323,13 +337,10 @@ mod tests {
         assert_eq!(latest_session_at(NOTE), None);
         assert_eq!(latest_session_at("# S\n"), None);
         let note = "## Sessions\n### 2026-10-05 14:32 · b\n### garbage\n### 2026-10-04\n### 2026-13-01 10:00\n```\n### 2026-12-01 10:00\n```\n## Later\n### 2026-12-02 10:00\n";
-        assert_eq!(
-            latest_session_at(note),
-            Some(at("2026-10-05 14:32:00").get())
-        );
+        assert_eq!(latest_session_at(note), Some(local("2026-10-05 14:32")));
         assert_eq!(
             latest_session_at("## Sessions\n###  2026-10-05 08:01  \n"),
-            Some(at("2026-10-05 08:01:00").get())
+            Some(local("2026-10-05 08:01"))
         );
     }
 
@@ -432,5 +443,58 @@ mod tests {
         let note = append_session("## Sessions\n", &e);
         assert_eq!(latest_sessions(&note, 5), vec![e.to_string()]);
         assert!(!note.contains('\r'));
+    }
+
+    #[test]
+    fn session_times_compare_across_offsets() {
+        let note = "## Sessions\n### 2026-10-05 14:32 +10:00 · a\n### 2026-10-05 04:00 +00:00\n### 2026-10-05 01:00 -03:00\n### 2026-10-05 14:00 +1000\n";
+        assert_eq!(latest_session_at(note), Some(at("2026-10-05 14:32:00")));
+        let late = "## Sessions\n### 2026-10-05 14:32 +10:00\n### 2026-10-05 04:40 +00:00\n";
+        assert_eq!(
+            latest_session_at(late).unwrap().to_string(),
+            "2026-10-05 04:40 +00:00"
+        );
+    }
+
+    #[test]
+    fn activity_counts_only_from_the_next_minute() {
+        let latest = at("2026-10-05 14:32:00");
+        let activity = |s: &str| DateTime::parse_from_rfc3339(s).unwrap();
+        assert!(!activity_since(
+            latest,
+            activity("2026-10-05T14:32:59+10:00")
+        ));
+        assert!(!activity_since(latest, activity("2026-10-05T04:32:30Z")));
+        assert!(!activity_since(
+            latest,
+            activity("2026-10-05T14:31:00+10:00")
+        ));
+        assert!(activity_since(
+            latest,
+            activity("2026-10-05T14:33:00+10:00")
+        ));
+        assert!(activity_since(latest, activity("2026-10-05T04:33:00Z")));
+        assert!(!activity_since(
+            latest,
+            activity("2026-10-05T02:33:00+02:00")
+        ));
+        assert!(activity_since(
+            latest,
+            activity("2026-10-04T23:33:00-05:00")
+        ));
+    }
+
+    #[test]
+    fn headers_without_an_offset_are_local_time() {
+        let note = "## Sessions\n### 2026-10-05 14:32 · b\n";
+        assert_eq!(latest_session_at(note), Some(local("2026-10-05 14:32")));
+        assert_eq!(
+            latest_session_at(note)
+                .unwrap()
+                .get()
+                .naive_local()
+                .to_string(),
+            "2026-10-05 14:32:00"
+        );
     }
 }

@@ -385,7 +385,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Record a session handoff on a Shortcut story: appends a `### <local time> · <branch>` entry with Done / State / Next / Open questions to the end of the story note's `## Sessions` section, creating the section (and the story note) if missing. Use it at milestones and always before ending a session — it captures where things stand so the next session can pick up from it. The story defaults to the one resolved from the git branch of the server's working directory; pass `story_id` for any other story. Returns the note path and the entry heading."
+        description = "Record a session handoff on a Shortcut story: appends a `### <local time> <UTC offset> · <branch>` entry with Done / State / Next / Open questions to the end of the story note's `## Sessions` section, creating the section (and the story note) if missing. Use it at milestones and always before ending a session — it captures where things stand so the next session can pick up from it. The story defaults to the one resolved from the git branch of the server's working directory; pass `story_id` for any other story. Returns the note path and the entry heading."
     )]
     async fn log_session(
         &self,

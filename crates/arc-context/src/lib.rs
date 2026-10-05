@@ -25,8 +25,8 @@ pub use note::{
 pub use resolve::{ResolvedStory, Via, resolve};
 pub use section::{Newline, SectionHeading, append_to_end, append_to_section};
 pub use sessions::{
-    EntryText, Handoff, SessionEntry, SessionTime, append_session, latest_session_at,
-    latest_sessions,
+    EntryText, Handoff, SessionEntry, SessionTime, activity_since, append_session,
+    latest_session_at, latest_sessions,
 };
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 
