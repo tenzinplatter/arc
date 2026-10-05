@@ -29,10 +29,7 @@ impl WidgetRef for EpicListView<'_> {
         render_search_bar(self.state, chunks[0], buf);
         let query = &self.state.search_query;
 
-        let visible: Vec<EpicSlim> = filter_items(self.epics, query)
-            .into_iter()
-            .cloned()
-            .collect();
+        let visible = filter_items(self.epics, query);
         let empty_msg = if query.is_empty() {
             "No epics."
         } else {

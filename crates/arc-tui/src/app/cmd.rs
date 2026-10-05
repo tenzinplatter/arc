@@ -10,6 +10,7 @@ use arc_notes::{Checkbox, NoteDir, NoteRelPath};
 
 use crate::{
     api::{epic::EpicSlim, iteration::Iteration, story::Story},
+    error::ErrorInfo,
     note::frontmatter::Frontmatter,
     tmux, zellij,
 };
@@ -46,6 +47,19 @@ pub enum Cmd {
         text: String,
         to: Checkbox,
     },
+    ShowError(ErrorInfo),
+}
+
+impl Cmd {
+    pub fn open_iteration_note(iteration: Option<&Iteration>) -> Self {
+        match iteration {
+            Some(it) => Cmd::OpenNote(NoteToOpen::iteration(it)),
+            None => Cmd::ShowError(ErrorInfo::new(
+                "No iteration",
+                "This story has no associated iteration",
+            )),
+        }
+    }
 }
 
 pub fn open_in_editor(config: &Config, path: &Path) -> anyhow::Result<()> {

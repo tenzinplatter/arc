@@ -16,47 +16,46 @@ pub fn migrate() -> Result<()> {
     let old_notes_dir = read_confy_quoted_field(&old_config_file, "notes_dir")?;
     let old_cache_dir_in_config = read_confy_quoted_field(&old_config_file, "cache_dir")?;
 
-    let mut moved_anything = false;
-
-    if rename_if_present(&old_config_dir, &new_config_dir, "config dir")?.is_some() {
-        moved_anything = true;
+    let moved_config = rename_if_present(&old_config_dir, &new_config_dir, "config dir")?;
+    if moved_config {
         rewrite_paths_in_config(&new_config_dir.join("config.toml"))?;
     }
 
     let old_default_cache = home.join(".cache").join(OLD_NAME);
     let new_default_cache = home.join(".cache").join(NEW_NAME);
-    if rename_if_present(&old_default_cache, &new_default_cache, "cache dir")?.is_some() {
-        moved_anything = true;
-    }
+    let moved_default_cache =
+        rename_if_present(&old_default_cache, &new_default_cache, "cache dir")?;
 
-    if let Some(configured) = old_cache_dir_in_config.as_deref().filter(|p| p.contains(OLD_NAME)) {
-        let old_path = expand_tilde(configured);
-        let new_path = expand_tilde(&configured.replace(OLD_NAME, NEW_NAME));
-        if old_path != old_default_cache
-            && rename_if_present(&old_path, &new_path, "configured cache dir")?.is_some()
-        {
-            moved_anything = true;
+    let moved_configured_cache = match configured_rename(old_cache_dir_in_config.as_deref()) {
+        Some((old_path, new_path)) if old_path != old_default_cache => {
+            rename_if_present(&old_path, &new_path, "configured cache dir")?
         }
-    }
+        _ => false,
+    };
 
-    if let Some(configured) = old_notes_dir.as_deref().filter(|p| p.contains(OLD_NAME)) {
-        let old_path = expand_tilde(configured);
-        let new_path = expand_tilde(&configured.replace(OLD_NAME, NEW_NAME));
-        if rename_if_present(&old_path, &new_path, "notes dir")?.is_some() {
-            moved_anything = true;
-        }
-    }
+    let moved_notes = match configured_rename(old_notes_dir.as_deref()) {
+        Some((old_path, new_path)) => rename_if_present(&old_path, &new_path, "notes dir")?,
+        None => false,
+    };
 
-    if !moved_anything {
+    if !(moved_config || moved_default_cache || moved_configured_cache || moved_notes) {
         println!("Nothing to migrate.");
     }
 
     Ok(())
 }
 
-fn rename_if_present(old: &Path, new: &Path, label: &str) -> Result<Option<()>> {
+fn configured_rename(configured: Option<&str>) -> Option<(PathBuf, PathBuf)> {
+    let configured = configured.filter(|p| p.contains(OLD_NAME))?;
+    Some((
+        expand_tilde(configured),
+        expand_tilde(&configured.replace(OLD_NAME, NEW_NAME)),
+    ))
+}
+
+fn rename_if_present(old: &Path, new: &Path, label: &str) -> Result<bool> {
     if !old.exists() {
-        return Ok(None);
+        return Ok(false);
     }
     if new.exists() {
         anyhow::bail!(
@@ -67,7 +66,7 @@ fn rename_if_present(old: &Path, new: &Path, label: &str) -> Result<Option<()>> 
     fs::rename(old, new)
         .with_context(|| format!("Failed to rename {} -> {}", old.display(), new.display()))?;
     println!("Moved {} -> {}", old.display(), new.display());
-    Ok(Some(()))
+    Ok(true)
 }
 
 fn rewrite_paths_in_config(path: &Path) -> Result<()> {
@@ -92,20 +91,22 @@ fn read_confy_quoted_field(config_path: &Path, field: &str) -> Result<Option<Str
     }
     let contents = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix(field) else { continue };
-        let rest = rest.trim_start();
-        let Some(rest) = rest.strip_prefix('=') else { continue };
-        let rest = rest.trim();
-        if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            return Ok(Some(inner.to_string()));
-        }
+    Ok(contents
+        .lines()
+        .find_map(|line| quoted_value(line.trim(), field))
+        .map(str::to_string))
+}
+
+fn quoted_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    if line.starts_with('#') {
+        return None;
     }
-    Ok(None)
+    line.strip_prefix(field)?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim()
+        .strip_prefix('"')?
+        .strip_suffix('"')
 }
 
 fn expand_tilde(p: &str) -> PathBuf {

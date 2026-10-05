@@ -42,7 +42,7 @@ macro_rules! no_active_story {
 pub async fn run(terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
     let mut app = App::init().await?;
     app.main_loop(terminal).await?;
-    app.config.write()?;
+    app.model.config.write()?;
 
     Ok(())
 }

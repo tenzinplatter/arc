@@ -12,10 +12,9 @@ use crate::{
     api::story::Story,
     app::{
         cmd::{Cmd, NoteToOpen},
-        model::DataState,
         msg::ActionMenuMsg,
     },
-    error::ErrorInfo,
+    cache::Cache,
     navkey,
     view::ActionItemWidget,
 };
@@ -117,13 +116,7 @@ impl ActionMenuItem {
     }
 }
 
-pub fn update(
-    list: &mut ListState,
-    errors: &mut Vec<ErrorInfo>,
-    data_state: &DataState,
-    msg: ActionMenuMsg,
-    story: &Story,
-) -> Vec<Cmd> {
+pub fn update(list: &mut ListState, cache: &Cache, msg: ActionMenuMsg, story: &Story) -> Vec<Cmd> {
     let item_count = ActionMenuItem::ALL.len();
     let current = list.selected.unwrap_or(0);
 
@@ -138,64 +131,56 @@ pub fn update(
             vec![Cmd::None]
         }
 
-        ActionMenuMsg::Accept => {
-            let mut actions = match ActionMenuItem::from_idx(current) {
-                ActionMenuItem::OpenIterationNote => {
-                    match data_state.iteration_for(story) {
-                        Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
-                        None => {
-                            errors.push(ErrorInfo::new(
-                                "No iteration",
-                                "This story has no associated iteration",
-                            ));
-                            vec![Cmd::None]
-                        }
-                    }
-                }
-
-                ActionMenuItem::OpenNote => {
-                    let iteration_app_url =
-                        data_state.iteration_for(story).map(|it| it.app_url.clone());
-
-                    vec![Cmd::OpenNote(NoteToOpen::story(story, iteration_app_url))]
-                }
-
-                ActionMenuItem::EditDescription => {
-                    vec![Cmd::EditStoryContent {
-                        story_id: story.id,
-                        description: story.description.clone(),
-                    }]
-                }
-
-                ActionMenuItem::OpenTmux => {
-                    vec![Cmd::OpenTmuxSession {
-                        story_name: story.name.clone(),
-                    }]
-                }
-
-                ActionMenuItem::SetActive => {
-                    vec![Cmd::SelectStory(Some(story.clone())), Cmd::WriteCache]
-                }
-
-                ActionMenuItem::CreateGitWorktree => {
-                    vec![Cmd::CreateGitWorktree {
-                        branch_name: PLACEHOLDER_WORKTREE_BRANCH.to_string(),
-                    }]
-                }
-
-                ActionMenuItem::OpenInBrowser => {
-                    vec![Cmd::OpenInBrowser {
-                        app_url: story.app_url.clone(),
-                    }]
-                }
-            };
-
-            actions.push(Cmd::CloseActionMenu);
-            actions
-        }
+        ActionMenuMsg::Accept => [
+            accept(ActionMenuItem::from_idx(current), cache, story),
+            vec![Cmd::CloseActionMenu],
+        ]
+        .concat(),
 
         ActionMenuMsg::Close => {
             vec![Cmd::CloseActionMenu]
+        }
+    }
+}
+
+fn accept(item: ActionMenuItem, cache: &Cache, story: &Story) -> Vec<Cmd> {
+    match item {
+        ActionMenuItem::OpenIterationNote => {
+            vec![Cmd::open_iteration_note(cache.iteration_for(story))]
+        }
+
+        ActionMenuItem::OpenNote => {
+            let iteration_app_url = cache.iteration_for(story).map(|it| it.app_url.clone());
+            vec![Cmd::OpenNote(NoteToOpen::story(story, iteration_app_url))]
+        }
+
+        ActionMenuItem::EditDescription => {
+            vec![Cmd::EditStoryContent {
+                story_id: story.id,
+                description: story.description.clone(),
+            }]
+        }
+
+        ActionMenuItem::OpenTmux => {
+            vec![Cmd::OpenTmuxSession {
+                story_name: story.name.clone(),
+            }]
+        }
+
+        ActionMenuItem::SetActive => {
+            vec![Cmd::SelectStory(Some(story.clone())), Cmd::WriteCache]
+        }
+
+        ActionMenuItem::CreateGitWorktree => {
+            vec![Cmd::CreateGitWorktree {
+                branch_name: PLACEHOLDER_WORKTREE_BRANCH.to_string(),
+            }]
+        }
+
+        ActionMenuItem::OpenInBrowser => {
+            vec![Cmd::OpenInBrowser {
+                app_url: story.app_url.clone(),
+            }]
         }
     }
 }

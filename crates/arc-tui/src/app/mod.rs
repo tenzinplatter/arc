@@ -27,9 +27,8 @@ use crate::view::{navbar::NavBar, notes_list::NotesListView, story_list::StoryLi
 use crate::worktree::{create_worktree, get_repo_list, select_repo_with_fzf};
 use crate::{
     api::{ApiClient, story::Story},
-    app::model::{Overlay, ViewType},
+    app::model::{CacheView, Overlay, ViewType},
 };
-use arc_core::Config;
 
 pub mod cmd;
 pub mod init;
@@ -50,7 +49,6 @@ pub struct App {
     pub receiver: mpsc::UnboundedReceiver<msg::Msg>,
     pub sender: mpsc::UnboundedSender<msg::Msg>,
     pub api_client: ApiClient,
-    pub config: Config,
     pub key_reader_paused: Arc<AtomicBool>,
 }
 
@@ -130,16 +128,11 @@ impl App {
             }
 
             cmd::Cmd::SelectStory(story) => {
-                if let Some(active_story) = &self.model.data.active_story
-                    && let Some(story) = &story
-                    && active_story.id == story.id
-                {
-                    self.model.cache.active_story = None;
-                    self.model.data.active_story = None;
-                } else {
-                    self.model.data.active_story = story.clone();
-                    self.model.cache.active_story = story;
-                }
+                let reselected = matches!(
+                    (&self.model.cache.active_story, &story),
+                    (Some(active), Some(story)) if active.id == story.id
+                );
+                self.model.cache.active_story = if reselected { None } else { story };
             }
 
             cmd::Cmd::CloseActionMenu => {
@@ -175,6 +168,8 @@ impl App {
                     }
                 });
             }
+
+            cmd::Cmd::ShowError(error) => self.model.ui.errors.push(error),
 
             cmd::Cmd::OpenInBrowser { app_url } => {
                 open::that(&app_url)
@@ -254,7 +249,8 @@ impl App {
             Layout::vertical([Constraint::Length(NAVBAR_HEIGHT), Constraint::Min(0)])
                 .areas(frame.area());
 
-        let has_stories = !self.model.data.stories.is_empty();
+        let cache = &self.model.cache;
+        let has_stories = !cache.stories().is_empty();
         let navbar = NavBar::new(
             self.model.ui.active_view,
             self.model.ui.loading,
@@ -267,10 +263,10 @@ impl App {
         match self.model.ui.active_view {
             ViewType::Stories => {
                 let story_list_view = StoryListView::new(
-                    &self.model.data.stories,
-                    self.model.data.current_iterations.as_deref().unwrap_or(&[]),
+                    cache.stories(),
+                    cache.current_iterations(),
                     &self.model.ui.story_list,
-                    self.model.data.active_story.as_ref(),
+                    cache.active_story.as_ref(),
                     self.model.ui.loading,
                     tick,
                 );
@@ -284,10 +280,9 @@ impl App {
             }
 
             ViewType::Iterations => {
-                let active = self.model.data.current_iterations.as_deref().unwrap_or(&[]);
                 let iteration_list = IterationListView::new(
-                    active,
-                    &self.model.data.iterations,
+                    cache.current_iterations(),
+                    &cache.iterations,
                     &self.model.ui.iteration_list,
                 );
                 iteration_list.render_ref(main_area, frame.buffer_mut());
@@ -295,7 +290,7 @@ impl App {
 
             ViewType::Epics => {
                 let epic_list =
-                    EpicListView::new(&self.model.data.epics, &self.model.ui.epic_list);
+                    EpicListView::new(&cache.epics, &self.model.ui.epic_list);
                 epic_list.render_ref(main_area, frame.buffer_mut());
             }
 

@@ -18,18 +18,22 @@ pub fn truncate_to_lines(text: &str, max_width: usize, max_lines: usize) -> Stri
         return text.to_string();
     }
 
-    let mut result: String = lines[..max_lines]
+    let joined = lines[..max_lines]
         .iter()
         .map(|l| l.as_ref())
         .collect::<Vec<_>>()
         .join(" ");
 
-    while !result.is_empty() && wrap(&format!("{}...", result), max_width).len() > max_lines {
-        result.pop();
-    }
-    result.push_str("...");
+    let fits = |prefix: &str| wrap(&format!("{}...", prefix), max_width).len() <= max_lines;
+    let end = joined
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([joined.len()])
+        .rev()
+        .find(|&end| end == 0 || fits(&joined[..end]))
+        .unwrap_or(0);
 
-    result
+    format!("{}...", &joined[..end])
 }
 
 #[cfg(test)]

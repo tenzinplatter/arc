@@ -32,26 +32,16 @@ pub fn group_stories_by_iteration<'a>(
     let mut sorted_iterations: Vec<&Iteration> = iterations.iter().collect();
     sorted_iterations.sort_by_key(|it| it.start_date);
 
-    let mut sections = Vec::new();
-    for iteration in sorted_iterations {
-        if let Some(mut stories) = grouped.remove(&Some(iteration.id)) {
+    sorted_iterations
+        .into_iter()
+        .map(Some)
+        .chain([None])
+        .filter_map(|iteration| {
+            let mut stories = grouped.remove(&iteration.map(|it| it.id))?;
             stories.sort_by_key(|s| s.completed);
-            sections.push(IterationSection {
-                iteration: Some(iteration),
-                stories,
-            });
-        }
-    }
-
-    if let Some(mut stories) = grouped.remove(&None) {
-        stories.sort_by_key(|s| s.completed);
-        sections.push(IterationSection {
-            iteration: None,
-            stories,
-        });
-    }
-
-    sections
+            Some(IterationSection { iteration, stories })
+        })
+        .collect()
 }
 
 fn ordered_ids(sections: &[IterationSection]) -> Vec<StoryId> {
@@ -83,14 +73,10 @@ pub fn update(
 
             let sections = group_stories_by_iteration(stories, current_iterations, state.show_finished);
 
-            if let Some(current_id) = state.selected_story_id {
-                state.selected_story_id = next_story_id(current_id, &sections);
-            } else {
-                state.selected_story_id = sections
-                    .first()
-                    .and_then(|s| s.stories.first())
-                    .map(|s| s.id);
-            }
+            state.selected_story_id = match state.selected_story_id {
+                Some(current_id) => next_story_id(current_id, &sections),
+                None => sections.first().and_then(|s| s.stories.first()).map(|s| s.id),
+            };
 
             vec![Cmd::None]
         }
@@ -102,12 +88,10 @@ pub fn update(
 
             let sections = group_stories_by_iteration(stories, current_iterations, state.show_finished);
 
-            if let Some(current_id) = state.selected_story_id {
-                state.selected_story_id = prev_story_id(current_id, &sections);
-            } else {
-                state.selected_story_id =
-                    sections.last().and_then(|s| s.stories.last()).map(|s| s.id);
-            }
+            state.selected_story_id = match state.selected_story_id {
+                Some(current_id) => prev_story_id(current_id, &sections),
+                None => sections.last().and_then(|s| s.stories.last()).map(|s| s.id),
+            };
 
             vec![Cmd::None]
         }

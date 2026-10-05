@@ -35,6 +35,21 @@ impl NavBar {
     fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.tick % SPINNER_CHARS.len()]
     }
+
+    fn tab(&self, view_type: ViewType) -> Span<'static> {
+        let label = view_type.label();
+        if view_type == self.active_view {
+            Span::styled(
+                label,
+                Style::default()
+                    .bg(Color::White)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(label)
+        }
+    }
 }
 
 impl WidgetRef for NavBar {
@@ -43,30 +58,18 @@ impl WidgetRef for NavBar {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let mut spans = Vec::new();
+        let tabs: Vec<Span> = ViewType::ALL
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &view_type)| {
+                (i > 0)
+                    .then(|| Span::raw(" │ "))
+                    .into_iter()
+                    .chain([self.tab(view_type)])
+            })
+            .collect();
 
-        for (i, view_type) in ViewType::ALL.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(" │ "));
-            }
-
-            let label = view_type.label();
-            let span = if *view_type == self.active_view {
-                Span::styled(
-                    label,
-                    Style::default()
-                        .bg(Color::White)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw(label)
-            };
-
-            spans.push(span);
-        }
-
-        let line = Line::from(spans);
+        let line = Line::from(tabs);
         let paragraph = Paragraph::new(line);
         paragraph.render(inner, buf);
 

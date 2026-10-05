@@ -4,7 +4,7 @@ use crate::{
     app::{
         App,
         cmd::{Cmd, NoteToOpen},
-        model::{LoadingState, Overlay, ViewType},
+        model::{CacheView, LoadingState, Overlay, ViewType},
         msg::{AddTodoModalMsg, CreateNoteModalMsg, EpicListMsg, IterationListMsg, Msg},
         pane::{action_menu, add_todo_modal, create_note_modal, description_modal, epic_list, iteration_list, notes_list, searchable_list, story_list, todos_list},
     },
@@ -36,8 +36,8 @@ impl App {
 
             Msg::StoryList(story_msg) => story_list::update(
                 &mut self.model.ui.story_list,
-                &self.model.data.stories,
-                self.model.data.current_iterations.as_deref().unwrap_or(&[]),
+                self.model.cache.stories(),
+                self.model.cache.current_iterations(),
                 story_msg,
             ),
 
@@ -46,14 +46,15 @@ impl App {
                 notes_msg,
             ),
 
-            Msg::IterationList(msg) => {
-                let current = self.model.data.current_iterations.as_deref().unwrap_or(&[]);
-                let all = &self.model.data.iterations;
-                iteration_list::update(&mut self.model.ui.iteration_list, current, all, msg)
-            }
+            Msg::IterationList(msg) => iteration_list::update(
+                &mut self.model.ui.iteration_list,
+                self.model.cache.current_iterations(),
+                &self.model.cache.iterations,
+                msg,
+            ),
 
             Msg::EpicList(msg) => {
-                epic_list::update(&mut self.model.ui.epic_list, &self.model.data.epics, msg)
+                epic_list::update(&mut self.model.ui.epic_list, &self.model.cache.epics, msg)
             }
 
             Msg::StoriesLoaded(stories) => self.on_stories_loaded(stories),
@@ -65,25 +66,16 @@ impl App {
                 if self.model.ui.iteration_list.selected_id.is_none() {
                     self.model.ui.iteration_list.selected_id = iterations.first().map(|it| it.id);
                 }
-                self.model.data.current_iterations = Some(iterations.clone());
-                self.model.cache.current_iterations = Some(iterations.clone());
+                let iteration_ids: Vec<_> = iterations.iter().map(|it| it.id).collect();
+                self.model.cache.current_iterations = Some(iterations);
                 self.model.ui.loading = LoadingState::FetchingStories;
 
-                dbg_file!(
-                    "Got iterations: {:?}",
-                    iterations.iter().map(|it| it.id).collect::<Vec<_>>()
-                );
-                vec![
-                    Cmd::WriteCache,
-                    Cmd::FetchStories {
-                        iteration_ids: iterations.iter().map(|it| it.id).collect(),
-                    },
-                ]
+                dbg_file!("Got iterations: {:?}", iteration_ids);
+                vec![Cmd::WriteCache, Cmd::FetchStories { iteration_ids }]
             }
 
             Msg::AllIterationsLoaded(mut iterations) => {
                 iterations.sort_by_key(|it| std::cmp::Reverse(it.start_date));
-                self.model.data.iterations = iterations.clone();
                 self.model.cache.iterations = iterations;
                 vec![Cmd::WriteCache]
             }
@@ -128,20 +120,15 @@ impl App {
             }
 
             Msg::ActionMenu(menu_msg) => {
-                let ui = &mut self.model.ui;
-                let Overlay::ActionMenu { target, list } = &mut ui.overlay else {
+                let overlay = &mut self.model.ui.overlay;
+                let Overlay::ActionMenu { target, list } = overlay else {
                     return vec![Cmd::None];
                 };
-                match self.model.data.stories.iter().find(|s| s.id == *target) {
-                    Some(story) => action_menu::update(
-                        list,
-                        &mut ui.errors,
-                        &self.model.data,
-                        menu_msg,
-                        story,
-                    ),
+                let cache = &self.model.cache;
+                match cache.stories().iter().find(|s| s.id == *target) {
+                    Some(story) => action_menu::update(list, cache, menu_msg, story),
                     None => {
-                        ui.overlay = Overlay::None;
+                        *overlay = Overlay::None;
                         vec![Cmd::None]
                     }
                 }
@@ -281,39 +268,18 @@ impl App {
                 if let Some(app_key) = app_key {
                     match app_key {
                         Key::Description => {
-                            let story = self
-                                .model
-                                .ui
-                                .story_list
-                                .selected_story_id
-                                .and_then(|id| self.model.data.stories.iter().find(|s| s.id == id));
-
-                            if let Some(story) = story {
+                            if let Some(story) = self.selected_story() {
                                 self.model.ui.overlay = Overlay::description(story.clone());
                             }
                             return vec![Cmd::None];
                         }
                         Key::IterationNote => {
-                            let story = self
-                                .model
-                                .ui
-                                .story_list
-                                .selected_story_id
-                                .and_then(|id| self.model.data.stories.iter().find(|s| s.id == id));
-
-                            if let Some(story) = story {
-                                return match self.model.data.iteration_for(story) {
-                                    Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
-                                    None => {
-                                        self.model.ui.errors.push(ErrorInfo::new(
-                                            "No iteration",
-                                            "This story has no associated iteration",
-                                        ));
-                                        vec![Cmd::None]
-                                    }
-                                };
-                            }
-                            return vec![Cmd::None];
+                            return match self.selected_story() {
+                                Some(story) => vec![Cmd::open_iteration_note(
+                                    self.model.cache.iteration_for(story),
+                                )],
+                                None => vec![Cmd::None],
+                            };
                         }
                         _ => {}
                     }
@@ -357,6 +323,11 @@ impl App {
         vec![Cmd::None]
     }
 
+    fn selected_story(&self) -> Option<&crate::api::story::Story> {
+        let id = self.model.ui.story_list.selected_story_id?;
+        self.model.cache.stories().iter().find(|s| s.id == id)
+    }
+
     fn on_stories_loaded(&mut self, stories: Vec<crate::api::story::Story>) -> Vec<Cmd> {
         self.model.ui.loading = LoadingState::Loaded;
 
@@ -364,11 +335,9 @@ impl App {
             self.model.ui.story_list.selected_story_id = stories.first().map(|s| s.id);
         }
 
-        if id_set_unchanged(&self.model.data.stories, &stories, |s| s.id) {
+        if id_set_unchanged(self.model.cache.stories(), &stories, |s| s.id) {
             return vec![Cmd::None];
         }
-
-        self.model.data.stories = stories.clone();
 
         if let Some(selected_id) = self.model.ui.story_list.selected_story_id
             && !stories.iter().any(|s| s.id == selected_id)
@@ -378,15 +347,14 @@ impl App {
 
         self.reconcile_overlay(&stories);
 
-        if let Some(ref active) = self.model.data.active_story
+        if let Some(ref active) = self.model.cache.active_story
             && active_story_left_iteration(
                 active,
                 &stories,
-                self.model.data.current_iterations.as_deref().unwrap_or(&[]),
+                self.model.cache.current_iterations(),
                 self.api_client.user().id,
             )
         {
-            self.model.data.active_story = None;
             self.model.cache.active_story = None;
             self.model.ui.errors.push(ErrorInfo::new(
                 "Active story cleared".to_string(),
@@ -423,14 +391,13 @@ impl App {
     fn on_epics_loaded(&mut self, mut epics: Vec<crate::api::epic::EpicSlim>) -> Vec<Cmd> {
         epics.sort_by_key(|e| std::cmp::Reverse(e.created_at));
 
-        if id_set_unchanged(&self.model.data.epics, &epics, |e| e.id) {
+        if id_set_unchanged(&self.model.cache.epics, &epics, |e| e.id) {
             return vec![Cmd::None];
         }
 
         if self.model.ui.epic_list.selected_id.is_none() {
             self.model.ui.epic_list.selected_id = epics.first().map(|e| e.id);
         }
-        self.model.data.epics = epics.clone();
         self.model.cache.epics = epics;
         vec![Cmd::WriteCache]
     }

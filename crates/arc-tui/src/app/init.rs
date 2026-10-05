@@ -45,18 +45,14 @@ impl App {
             tokio::runtime::Handle::current(),
         );
 
-        let mut model = Model::from_cache_and_config(cache, config.clone(), todos);
-
         let handles = fetch_info_from_api(api_client.clone(), sender).await;
-        model.data.async_handles.extend(handles);
 
         Ok(App {
-            model,
+            model: Model::new(cache, config, todos, handles),
             exit: false,
             receiver,
             sender: sender_clone,
             api_client,
-            config,
             key_reader_paused,
         })
     }
@@ -67,7 +63,6 @@ impl App {
             mention_name: "dummy".to_string(),
         };
         let api_client = ApiClient::new(config.api_token.to_owned(), dummy_user.clone());
-        cache.set_user(dummy_user);
 
         let (sender, receiver) = mpsc::unbounded_channel();
         let sender_clone = sender.clone();
@@ -78,18 +73,17 @@ impl App {
         let iteration = dummy::iteration();
         let stories = dummy::stories();
 
+        cache.set_user(dummy_user);
+        cache.iteration_stories = Some(stories.clone());
+        cache.epics = Vec::new();
+        cache.current_iterations = Some(vec![iteration.clone()]);
+        cache.active_story = None;
+        cache.iterations = vec![iteration.clone()];
+
         let model = Model {
-            data: DataState {
-                stories: stories.clone(),
-                epics: Vec::new(),
-                current_iterations: Some(vec![iteration.clone()]),
-                active_story: None,
-                async_handles: Vec::new(),
-                iterations: vec![iteration.clone()],
-                todos: Vec::new(),
-            },
+            data: DataState::default(),
             ui: UiState::default(),
-            config: config.clone(),
+            config,
             cache,
         };
 
@@ -103,7 +97,6 @@ impl App {
             receiver,
             sender: sender_clone,
             api_client,
-            config,
             key_reader_paused,
         })
     }

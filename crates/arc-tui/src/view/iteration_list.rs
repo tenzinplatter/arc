@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-
-use arc_core::IterationId;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -10,7 +7,7 @@ use ratatui::{
 
 use crate::{
     api::iteration::Iteration,
-    app::{model::IterationListState, pane::iteration_list::filter_items},
+    app::{model::IterationListState, pane::iteration_list::visible_split},
     custom_list::LinearList,
     view::search_bar::render_search_bar,
 };
@@ -44,17 +41,8 @@ impl WidgetRef for IterationListView<'_> {
 
         let content_area = chunks[1];
 
-        let active_visible: Vec<Iteration> = filter_items(self.active_iterations, query)
-            .into_iter()
-            .cloned()
-            .collect();
-
-        let active_ids: HashSet<IterationId> = active_visible.iter().map(|it| it.id).collect();
-        let rest_visible: Vec<Iteration> = filter_items(self.all_iterations, query)
-            .into_iter()
-            .filter(|it| !active_ids.contains(&it.id))
-            .cloned()
-            .collect();
+        let (active_visible, rest_visible) =
+            visible_split(self.active_iterations, self.all_iterations, query);
 
         let active_list_height = (active_visible.len() as u16 * 2 + 4)
             .min(content_area.height.saturating_sub(2) / 2)

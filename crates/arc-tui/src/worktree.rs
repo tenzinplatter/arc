@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     io::Write,
     path::Path,
     process::{Command as StdCommand, Stdio},
@@ -80,15 +81,13 @@ fn is_worktree_gitfile(gitfile_target: &str) -> bool {
 pub async fn get_repo_list(config: &Config) -> anyhow::Result<String> {
     let repos_dir = config.repositories_directory.to_str().unwrap();
 
-    let (mut standard, submodules) = tokio::try_join!(
+    let (standard, submodules) = tokio::try_join!(
         find_standard_repos(repos_dir),
         find_submodule_repos(repos_dir),
     )?;
 
-    standard.extend(submodules);
-    standard.sort();
-    standard.dedup();
-    Ok(standard.join("\n"))
+    let repos: BTreeSet<String> = standard.into_iter().chain(submodules).collect();
+    Ok(repos.into_iter().collect::<Vec<_>>().join("\n"))
 }
 
 pub fn select_repo_with_fzf(repo_list: &str) -> anyhow::Result<String> {

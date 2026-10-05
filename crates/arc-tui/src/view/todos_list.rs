@@ -9,13 +9,10 @@ use ratatui::{
 use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
-    app::{
-        model::TodosListState,
-        pane::todos_list::group_todos_by_section,
-    },
-    todos::Todo,
+    app::{model::TodosListState, pane::todos_list::visible_sections},
+    todos::{Todo, TodoSource},
+    view::{headed_rows, render_headed_item},
 };
-use arc_core::time::today;
 
 pub struct TodosListView<'a> {
     todos: &'a [Todo],
@@ -30,14 +27,9 @@ impl<'a> TodosListView<'a> {
 
 impl WidgetRef for TodosListView<'_> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let visible: Vec<Todo> = self
-            .todos
-            .iter()
-            .filter(|t| self.state.is_visible(t))
-            .cloned()
-            .collect();
+        let sections = visible_sections(self.state, self.todos);
 
-        if visible.is_empty() {
+        if sections.is_empty() {
             let block = Block::bordered().border_set(border::THICK);
             let inner = block.inner(area);
             block.render(area, buf);
@@ -56,23 +48,11 @@ impl WidgetRef for TodosListView<'_> {
             return;
         }
 
-        let today = today();
-        let sections = group_todos_by_section(&visible, today);
-
-        struct Row {
-            todo: Todo,
-            header: Option<String>,
-        }
-        let mut rows: Vec<Row> = Vec::new();
-        for section in &sections {
-            let header = section.kind.header().to_string();
-            for (i, todo) in section.todos.iter().enumerate() {
-                rows.push(Row {
-                    todo: todo.clone(),
-                    header: (i == 0).then(|| header.clone()),
-                });
-            }
-        }
+        let rows = headed_rows(
+            sections
+                .iter()
+                .map(|section| (section.kind.header(), section.todos.iter().copied())),
+        );
 
         let list_block = Block::bordered()
             .border_set(border::THICK)
@@ -83,26 +63,15 @@ impl WidgetRef for TodosListView<'_> {
         let selected_pos = self
             .state
             .selected_id
-            .and_then(|id| rows.iter().position(|r| r.todo.id == id));
+            .and_then(|id| rows.iter().position(|(_, todo)| todo.id == id));
         let count = rows.len();
 
         let builder = ListBuilder::new(move |context| {
-            let row = &rows[context.index];
-            let todo = &row.todo;
-            let is_selected = context.is_selected;
-            let source_label = match &todo.source {
-                crate::todos::TodoSource::NoteParsed { file, line, .. } => {
-                    let stem = file.file_stem().unwrap_or("?");
-                    Some(format!(" [{}:{}]", stem, line))
-                }
-                crate::todos::TodoSource::Manual => None,
-            };
+            let (header, todo) = &rows[context.index];
             let widget = TodoItemWidget {
-                text: todo.text.clone(),
-                completed: todo.completed,
-                is_selected,
-                source_label,
-                header: row.header.clone(),
+                todo,
+                is_selected: context.is_selected,
+                header: header.clone(),
             };
             let height = widget.height();
             (widget, height)
@@ -115,74 +84,59 @@ impl WidgetRef for TodosListView<'_> {
     }
 }
 
-struct TodoItemWidget {
-    text: String,
-    completed: bool,
+struct TodoItemWidget<'a> {
+    todo: &'a Todo,
     is_selected: bool,
-    source_label: Option<String>,
     header: Option<String>,
 }
 
-impl TodoItemWidget {
+impl TodoItemWidget<'_> {
     fn height(&self) -> u16 {
         2 + self.header.is_some() as u16
     }
-}
 
-impl Widget for TodoItemWidget {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height < 1 {
-            return;
-        }
-
-        let mut y = area.y;
-        if let Some(header) = &self.header {
-            let line = Line::from(format!(" ── {header} ──")).style(Style::default().fg(Color::DarkGray));
-            buf.set_line(area.x, y, &line, area.width);
-            y += 1;
-        }
-        if y >= area.y + area.height {
-            return;
-        }
-
-        let checkbox = if self.completed { "☑" } else { "☐" };
-
-        let mut spans = Vec::new();
-
-        let base_style = if self.completed {
+    fn content_line(&self) -> Line<'static> {
+        let completed = self.todo.completed;
+        let checkbox = if completed { "☑" } else { "☐" };
+        let base_style = if completed {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default()
         };
-
-        let name_style = if self.is_selected && !self.completed {
+        let name_style = if self.is_selected && !completed {
             base_style.bold()
         } else {
             base_style
         };
+        let source_label = match &self.todo.source {
+            TodoSource::NoteParsed { file, line, .. } => {
+                let stem = file.file_stem().unwrap_or("?");
+                Some(Span::styled(
+                    format!(" [{}:{}]", stem, line),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            }
+            TodoSource::Manual => None,
+        };
 
-        spans.push(Span::styled(format!("{} ", checkbox), base_style));
-        spans.push(Span::styled(self.text.clone(), name_style));
+        [
+            Span::styled(format!("{} ", checkbox), base_style),
+            Span::styled(self.todo.text.clone(), name_style),
+        ]
+        .into_iter()
+        .chain(source_label)
+        .collect()
+    }
+}
 
-        if let Some(label) = &self.source_label {
-            spans.push(Span::styled(
-                label.clone(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        let content = Line::from(spans);
-        buf.set_line(area.x, y, &content, area.width);
-        y += 1;
-
-        if y < area.y + area.height {
-            let divider_style = if self.is_selected {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let divider = Line::from("─".repeat(area.width as usize)).style(divider_style);
-            buf.set_line(area.x, y, &divider, area.width);
-        }
+impl Widget for TodoItemWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        render_headed_item(
+            area,
+            buf,
+            self.header.as_deref(),
+            &self.content_line(),
+            self.is_selected,
+        );
     }
 }

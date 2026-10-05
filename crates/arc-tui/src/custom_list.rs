@@ -3,9 +3,10 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::Style,
     symbols::border,
-    text::Line,
     widgets::{Block, Padding, Paragraph, Widget, WidgetRef},
 };
+
+use crate::view::render_name_rows;
 
 pub trait LinearListItem {
     type Id: Copy + Eq;
@@ -23,6 +24,12 @@ impl LinearListItem for arc_shortcut::api::epic::EpicSlim {
     type Id = arc_core::EpicId;
     fn id(&self) -> Self::Id { self.id }
     fn label(&self) -> &str { &self.name }
+}
+
+impl<T: LinearListItem> LinearListItem for &T {
+    type Id = T::Id;
+    fn id(&self) -> Self::Id { (*self).id() }
+    fn label(&self) -> &str { (*self).label() }
 }
 
 pub struct LinearList<'a, T: LinearListItem> {
@@ -71,32 +78,11 @@ impl<T: LinearListItem> WidgetRef for LinearList<'_, T> {
             _ => 0,
         };
 
-        let mut y = inner.y;
-        for item in self.items.iter().skip(offset) {
-            if y >= inner.y + inner.height {
-                break;
-            }
-
-            let is_selected = self.selected_id == Some(item.id());
-            let name_style = if is_selected {
-                Style::default().bold()
-            } else {
-                Style::default()
-            };
-            let name_line = Line::from(format!("  {}", item.label())).style(name_style);
-            buf.set_line(inner.x, y, &name_line, inner.width);
-            y += 1;
-
-            if y < inner.y + inner.height {
-                let divider_style = if is_selected {
-                    Style::default().yellow()
-                } else {
-                    Style::default().dark_gray()
-                };
-                let divider = Line::from("─".repeat(inner.width as usize)).style(divider_style);
-                buf.set_line(inner.x, y, &divider, inner.width);
-                y += 1;
-            }
-        }
+        let rows = self
+            .items
+            .iter()
+            .skip(offset)
+            .map(|item| (item.label().to_string(), self.selected_id == Some(item.id())));
+        render_name_rows(rows, inner, buf);
     }
 }

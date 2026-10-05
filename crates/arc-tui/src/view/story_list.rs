@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-use super::story_item_builder::StoryItemWidget;
+use super::{headed_rows, story_item_builder::StoryItemWidget};
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -79,23 +79,13 @@ impl<'a> WidgetRef for StoryListView<'a> {
 
         let sections = group_stories_by_iteration(self.stories, self.iterations, self.state.show_finished);
 
-        struct Row<'a> {
-            story: &'a Story,
-            header: Option<String>,
-        }
-        let mut rows: Vec<Row> = Vec::new();
-        for section in &sections {
+        let rows = headed_rows(sections.iter().map(|section| {
             let header = match section.iteration {
                 Some(it) => it.name.clone(),
                 None => "No Iteration".to_string(),
             };
-            for (i, story) in section.stories.iter().enumerate() {
-                rows.push(Row {
-                    story,
-                    header: (i == 0).then(|| header.clone()),
-                });
-            }
-        }
+            (header, section.stories.iter().copied())
+        }));
 
         let list_block = Block::bordered()
             .border_set(border::THICK)
@@ -106,20 +96,16 @@ impl<'a> WidgetRef for StoryListView<'a> {
         let selected_pos = self
             .state
             .selected_story_id
-            .and_then(|id| rows.iter().position(|r| r.story.id == id));
+            .and_then(|id| rows.iter().position(|(_, story)| story.id == id));
 
         let active_story = self.active_story;
         let count = rows.len();
 
         let builder = ListBuilder::new(move |context| {
-            let row = &rows[context.index];
-            let is_active = active_story.is_some_and(|a| a.id == row.story.id);
-            let widget = StoryItemWidget::new(
-                row.story,
-                is_active,
-                context.is_selected,
-                row.header.clone(),
-            );
+            let (header, story) = &rows[context.index];
+            let is_active = active_story.is_some_and(|a| a.id == story.id);
+            let widget =
+                StoryItemWidget::new(story, is_active, context.is_selected, header.clone());
             let height = widget.height();
             (widget, height)
         });

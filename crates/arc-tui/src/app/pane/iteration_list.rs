@@ -21,18 +21,23 @@ pub fn filter_items<'a>(items: &'a [Iteration], query: &str) -> Vec<&'a Iteratio
         .collect()
 }
 
-pub fn combined_visible<'a>(
+pub fn visible_split<'a>(
     current: &'a [Iteration],
     all: &'a [Iteration],
     query: &str,
-) -> Vec<&'a Iteration> {
+) -> (Vec<&'a Iteration>, Vec<&'a Iteration>) {
     let active_filtered = filter_items(current, query);
     let active_ids: HashSet<IterationId> = active_filtered.iter().map(|it| it.id).collect();
-    let rest_filtered: Vec<&Iteration> = filter_items(all, query)
+    let rest_filtered = filter_items(all, query)
         .into_iter()
         .filter(|it| !active_ids.contains(&it.id))
         .collect();
-    active_filtered.into_iter().chain(rest_filtered).collect()
+    (active_filtered, rest_filtered)
+}
+
+fn combined_visible_ids(current: &[Iteration], all: &[Iteration], query: &str) -> Vec<IterationId> {
+    let (active, rest) = visible_split(current, all, query);
+    active.into_iter().chain(rest).map(|it| it.id).collect()
 }
 
 pub fn update(
@@ -43,12 +48,7 @@ pub fn update(
 ) -> Vec<Cmd> {
     let outcome = searchable_list::update(
         state,
-        |query| {
-            combined_visible(current_iterations, all_iterations, query)
-                .iter()
-                .map(|it| it.id)
-                .collect()
-        },
+        |query| combined_visible_ids(current_iterations, all_iterations, query),
         msg,
     );
     match outcome {

@@ -8,7 +8,7 @@ use arc_notes::Checkbox;
 
 use crate::{
     app::{cmd::Cmd, msg::TodosListMsg, pane::nav},
-    todos::Todo,
+    todos::{Todo, TodoSource},
 };
 
 pub use crate::app::model::TodosListState;
@@ -34,16 +34,19 @@ impl SectionKind {
     }
 }
 
-pub struct DaySection {
+pub struct DaySection<'a> {
     pub kind: SectionKind,
-    pub todos: Vec<Todo>,
+    pub todos: Vec<&'a Todo>,
 }
 
-pub fn group_todos_by_section(todos: &[Todo], today: NaiveDate) -> Vec<DaySection> {
+pub fn group_todos_by_section<'a>(
+    todos: impl IntoIterator<Item = &'a Todo>,
+    today: NaiveDate,
+) -> Vec<DaySection<'a>> {
     let tomorrow = today.succ_opt().expect("today + 1 day fits in NaiveDate");
     let (mut overdue, mut on_today, mut on_tomorrow, mut no_date) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut future: BTreeMap<NaiveDate, Vec<Todo>> = BTreeMap::new();
+    let mut future: BTreeMap<NaiveDate, Vec<&Todo>> = BTreeMap::new();
 
     for todo in todos {
         let bucket = match todo.date {
@@ -53,7 +56,7 @@ pub fn group_todos_by_section(todos: &[Todo], today: NaiveDate) -> Vec<DaySectio
             Some(d) if d == tomorrow => &mut on_tomorrow,
             Some(d) => future.entry(d).or_default(),
         };
-        bucket.push(todo.clone());
+        bucket.push(todo);
     }
 
     [
@@ -69,13 +72,10 @@ pub fn group_todos_by_section(todos: &[Todo], today: NaiveDate) -> Vec<DaySectio
     .collect()
 }
 
-fn find_todo_position(todo_id: Uuid, sections: &[DaySection]) -> Option<(usize, usize)> {
-    for (section_idx, section) in sections.iter().enumerate() {
-        if let Some(todo_idx) = section.todos.iter().position(|t| t.id == todo_id) {
-            return Some((section_idx, todo_idx));
-        }
-    }
-    None
+fn section_of(todo_id: Uuid, sections: &[DaySection]) -> Option<usize> {
+    sections
+        .iter()
+        .position(|section| section.todos.iter().any(|t| t.id == todo_id))
 }
 
 fn ordered_ids(sections: &[DaySection]) -> Vec<Uuid> {
@@ -93,9 +93,11 @@ fn prev_todo_id(current_id: Uuid, sections: &[DaySection]) -> Option<Uuid> {
     nav::step_wrapping(&ordered_ids(sections), current_id, false)
 }
 
-fn visible_sections(state: &TodosListState, todos: &[Todo]) -> Vec<DaySection> {
-    let visible: Vec<Todo> = todos.iter().filter(|t| state.is_visible(t)).cloned().collect();
-    group_todos_by_section(&visible, arc_core::time::today())
+pub fn visible_sections<'a>(state: &TodosListState, todos: &'a [Todo]) -> Vec<DaySection<'a>> {
+    group_todos_by_section(
+        todos.iter().filter(|t| state.is_visible(t)),
+        arc_core::time::today(),
+    )
 }
 
 pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListMsg) -> Vec<Cmd> {
@@ -105,11 +107,10 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             if sections.is_empty() {
                 return vec![Cmd::None];
             }
-            if let Some(current_id) = state.selected_id {
-                state.selected_id = next_todo_id(current_id, &sections);
-            } else {
-                state.selected_id = sections.first().and_then(|s| s.todos.first()).map(|t| t.id);
-            }
+            state.selected_id = match state.selected_id {
+                Some(current_id) => next_todo_id(current_id, &sections),
+                None => sections.first().and_then(|s| s.todos.first()).map(|t| t.id),
+            };
             vec![Cmd::None]
         }
 
@@ -118,11 +119,10 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             if sections.is_empty() {
                 return vec![Cmd::None];
             }
-            if let Some(current_id) = state.selected_id {
-                state.selected_id = prev_todo_id(current_id, &sections);
-            } else {
-                state.selected_id = sections.last().and_then(|s| s.todos.last()).map(|t| t.id);
-            }
+            state.selected_id = match state.selected_id {
+                Some(current_id) => prev_todo_id(current_id, &sections),
+                None => sections.last().and_then(|s| s.todos.last()).map(|t| t.id),
+            };
             vec![Cmd::None]
         }
 
@@ -136,15 +136,15 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             todo.completed = !todo.completed;
             state.visible.insert(id);
 
-            let mut cmds = vec![Cmd::WriteTodos];
-            if let crate::todos::TodoSource::NoteParsed { file, .. } = &todo.source {
-                cmds.push(Cmd::SyncNoteCheckbox {
+            let sync_note = match &todo.source {
+                TodoSource::NoteParsed { file, .. } => Some(Cmd::SyncNoteCheckbox {
                     file: file.clone(),
                     text: todo.text.clone(),
                     to: Checkbox::from_completed(todo.completed),
-                });
-            }
-            cmds
+                }),
+                TodoSource::Manual => None,
+            };
+            std::iter::once(Cmd::WriteTodos).chain(sync_note).collect()
         }
 
         TodosListMsg::FocusSectionNext | TodosListMsg::FocusSectionPrev => {
@@ -155,8 +155,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
 
             let cur_section = state
                 .selected_id
-                .and_then(|id| find_todo_position(id, &sections))
-                .map(|(s, _)| s)
+                .and_then(|id| section_of(id, &sections))
                 .unwrap_or(0);
 
             let target = if matches!(msg, TodosListMsg::FocusSectionNext) {
@@ -176,7 +175,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             let is_note_parsed = todos
                 .iter()
                 .find(|t| t.id == id)
-                .is_some_and(|t| matches!(t.source, crate::todos::TodoSource::NoteParsed { .. }));
+                .is_some_and(|t| matches!(t.source, TodoSource::NoteParsed { .. }));
             if is_note_parsed {
                 return vec![Cmd::None];
             }
@@ -187,17 +186,11 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
 
             todos.retain(|t| t.id != id);
 
-            if let Some(next) = next_id
-                && todos.iter().any(|t| t.id == next)
-            {
-                state.selected_id = Some(next);
-            } else if let Some(prev) = prev_id
-                && todos.iter().any(|t| t.id == prev)
-            {
-                state.selected_id = Some(prev);
-            } else {
-                state.selected_id = todos.first().map(|t| t.id);
-            }
+            let still_listed = |candidate: &Uuid| todos.iter().any(|t| t.id == *candidate);
+            state.selected_id = next_id
+                .filter(still_listed)
+                .or(prev_id.filter(still_listed))
+                .or_else(|| todos.first().map(|t| t.id));
             vec![Cmd::WriteTodos]
         }
     }
@@ -222,7 +215,6 @@ pub fn key_to_msg(key: KeyEvent) -> Option<TodosListMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::todos::{Todo, TodoSource};
 
     fn manual_dated(text: &str, date: NaiveDate) -> Todo {
         Todo {
@@ -260,8 +252,7 @@ mod tests {
         let done = completed("hide me");
         let todos = vec![incomplete.clone(), done.clone()];
 
-        let mut state = TodosListState::default();
-        state.refresh_visible(&todos);
+        let state = TodosListState::new(&todos);
 
         assert!(state.is_visible(&incomplete));
         assert!(!state.is_visible(&done), "pre-completed todo stays hidden");
@@ -275,9 +266,10 @@ mod tests {
     fn toggling_complete_keeps_todo_visible() {
         let todo = manual_undated("oops");
         let mut todos = vec![todo.clone()];
-        let mut state = TodosListState::default();
-        state.refresh_visible(&todos);
-        state.selected_id = Some(todo.id);
+        let mut state = TodosListState {
+            selected_id: Some(todo.id),
+            ..TodosListState::new(&todos)
+        };
 
         update(&mut state, &mut todos, TodosListMsg::ToggleComplete);
 
@@ -293,8 +285,7 @@ mod tests {
     #[test]
     fn refresh_visible_drops_ids_that_disappear() {
         let todo = manual_undated("gone soon");
-        let mut state = TodosListState::default();
-        state.refresh_visible(std::slice::from_ref(&todo));
+        let mut state = TodosListState::new(std::slice::from_ref(&todo));
         assert!(state.visible.contains(&todo.id));
 
         state.refresh_visible(&[]);

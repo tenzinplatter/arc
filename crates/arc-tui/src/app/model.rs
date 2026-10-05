@@ -8,11 +8,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
-    api::{
-        epic::EpicSlim,
-        iteration::Iteration,
-        story::{Story, iteration_of},
-    },
+    api::{iteration::Iteration, story::Story},
     cache::Cache,
     error::ErrorInfo,
     todos::Todo,
@@ -100,13 +96,23 @@ pub struct Model {
 
 #[derive(Default, Debug)]
 pub struct DataState {
-    pub stories: Vec<Story>,
-    pub iterations: Vec<Iteration>,
-    pub epics: Vec<EpicSlim>,
-    pub current_iterations: Option<Vec<Iteration>>,
-    pub active_story: Option<Story>,
     pub async_handles: Vec<JoinHandle<()>>,
     pub todos: Vec<Todo>,
+}
+
+pub trait CacheView {
+    fn stories(&self) -> &[Story];
+    fn current_iterations(&self) -> &[Iteration];
+}
+
+impl CacheView for Cache {
+    fn stories(&self) -> &[Story] {
+        self.iteration_stories.as_deref().unwrap_or_default()
+    }
+
+    fn current_iterations(&self) -> &[Iteration] {
+        self.current_iterations.as_deref().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -191,11 +197,16 @@ pub struct TodosListState {
 }
 
 impl TodosListState {
+    pub fn new(todos: &[Todo]) -> Self {
+        Self {
+            selected_id: None,
+            visible: incomplete_ids(todos).collect(),
+        }
+    }
+
     pub fn refresh_visible(&mut self, todos: &[Todo]) {
         self.visible.retain(|id| todos.iter().any(|t| &t.id == id));
-        for todo in todos.iter().filter(|t| !t.completed) {
-            self.visible.insert(todo.id);
-        }
+        self.visible.extend(incomplete_ids(todos));
     }
 
     pub fn is_visible(&self, todo: &Todo) -> bool {
@@ -203,31 +214,37 @@ impl TodosListState {
     }
 }
 
-impl DataState {
-    pub fn iteration_for(&self, story: &Story) -> Option<&Iteration> {
-        iteration_of(story, self.current_iterations.as_deref()?)
-    }
+fn incomplete_ids(todos: &[Todo]) -> impl Iterator<Item = Uuid> + '_ {
+    todos.iter().filter(|t| !t.completed).map(|t| t.id)
 }
 
 impl Model {
-    pub fn from_cache_and_config(cache: Cache, config: Config, todos: Vec<Todo>) -> Model {
-        let mut model = Model {
+    pub fn new(
+        cache: Cache,
+        config: Config,
+        todos: Vec<Todo>,
+        async_handles: Vec<JoinHandle<()>>,
+    ) -> Model {
+        let ui = UiState {
+            story_list: StoryListState {
+                selected_story_id: cache.stories().first().map(|s| s.id),
+                ..Default::default()
+            },
+            epic_list: EpicListState {
+                selected_id: cache.epics.first().map(|e| e.id),
+                ..Default::default()
+            },
+            todos_list: TodosListState::new(&todos),
+            ..Default::default()
+        };
+        Model {
             data: DataState {
-                stories: cache.iteration_stories.clone().unwrap_or_default(),
-                epics: cache.epics.clone(),
-                current_iterations: cache.current_iterations.clone(),
-                active_story: cache.active_story.clone(),
-                async_handles: Vec::new(),
-                iterations: cache.iterations.clone(),
+                async_handles,
                 todos,
             },
-            ui: UiState::default(),
+            ui,
             config,
             cache,
-        };
-        model.ui.story_list.selected_story_id = model.data.stories.first().map(|s| s.id);
-        model.ui.epic_list.selected_id = model.data.epics.first().map(|e| e.id);
-        model.ui.todos_list.refresh_visible(&model.data.todos);
-        model
+        }
     }
 }

@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Padding, Paragraph, Widget, WidgetRef},
 };
 
-use crate::app::model::NotesListState;
+use crate::{app::model::NotesListState, view::render_name_rows};
 
 pub struct NotesListView<'a> {
     state: &'a NotesListState,
@@ -121,43 +121,16 @@ impl<'a> WidgetRef for NotesListView<'a> {
             let visible_items = (items_area.height / 2) as usize;
             let sel_idx = self.state.selected_path.as_ref()
                 .and_then(|sel| notes.iter().position(|p| p == sel));
-            let scroll = if let Some(sel) = sel_idx {
+            let scroll = sel_idx.map_or(0, |sel| {
                 let max_scroll = notes.len().saturating_sub(visible_items.max(1));
                 sel.saturating_sub(visible_items.saturating_sub(1)).min(max_scroll)
-            } else {
-                0
-            };
+            });
 
-            let mut y = items_area.y;
-            for note_path in notes.iter().skip(scroll) {
-                if y >= items_area.y + items_area.height {
-                    break;
-                }
-
+            let rows = notes.iter().skip(scroll).map(|note_path| {
                 let is_selected = self.state.selected_path.as_ref() == Some(note_path);
-                let name = display_name(note_path, *dir);
-
-                let name_style = if is_selected {
-                    Style::default().bold()
-                } else {
-                    Style::default()
-                };
-                let name_line = Line::from(format!("  {}", name)).style(name_style);
-                buf.set_line(items_area.x, y, &name_line, items_area.width);
-                y += 1;
-
-                if y < items_area.y + items_area.height {
-                    let divider_style = if is_selected {
-                        Style::default().yellow()
-                    } else {
-                        Style::default().dark_gray()
-                    };
-                    let divider = "─".repeat(items_area.width as usize);
-                    let divider_line = Line::from(divider).style(divider_style);
-                    buf.set_line(items_area.x, y, &divider_line, items_area.width);
-                    y += 1;
-                }
-            }
+                (display_name(note_path, *dir), is_selected)
+            });
+            render_name_rows(rows, items_area, buf);
         }
     }
 }
