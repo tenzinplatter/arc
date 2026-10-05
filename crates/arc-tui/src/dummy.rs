@@ -35,6 +35,7 @@ pub fn stories() -> Vec<Story> {
             epic_id: Some(10),
             iteration_id: Some(1),
             app_url: "https://app.shortcut.com/example/story/101".to_string(),
+            ..Default::default()
         },
         Story {
             id: 102,
@@ -46,6 +47,7 @@ pub fn stories() -> Vec<Story> {
             epic_id: None,
             iteration_id: Some(1),
             app_url: "https://app.shortcut.com/example/story/102".to_string(),
+            ..Default::default()
         },
         Story {
             id: 103,
@@ -57,6 +59,7 @@ pub fn stories() -> Vec<Story> {
             epic_id: Some(10),
             iteration_id: Some(1),
             app_url: "https://app.shortcut.com/example/story/103".to_string(),
+            ..Default::default()
         },
         Story {
             id: 104,
@@ -68,6 +71,7 @@ pub fn stories() -> Vec<Story> {
             epic_id: Some(20),
             iteration_id: Some(1),
             app_url: "https://app.shortcut.com/example/story/104".to_string(),
+            ..Default::default()
         },
         Story {
             id: 105,
@@ -79,6 +83,7 @@ pub fn stories() -> Vec<Story> {
             epic_id: None,
             iteration_id: Some(1),
             app_url: "https://app.shortcut.com/example/story/105".to_string(),
+            ..Default::default()
         },
     ]
 }

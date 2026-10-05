@@ -25,7 +25,7 @@ pub enum Commands {
     #[command()]
     Cat,
 
-    /// Set the active story by its Shortcut id (must be in the current iteration).
+    /// Set the active story by its Shortcut id (fetched from Shortcut if not cached).
     #[command(alias = "a")]
     Active { id: i32 },
 
@@ -37,7 +37,7 @@ pub enum Commands {
     #[command(subcommand)]
     Daemon(DaemonCommands),
 
-    /// Read-only MCP server (stdio) exposing the notes index to LLM clients.
+    /// MCP server (stdio) for LLM clients: notes index, note/todo writes and cached Shortcut stories.
     #[command()]
     Mcp,
 }

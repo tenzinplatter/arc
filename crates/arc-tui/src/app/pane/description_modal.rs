@@ -93,6 +93,7 @@ mod tests {
             epic_id: None,
             iteration_id: None,
             app_url: "https://example.com".to_string(),
+            ..Default::default()
         }
     }
 

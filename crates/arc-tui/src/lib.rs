@@ -2,12 +2,11 @@ use std::{fs, process::Command};
 
 use anyhow::Context;
 use ratatui::DefaultTerminal;
-use uuid::Uuid;
 
 use crate::{
     api::{
+        ApiClient,
         story::{Story, get_story_associated_iteration},
-        user::get_member_from_api,
     },
     app::{
         App,
@@ -18,6 +17,7 @@ use crate::{
     note::Note,
 };
 use arc_core::Config;
+use arc_shortcut::fetch_story;
 
 pub use arc_shortcut::{api, cache};
 pub use arc_notes::{note, scanner, todos};
@@ -40,19 +40,6 @@ macro_rules! no_active_story {
     () => {
         anyhow::bail!("You do not have a currently active story");
     };
-}
-
-pub async fn get_member_info(
-    saved_user_id: Option<Uuid>,
-    saved_mention_name: Option<String>,
-    api_token: &str,
-) -> anyhow::Result<(Uuid, String)> {
-    if let (Some(id), Some(name)) = (saved_user_id, saved_mention_name.as_ref()) {
-        return Ok((id, name.clone()));
-    }
-
-    let member = get_member_from_api(api_token).await?;
-    Ok((member.id, member.mention_name))
 }
 
 pub async fn run(terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
@@ -148,11 +135,16 @@ pub async fn handle_command(
 
         Commands::Active { id } => {
             let mut cache = cache;
-            let story = cache
-                .iteration_stories
-                .as_ref()
-                .and_then(|stories| stories.iter().find(|s| s.id == id).cloned())
-                .with_context(|| format!("No story with id {id} in the current iteration"))?;
+            let story = match cache.find_story(id) {
+                Some(story) => story.clone(),
+                None => {
+                    let client =
+                        ApiClient::from_token_and_cache(&config.api_token, &mut cache).await?;
+                    fetch_story(&mut cache, &client, id)
+                        .await
+                        .with_context(|| format!("Failed to fetch story {id}"))?
+                }
+            };
             cache.active_story = Some(story);
             cache.write().await?;
             Ok(())

@@ -15,7 +15,6 @@ use crate::{
     cache::Cache,
     dummy,
     error::ErrorInfo,
-    get_member_info,
 };
 use arc_core::Config;
 
@@ -28,19 +27,7 @@ impl App {
             return Self::init_with_dummy_data(config, cache).await;
         }
 
-        let api_client = {
-            let (user_id, mention_name) = get_member_info(
-                cache.user_id,
-                cache.user_mention_name.clone(),
-                &config.api_token,
-            )
-            .await?;
-            ApiClient::new(config.api_token.to_owned(), user_id, mention_name)
-        };
-
-        cache.user_id = Some(api_client.user_id);
-        cache.user_mention_name = Some(api_client.mention_name.clone());
-        cache.write().await?;
+        let api_client = ApiClient::from_token_and_cache(&config.api_token, &mut cache).await?;
 
         let todos = crate::todos::load_todos(&config.cache_dir).await;
 

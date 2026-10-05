@@ -12,5 +12,6 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 slugify = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }

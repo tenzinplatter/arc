@@ -492,7 +492,12 @@ impl App {
 
         // Reconcile active story.
         if let Some(ref active) = self.model.data.active_story
-            && !stories.iter().any(|s| s.id == active.id)
+            && active_story_left_iteration(
+                active,
+                &stories,
+                self.model.data.current_iterations.as_deref().unwrap_or(&[]),
+                self.model.cache.user_id,
+            )
         {
             self.model.data.active_story = None;
             self.model.cache.active_story = None;
@@ -522,8 +527,84 @@ impl App {
     }
 }
 
+/// True only when the active story was one of our owned current-iteration
+/// stories and no longer shows up in that list. Stories set from outside the
+/// iteration (or owned by someone else) are left alone.
+fn active_story_left_iteration(
+    active: &crate::api::story::Story,
+    stories: &[crate::api::story::Story],
+    current_iterations: &[crate::api::iteration::Iteration],
+    user_id: Option<uuid::Uuid>,
+) -> bool {
+    !stories.iter().any(|s| s.id == active.id)
+        && active
+            .iteration_id
+            .is_some_and(|id| current_iterations.iter().any(|it| it.id == id))
+        && user_id.is_some_and(|uid| active.owner_ids.contains(&uid))
+}
+
 /// True when both slices hold the same ids in the same order — used to skip a
 /// re-render/cache-write when a refresh returned an unchanged list.
 fn id_set_unchanged<T>(old: &[T], new: &[T], id: impl Fn(&T) -> i32) -> bool {
     old.len() == new.len() && old.iter().zip(new).all(|(a, b)| id(a) == id(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{
+        iteration::{Iteration, IterationStatus},
+        story::Story,
+    };
+    use chrono::NaiveDate;
+    use uuid::Uuid;
+
+    fn iteration(id: i32) -> Iteration {
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        Iteration {
+            id,
+            name: String::new(),
+            start_date: date,
+            end_date: date,
+            app_url: String::new(),
+            status: IterationStatus::Started,
+        }
+    }
+
+    fn story(id: i32, iteration_id: Option<i32>, owner_ids: Vec<Uuid>) -> Story {
+        Story {
+            id,
+            iteration_id,
+            owner_ids,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn active_story_retention() {
+        let me = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let current = [iteration(10)];
+        let listed = [story(1, Some(10), vec![me])];
+
+        let still_listed = story(1, Some(10), vec![me]);
+        assert!(!active_story_left_iteration(&still_listed, &listed, &current, Some(me)));
+
+        let dropped_out = story(2, Some(10), vec![me]);
+        assert!(active_story_left_iteration(&dropped_out, &listed, &current, Some(me)));
+
+        let other_iteration = story(3, Some(99), vec![me]);
+        assert!(!active_story_left_iteration(&other_iteration, &listed, &current, Some(me)));
+
+        let no_iteration = story(4, None, vec![me]);
+        assert!(!active_story_left_iteration(&no_iteration, &listed, &current, Some(me)));
+
+        let someone_elses = story(5, Some(10), vec![other]);
+        assert!(!active_story_left_iteration(&someone_elses, &listed, &current, Some(me)));
+
+        let old_cache_copy = story(6, Some(10), vec![]);
+        assert!(!active_story_left_iteration(&old_cache_copy, &listed, &current, Some(me)));
+
+        assert!(!active_story_left_iteration(&dropped_out, &listed, &current, None));
+    }
 }

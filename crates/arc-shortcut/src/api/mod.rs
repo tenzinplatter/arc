@@ -8,6 +8,7 @@ pub mod epic;
 pub mod iteration;
 pub mod story;
 pub mod user;
+pub mod workflow;
 
 pub const API_BASE_URL: &str = "https://api.app.shortcut.com/api/v3";
 
