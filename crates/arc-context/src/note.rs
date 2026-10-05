@@ -4,7 +4,7 @@ use anyhow::{Context, bail};
 use arc_core::StoryId;
 use arc_index::Connection;
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter, add_branch, replace_branch};
-use arc_notes::{BranchName, NoteDir, NoteRelPath};
+use arc_notes::{BranchName, NoteDir, NoteLocks, NoteRelPath};
 use arc_shortcut::Cache;
 use arc_shortcut::api::story::{Story, iteration_of};
 use slugify::slugify;
@@ -52,6 +52,54 @@ impl StoryNote {
     }
 }
 
+pub struct Vault<'a> {
+    conn: &'a Connection,
+    dir: &'a Path,
+    locks: NoteLocks,
+}
+
+impl<'a> Vault<'a> {
+    pub fn new(conn: &'a Connection, notes_dir: &'a Path, cache_dir: &Path) -> Self {
+        Self {
+            conn,
+            dir: notes_dir,
+            locks: NoteLocks::in_cache(cache_dir),
+        }
+    }
+
+    pub fn conn(&self) -> &'a Connection {
+        self.conn
+    }
+
+    pub fn dir(&self) -> &'a Path {
+        self.dir
+    }
+
+    pub fn edit(
+        &self,
+        rel: &NoteRelPath,
+        edit: impl FnOnce(&str) -> anyhow::Result<String>,
+    ) -> anyhow::Result<bool> {
+        let _lock = self.locks.note(rel)?;
+        let content =
+            arc_index::read_note(self.dir, rel)?.with_context(|| format!("no note at '{rel}'"))?;
+        let updated = edit(&content)?;
+        if updated == content {
+            arc_index::reindex_note(self.conn, rel, &content)?;
+            return Ok(false);
+        }
+        arc_notes::write::replace(&rel.abs(self.dir), &updated)?;
+        arc_index::reindex_note(self.conn, rel, &updated)?;
+        Ok(true)
+    }
+
+    pub fn create(&self, rel: &NoteRelPath, content: &str) -> anyhow::Result<()> {
+        let _lock = self.locks.note(rel)?;
+        arc_notes::write::create(&rel.abs(self.dir), content)?;
+        arc_index::reindex_note(self.conn, rel, content)
+    }
+}
+
 fn live_indexed_note(
     conn: &Connection,
     notes_dir: &Path,
@@ -67,12 +115,13 @@ fn live_indexed_note(
 }
 
 pub fn create_story_note(
-    conn: &Connection,
-    notes_dir: &Path,
+    vault: &Vault,
     story: &Story,
     links: NoteLinks,
     body: &str,
 ) -> anyhow::Result<StoryNote> {
+    let (conn, notes_dir) = (vault.conn, vault.dir);
+    let _lock = vault.locks.story(story.id)?;
     let existing = match live_indexed_note(conn, notes_dir, story.id)? {
         Some(rel) => Some(rel),
         None => arc_index::scan_story_note(notes_dir, story.id)?.map(|(rel, _)| rel),
@@ -98,7 +147,6 @@ pub fn create_story_note(
             NoteRelPath::in_dir(NoteDir::Stories, &format!("{base}-{}", story.id))
         );
     };
-    let abs = rel.abs(notes_dir);
     let fm = Frontmatter::linked(
         slug.clone(),
         EntityLink::Story {
@@ -114,11 +162,7 @@ pub fn create_story_note(
         "" => heading,
         body => format!("{heading}\n{body}\n"),
     };
-    if let Some(p) = abs.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    std::fs::write(&abs, &content)?;
-    arc_index::reindex_note(conn, &rel, &content)?;
+    vault.create(&rel, &content)?;
     Ok(StoryNote::Created { slug, rel })
 }
 
@@ -128,43 +172,17 @@ pub enum LinkOutcome {
     AlreadyLinked,
 }
 
-fn edit_note(
-    conn: &Connection,
-    notes_dir: &Path,
-    rel: &NoteRelPath,
-    edit: impl FnOnce(&str) -> anyhow::Result<String>,
-) -> anyhow::Result<bool> {
-    let content =
-        arc_index::read_note(notes_dir, rel)?.with_context(|| format!("no note at '{rel}'"))?;
-    let updated = edit(&content)?;
-    if updated == content {
-        arc_index::reindex_note(conn, rel, &content)?;
-        return Ok(false);
-    }
-    std::fs::write(rel.abs(notes_dir), &updated)?;
-    arc_index::reindex_note(conn, rel, &updated)?;
-    Ok(true)
-}
-
-pub fn write_session(
-    conn: &Connection,
-    notes_dir: &Path,
-    rel: &NoteRelPath,
-    entry: &SessionEntry,
-) -> anyhow::Result<()> {
-    edit_note(conn, notes_dir, rel, |content| {
-        Ok(append_session(content, entry))
-    })?;
+pub fn write_session(vault: &Vault, rel: &NoteRelPath, entry: &SessionEntry) -> anyhow::Result<()> {
+    vault.edit(rel, |content| Ok(append_session(content, entry)))?;
     Ok(())
 }
 
 pub fn link_branch(
-    conn: &Connection,
-    notes_dir: &Path,
+    vault: &Vault,
     rel: &NoteRelPath,
     branch: &LinkableBranch,
 ) -> anyhow::Result<LinkOutcome> {
-    let added = edit_note(conn, notes_dir, rel, |content| {
+    let added = vault.edit(rel, |content| {
         add_branch(content, branch.as_branch())
             .with_context(|| format!("can't add branch to the frontmatter of '{rel}'"))
     })?;
@@ -182,13 +200,12 @@ pub enum NoteRename {
 }
 
 pub fn rename_linked_branch(
-    conn: &Connection,
-    notes_dir: &Path,
+    vault: &Vault,
     rel: &NoteRelPath,
     from: &BranchName,
     to: &BranchName,
 ) -> NoteRename {
-    let renamed = edit_note(conn, notes_dir, rel, |content| {
+    let renamed = vault.edit(rel, |content| {
         replace_branch(content, from, to)
             .with_context(|| format!("can't rename the branch in the frontmatter of '{rel}'"))
     });
@@ -223,6 +240,14 @@ mod tests {
         (cache, notes, conn)
     }
 
+    fn vault<'a>(
+        conn: &'a Connection,
+        notes: &'a tempfile::TempDir,
+        cache: &tempfile::TempDir,
+    ) -> Vault<'a> {
+        Vault::new(conn, notes.path(), cache.path())
+    }
+
     fn no_links() -> NoteLinks {
         NoteLinks::default()
     }
@@ -237,13 +262,14 @@ mod tests {
 
     #[test]
     fn create_story_note_links_and_rejects_duplicates() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         let s = story(42, "Optical Flow");
         let links = NoteLinks {
             iteration_url: Some("https://it".into()),
             epic_url: Some("https://epic".into()),
         };
-        let created = create_story_note(&conn, notes.path(), &s, links, "hi").unwrap();
+        let created = create_story_note(&v, &s, links, "hi").unwrap();
         assert_eq!(
             created,
             StoryNote::Created {
@@ -262,7 +288,7 @@ mod tests {
             EntityLink::Story { id, epic_url: Some(ref e), iteration_url: Some(_), .. } if id.get() == 42 && e == "https://epic"
         ));
         assert_eq!(
-            create_story_note(&conn, notes.path(), &s, no_links(), "again").unwrap(),
+            create_story_note(&v, &s, no_links(), "again").unwrap(),
             StoryNote::Existing(rel("stories/optical-flow.md"))
         );
         assert!(
@@ -274,11 +300,10 @@ mod tests {
 
     #[test]
     fn create_story_note_sidesteps_another_storys_slug() {
-        let (_c, notes, conn) = setup();
-        create_story_note(&conn, notes.path(), &story(1, "Same Name"), no_links(), "a").unwrap();
-        let created =
-            create_story_note(&conn, notes.path(), &story(2, "Same Name"), no_links(), "b")
-                .unwrap();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
+        create_story_note(&v, &story(1, "Same Name"), no_links(), "a").unwrap();
+        let created = create_story_note(&v, &story(2, "Same Name"), no_links(), "b").unwrap();
         assert_eq!(
             created,
             StoryNote::Created {
@@ -301,8 +326,7 @@ mod tests {
             "---\nid: other\n---\n",
         )
         .unwrap();
-        let created =
-            create_story_note(&conn, notes.path(), &story(3, "Other"), no_links(), "c").unwrap();
+        let created = create_story_note(&v, &story(3, "Other"), no_links(), "c").unwrap();
         assert!(
             matches!(created, StoryNote::Created { ref rel, .. } if rel == "stories/other-3.md"),
             "{created:?}"
@@ -311,7 +335,8 @@ mod tests {
 
     #[test]
     fn create_story_note_finds_unindexed_note() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         std::fs::create_dir_all(notes.path().join("stories")).unwrap();
         std::fs::write(
             notes.path().join("stories/renamed.md"),
@@ -319,7 +344,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            create_story_note(&conn, notes.path(), &story(5, "Five"), no_links(), "x").unwrap(),
+            create_story_note(&v, &story(5, "Five"), no_links(), "x").unwrap(),
             StoryNote::Existing(rel("stories/renamed.md"))
         );
         assert!(!notes.path().join("stories/five.md").exists());
@@ -327,12 +352,13 @@ mod tests {
 
     #[test]
     fn create_story_note_replaces_stale_index_rows() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         arc_index::reindex_note(&conn, &rel("stories/gone.md"), "---\nstory_id: sc-5\n---\n")
             .unwrap();
         arc_index::reindex_note(&conn, &rel("work/gone.md"), "---\nstory_id: sc-5\n---\n").unwrap();
         assert_eq!(
-            create_story_note(&conn, notes.path(), &story(5, "Five"), no_links(), "").unwrap(),
+            create_story_note(&v, &story(5, "Five"), no_links(), "").unwrap(),
             StoryNote::Created {
                 slug: "five".into(),
                 rel: rel("stories/five.md")
@@ -350,11 +376,12 @@ mod tests {
 
     #[test]
     fn create_story_note_with_empty_body_ends_at_the_heading() {
-        let (_c, notes, conn) = setup();
-        create_story_note(&conn, notes.path(), &story(6, "Six"), no_links(), "").unwrap();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
+        create_story_note(&v, &story(6, "Six"), no_links(), "").unwrap();
         let body = std::fs::read_to_string(notes.path().join("stories/six.md")).unwrap();
         assert!(body.ends_with("---\n\n# Six\n"), "{body:?}");
-        create_story_note(&conn, notes.path(), &story(9, "Nine"), no_links(), "text").unwrap();
+        create_story_note(&v, &story(9, "Nine"), no_links(), "text").unwrap();
         let body = std::fs::read_to_string(notes.path().join("stories/nine.md")).unwrap();
         assert!(body.ends_with("---\n\n# Nine\n\ntext\n"), "{body:?}");
     }
@@ -384,19 +411,17 @@ mod tests {
 
     #[test]
     fn link_branch_adds_once_and_reindexes() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         let StoryNote::Created { rel: path, .. } =
-            create_story_note(&conn, notes.path(), &story(7, "Seven"), no_links(), "").unwrap()
+            create_story_note(&v, &story(7, "Seven"), no_links(), "").unwrap()
         else {
             panic!("expected a new note");
         };
         let branch = linkable("me/feature");
+        assert_eq!(link_branch(&v, &path, &branch).unwrap(), LinkOutcome::Added);
         assert_eq!(
-            link_branch(&conn, notes.path(), &path, &branch).unwrap(),
-            LinkOutcome::Added
-        );
-        assert_eq!(
-            link_branch(&conn, notes.path(), &path, &branch).unwrap(),
+            link_branch(&v, &path, &branch).unwrap(),
             LinkOutcome::AlreadyLinked
         );
         assert_eq!(
@@ -413,12 +438,13 @@ mod tests {
 
     #[test]
     fn link_branch_surfaces_unsafe_layouts_and_missing_notes() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         std::fs::create_dir_all(notes.path().join("stories")).unwrap();
         let content = "---\nstory_id: sc-7\nbranches: {a: b}\n---\n";
         std::fs::write(notes.path().join("stories/odd.md"), content).unwrap();
         let branch = linkable("b");
-        let err = link_branch(&conn, notes.path(), &rel("stories/odd.md"), &branch).unwrap_err();
+        let err = link_branch(&v, &rel("stories/odd.md"), &branch).unwrap_err();
         assert!(
             format!("{err:#}").contains("layout not supported"),
             "{err:#}"
@@ -427,12 +453,13 @@ mod tests {
             std::fs::read_to_string(notes.path().join("stories/odd.md")).unwrap(),
             content
         );
-        assert!(link_branch(&conn, notes.path(), &rel("stories/none.md"), &branch).is_err());
+        assert!(link_branch(&v, &rel("stories/none.md"), &branch).is_err());
     }
 
     #[test]
     fn rename_linked_branch_reports_each_outcome() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         std::fs::create_dir_all(notes.path().join("stories")).unwrap();
         let write = |name: &str, content: &str| {
             std::fs::write(notes.path().join("stories").join(name), content).unwrap();
@@ -441,13 +468,8 @@ mod tests {
             "a.md",
             "---\nstory_id: sc-7\nbranches: [wip, other]\n---\nwip\n",
         );
-        let renamed = rename_linked_branch(
-            &conn,
-            notes.path(),
-            &rel("stories/a.md"),
-            &br("wip"),
-            &br("me/sc-7/seven"),
-        );
+        let renamed =
+            rename_linked_branch(&v, &rel("stories/a.md"), &br("wip"), &br("me/sc-7/seven"));
         assert!(
             matches!(renamed, NoteRename::Updated(ref r) if r == "stories/a.md"),
             "{renamed:?}"
@@ -465,24 +487,12 @@ mod tests {
             None
         );
 
-        let renamed = rename_linked_branch(
-            &conn,
-            notes.path(),
-            &rel("stories/a.md"),
-            &br("wip"),
-            &br("x"),
-        );
+        let renamed = rename_linked_branch(&v, &rel("stories/a.md"), &br("wip"), &br("x"));
         assert!(matches!(renamed, NoteRename::NotListed), "{renamed:?}");
 
         let odd = "---\nstory_id: sc-7\nbranches:\n  - a\n# c\n  - wip\n---\n";
         write("odd.md", odd);
-        let renamed = rename_linked_branch(
-            &conn,
-            notes.path(),
-            &rel("stories/odd.md"),
-            &br("wip"),
-            &br("x"),
-        );
+        let renamed = rename_linked_branch(&v, &rel("stories/odd.md"), &br("wip"), &br("x"));
         assert!(
             matches!(renamed, NoteRename::Failed(ref r, _) if r == "stories/odd.md"),
             "{renamed:?}"
@@ -490,6 +500,48 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(notes.path().join("stories/odd.md")).unwrap(),
             odd
+        );
+    }
+
+    #[test]
+    fn concurrent_story_note_creation_creates_one_note() {
+        let (cache, notes, _conn) = setup();
+        let threads = 6;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+        let results: Vec<StoryNote> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    let (cache, notes) = (cache.path(), notes.path());
+                    scope.spawn(move || {
+                        let conn = arc_index::open(cache).unwrap();
+                        barrier.wait();
+                        create_story_note(
+                            &Vault::new(&conn, notes, cache),
+                            &story(4, "Four"),
+                            no_links(),
+                            "",
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let created = results
+            .iter()
+            .filter(|r| matches!(r, StoryNote::Created { .. }))
+            .count();
+        assert_eq!(created, 1, "{results:?}");
+        assert!(
+            results.iter().all(|r| *r.rel() == "stories/four.md"),
+            "{results:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(notes.path().join("stories"))
+                .unwrap()
+                .count(),
+            1
         );
     }
 }

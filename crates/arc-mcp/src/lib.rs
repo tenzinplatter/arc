@@ -1,10 +1,10 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
@@ -17,7 +17,7 @@ use slugify::slugify;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use arc_context::{EntryText, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote};
+use arc_context::{EntryText, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote, Vault};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
@@ -319,14 +319,15 @@ impl ArcMcp {
         let appended = tokio::task::spawn_blocking(move || -> Result<String> {
             let section = section.as_deref().map(SectionHeading::parse).transpose()?;
             let conn = arc_index::open(&cache_dir)?;
+            let vault = Vault::new(&conn, &notes_dir, &cache_dir);
             let rel = resolve_note(&conn, NoteRef::from_args(id, path)?)?;
             Ok(match section {
                 Some(heading) => {
-                    append_note_section(&conn, &notes_dir, &rel, &content, &heading)?;
+                    append_note_section(&vault, &rel, &content, &heading)?;
                     format!("appended to {rel} under {heading}")
                 }
                 None => {
-                    append_note(&conn, &notes_dir, &rel, &content)?;
+                    append_note(&vault, &rel, &content)?;
                     format!("appended to {rel}")
                 }
             })
@@ -346,7 +347,7 @@ impl ArcMcp {
         let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let created = tokio::task::spawn_blocking(move || {
             let conn = arc_index::open(&cache_dir)?;
-            create_note(&conn, &notes_dir, &title, &body, tags)
+            create_note(&Vault::new(&conn, &notes_dir, &cache_dir), &title, &body, tags)
         })
         .await
         .map_err(internal)?;
@@ -377,7 +378,7 @@ impl ArcMcp {
         let (cache_dir, notes_dir) = (self.config.cache_dir.clone(), self.config.notes_dir.clone());
         let created = tokio::task::spawn_blocking(move || {
             let conn = arc_index::open(&cache_dir)?;
-            arc_context::create_story_note(&conn, &notes_dir, &story, links, &body)
+            arc_context::create_story_note(&Vault::new(&conn, &notes_dir, &cache_dir), &story, links, &body)
         })
         .await
         .map_err(internal)?;
@@ -642,61 +643,32 @@ fn resolve_note(conn: &Connection, note: NoteRef) -> Result<NoteRelPath> {
     }
 }
 
-fn rewrite_note(
-    conn: &Connection,
-    notes_dir: &Path,
-    rel: &NoteRelPath,
-    edit: impl FnOnce(&str) -> String,
-) -> Result<()> {
-    let existing = arc_index::read_note(notes_dir, rel)?
-        .ok_or_else(|| anyhow!("no note at '{rel}'"))?;
-    let body = edit(&existing);
-    std::fs::write(rel.abs(notes_dir), &body)?;
-    arc_index::reindex_note(conn, rel, &body)?;
+fn append_note(vault: &Vault, rel: &NoteRelPath, content: &str) -> Result<()> {
+    vault.edit(rel, |existing| Ok(arc_context::append_to_end(existing, content)))?;
     Ok(())
 }
 
-fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
-    rewrite_note(conn, notes_dir, rel, |existing| arc_context::append_to_end(existing, content))
+fn append_note_section(vault: &Vault, rel: &NoteRelPath, content: &str, heading: &SectionHeading) -> Result<()> {
+    vault.edit(rel, |existing| Ok(arc_context::append_to_section(existing, heading, content)))?;
+    Ok(())
 }
 
-fn append_note_section(
-    conn: &Connection,
-    notes_dir: &Path,
-    rel: &NoteRelPath,
-    content: &str,
-    heading: &SectionHeading,
-) -> Result<()> {
-    rewrite_note(conn, notes_dir, rel, |existing| {
-        arc_context::append_to_section(existing, heading, content)
-    })
-}
-
-fn create_note(
-    conn: &Connection,
-    notes_dir: &Path,
-    title: &str,
-    body: &str,
-    tags: Vec<String>,
-) -> Result<(String, NoteRelPath)> {
+fn create_note(vault: &Vault, title: &str, body: &str, tags: Vec<String>) -> Result<(String, NoteRelPath)> {
     let slug = slugify!(title);
     if slug.is_empty() {
         bail!("title produced an empty slug");
     }
     let rel = NoteRelPath::parse(&format!("{slug}.md"))?;
-    let abs = rel.abs(notes_dir);
-    if abs.exists() {
+    if rel.abs(vault.dir()).exists() {
         bail!("note '{slug}' already exists; use append_note");
     }
     let content = format!(
         "{}\n# {title}\n\n{body}\n",
         Frontmatter::general(slug.clone(), tags).to_block()?
     );
-    if let Some(p) = abs.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    std::fs::write(&abs, &content)?;
-    arc_index::reindex_note(conn, &rel, &content)?;
+    vault
+        .create(&rel, &content)
+        .with_context(|| format!("couldn't create note '{slug}'; if it exists, use append_note"))?;
     Ok((slug, rel))
 }
 
@@ -737,6 +709,8 @@ pub async fn run_stdio(config: &Config) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use arc_shortcut::api::story::comment::StoryComment;
     use arc_shortcut::api::user::MemberId;
@@ -765,28 +739,34 @@ mod tests {
         (cache, notes, conn)
     }
 
+    fn vault<'a>(conn: &'a Connection, notes: &'a tempfile::TempDir, cache: &tempfile::TempDir) -> Vault<'a> {
+        Vault::new(conn, notes.path(), cache.path())
+    }
+
     #[test]
     fn create_and_append_note() {
-        let (_c, notes, conn) = setup();
-        let created = create_note(&conn, notes.path(), "My Note", "body", vec!["t".into()]).unwrap();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
+        let created = create_note(&v, "My Note", "body", vec!["t".into()]).unwrap();
         assert_eq!(created, ("my-note".into(), rel("my-note.md")));
-        assert!(create_note(&conn, notes.path(), "My Note", "x", vec![]).is_err());
+        assert!(create_note(&v, "My Note", "x", vec![]).is_err());
 
         let rel = resolve(&conn, Some("my-note"), None).unwrap();
         assert_eq!(rel, "my-note.md");
-        append_note(&conn, notes.path(), &rel, "more\n\n").unwrap();
+        append_note(&v, &rel, "more\n\n").unwrap();
         let body = std::fs::read_to_string(notes.path().join(&rel)).unwrap();
         assert!(body.ends_with("body\n\nmore\n"));
-        assert!(append_note(&conn, notes.path(), &NoteRelPath::parse("missing.md").unwrap(), "x").is_err());
+        assert!(append_note(&v, &NoteRelPath::parse("missing.md").unwrap(), "x").is_err());
     }
 
     #[test]
     fn append_by_unnormalised_path_keeps_one_index_row() {
-        let (_c, notes, conn) = setup();
-        arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "b").unwrap();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
+        arc_context::create_story_note(&v, &story(8, "X"), NoteLinks::default(), "b").unwrap();
         let rel = resolve(&conn, None, Some("./stories//x.md")).unwrap();
         assert_eq!(rel, "stories/x.md");
-        append_note(&conn, notes.path(), &rel, "more").unwrap();
+        append_note(&v, &rel, "more").unwrap();
         let sql = arc_index::ReadOnlySql::parse("SELECT path FROM notes").unwrap();
         let rows = arc_index::query(&conn, &sql).unwrap();
         assert_eq!(rows, r#"[{"path":"stories/x.md"}]"#);
@@ -864,15 +844,16 @@ mod tests {
 
     #[test]
     fn story_note_result_points_existing_notes_at_append_note() {
-        let (_c, notes, conn) = setup();
-        let created = arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "").unwrap();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
+        let created = arc_context::create_story_note(&v, &story(8, "X"), NoteLinks::default(), "").unwrap();
         assert_eq!(
             serde_json::to_value(story_note_result(8.into(), created)).unwrap()["content"][0]["text"],
             "id: x\npath: stories/x.md"
         );
         let body = std::fs::read_to_string(notes.path().join("stories/x.md")).unwrap();
         assert!(body.ends_with("---\n\n# X\n"), "{body:?}");
-        let again = arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "y").unwrap();
+        let again = arc_context::create_story_note(&v, &story(8, "X"), NoteLinks::default(), "y").unwrap();
         assert_eq!(
             serde_json::to_value(story_note_result(8.into(), again)).unwrap(),
             json!({
@@ -958,9 +939,10 @@ mod tests {
 
     #[test]
     fn golden_slim_stories_json() {
-        let (_c, notes, conn) = setup();
+        let (cache, notes, conn) = setup();
+        let v = vault(&conn, &notes, &cache);
         let (mut cache, s) = golden_detail_story();
-        arc_context::create_story_note(&conn, notes.path(), &s, NoteLinks::default(), "hi").unwrap();
+        arc_context::create_story_note(&v, &s, NoteLinks::default(), "hi").unwrap();
         cache.iteration_stories = Some(vec![s, story(8, "eight")]);
         assert_eq!(
             slim_stories(&cache, &conn).unwrap(),
@@ -1089,7 +1071,8 @@ mod tests {
         let Some(repo) = git_repo_on(tmp.path(), "me/sc-7/x") else { return };
         let mcp = server_with_story(tmp.path(), repo).await;
         let conn = arc_index::open(&tmp.path().join("cache")).unwrap();
-        arc_context::create_story_note(&conn, &tmp.path().join("notes"), &story(7, "Story seven"), NoteLinks::default(), "b").unwrap();
+        let notes = tmp.path().join("notes");
+        arc_context::create_story_note(&Vault::new(&conn, &notes, &tmp.path().join("cache")), &story(7, "Story seven"), NoteLinks::default(), "b").unwrap();
         let result = mcp
             .log_session(log_args(json!({"done": "d", "state": "s", "next": "n"})))
             .await
@@ -1145,7 +1128,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mcp = ArcMcp::new(config_in(tmp.path()), tmp.path().to_path_buf());
         let conn = arc_index::open(&tmp.path().join("cache")).unwrap();
-        create_note(&conn, &tmp.path().join("notes"), "N", "body", vec![]).unwrap();
+        let notes = tmp.path().join("notes");
+        create_note(&Vault::new(&conn, &notes, &tmp.path().join("cache")), "N", "body", vec![]).unwrap();
         let append = |content: &str, section: Option<&str>| {
             mcp.append_note(Parameters(AppendNoteArgs {
                 id: None,

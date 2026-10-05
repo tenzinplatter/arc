@@ -19,7 +19,7 @@ pub use branch::{LinkableBranch, canonical_branch, story_id_in_branch};
 pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails, build_context};
 pub use git::GitHead;
 pub use note::{
-    LinkOutcome, NoteLinks, NoteRename, StoryNote, create_story_note, link_branch,
+    LinkOutcome, NoteLinks, NoteRename, StoryNote, Vault, create_story_note, link_branch,
     rename_linked_branch, write_session,
 };
 pub use resolve::{ResolvedStory, Via, resolve};
@@ -99,6 +99,7 @@ pub async fn link_current_branch(
     let branch = git::head(dir)?.require_branch()?.clone();
     let branch = LinkableBranch::parse(branch, git::default_branch(dir)?.as_ref())?;
     let conn = arc_index::open(&config.cache_dir)?;
+    let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
     linked_note(&conn, branch.as_branch(), id)?;
     let note = match arc_index::story_note(&conn, &config.notes_dir, id)? {
         Some((rel, _)) => rel,
@@ -107,12 +108,12 @@ pub async fn link_current_branch(
                 .await
                 .with_context(|| format!("couldn't load story {id} to create its note"))?;
             let links = NoteLinks::for_story(cache, &story);
-            match create_story_note(&conn, &config.notes_dir, &story, links, "")? {
+            match create_story_note(&vault, &story, links, "")? {
                 StoryNote::Created { rel, .. } | StoryNote::Existing(rel) => rel,
             }
         }
     };
-    let outcome = link_branch(&conn, &config.notes_dir, &note, &branch)?;
+    let outcome = link_branch(&vault, &note, &branch)?;
     Ok((branch.into_branch(), note, outcome))
 }
 
@@ -157,15 +158,21 @@ pub async fn log_session(
                 .await
                 .with_context(|| format!("couldn't load story {id} to create its note"))?;
             let links = NoteLinks::for_story(cache, &story);
-            create_story_note(&conn, &config.notes_dir, &story, links, "")?
+            create_story_note(
+                &Vault::new(&conn, &config.notes_dir, &config.cache_dir),
+                &story,
+                links,
+                "",
+            )?
         }
     };
+    let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
     let entry = SessionEntry {
         at: SessionTime::now(),
         branch: head.branch().cloned(),
         handoff,
     };
-    write_session(&conn, &config.notes_dir, note.rel(), &entry)?;
+    write_session(&vault, note.rel(), &entry)?;
     Ok(LoggedSession {
         story: id,
         note,
@@ -192,10 +199,11 @@ pub async fn rename_to_canonical(
         bail!("already on the canonical branch '{canonical}'");
     }
     let conn = arc_index::open(&config.cache_dir)?;
+    let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
     let linked = linked_note(&conn, &current, id)?;
     git::rename_current_branch(dir, &canonical)?;
     let note = match linked {
-        Some(rel) => rename_linked_branch(&conn, &config.notes_dir, &rel, &current, &canonical),
+        Some(rel) => rename_linked_branch(&vault, &rel, &current, &canonical),
         None => NoteRename::NotListed,
     };
     Ok(Renamed {
