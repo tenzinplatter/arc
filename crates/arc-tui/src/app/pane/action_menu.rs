@@ -9,7 +9,7 @@ use ratatui::{
 use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
-    api::story::{get_story_associated_iteration, Story},
+    api::story::Story,
     app::{
         cmd::{Cmd, NoteToOpen},
         model::DataState,
@@ -141,11 +141,7 @@ pub fn update(
         ActionMenuMsg::Accept => {
             let mut actions = match ActionMenuItem::from_idx(current) {
                 ActionMenuItem::OpenIterationNote => {
-                    let iteration = data_state.current_iterations_ref().and_then(|iterations| {
-                        get_story_associated_iteration(story.iteration_id, iterations)
-                    });
-
-                    match iteration {
+                    match data_state.iteration_for(story) {
                         Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
                         None => {
                             errors.push(ErrorInfo::new(
@@ -158,12 +154,8 @@ pub fn update(
                 }
 
                 ActionMenuItem::OpenNote => {
-                    let iteration_app_url = data_state
-                        .current_iterations_ref()
-                        .and_then(|iterations| {
-                            get_story_associated_iteration(story.iteration_id, iterations)
-                        })
-                        .map(|it| it.app_url.clone());
+                    let iteration_app_url =
+                        data_state.iteration_for(story).map(|it| it.app_url.clone());
 
                     vec![Cmd::OpenNote(NoteToOpen::story(story, iteration_app_url))]
                 }

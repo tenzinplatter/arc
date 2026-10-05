@@ -1,9 +1,3 @@
-//! Generic fuzzy-searchable list pane, shared by the epic and iteration views.
-//! Both are the same interaction: a filterable list with j/k navigation, a
-//! typing mode toggled with `/`, and Enter to open the selected item. The only
-//! differences (how the visible set is computed, and what opening produces) are
-//! supplied by the caller.
-
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::navkey;
@@ -37,16 +31,11 @@ pub enum SearchListMsg {
     ClearSearch,
 }
 
-/// What the caller should do after a generic update.
 pub enum Outcome<Id> {
     Idle,
-    /// Open the item with this id (the current selection).
     Open(Id),
 }
 
-/// Apply a message to the shared list state. `visible_ids` yields the ids of the
-/// currently-visible items (in display order) for a given query — the caller
-/// captures its own item set and filtering rule.
 pub fn update<Id: Copy + PartialEq>(
     state: &mut SearchListState<Id>,
     visible_ids: impl Fn(&str) -> Vec<Id>,
@@ -75,13 +64,13 @@ pub fn update<Id: Copy + PartialEq>(
         }
         SearchListMsg::SearchInput(c) => {
             state.search_query.push(c);
-            let visible = visible_ids(&state.search_query.clone());
+            let visible = visible_ids(&state.search_query);
             state.selected_id = visible.first().copied();
             Outcome::Idle
         }
         SearchListMsg::SearchBackspace => {
             state.search_query.pop();
-            let visible = visible_ids(&state.search_query.clone());
+            let visible = visible_ids(&state.search_query);
             if state.selected_id.is_none() {
                 state.selected_id = visible.first().copied();
             }
@@ -100,7 +89,7 @@ fn move_selection<Id: Copy + PartialEq>(
     visible_ids: &impl Fn(&str) -> Vec<Id>,
     forward: bool,
 ) {
-    let visible = visible_ids(&state.search_query.clone());
+    let visible = visible_ids(&state.search_query);
     if visible.is_empty() {
         return;
     }
@@ -117,33 +106,27 @@ fn move_selection<Id: Copy + PartialEq>(
     state.selected_id = Some(visible[next]);
 }
 
-/// How a key should be treated while a searchable list is focused.
 pub enum SearchKey {
-    /// Turn into this list message.
     Msg(SearchListMsg),
-    /// Not a search key — let normal key handling run.
     Passthrough,
-    /// Swallow (typing mode eats unhandled keys).
     Consume,
 }
 
-/// Interpret a key against the search state machine. `has_query` is whether a
-/// filter query is currently set.
-pub fn search_key(code: KeyCode, search_active: bool, has_query: bool) -> SearchKey {
-    if search_active {
-        match code {
-            // Enter still opens the selected item.
-            KeyCode::Enter => SearchKey::Passthrough,
-            // Esc exits typing mode but keeps the query so the list stays filtered.
-            KeyCode::Esc => SearchKey::Msg(SearchListMsg::DeactivateSearch),
-            KeyCode::Backspace => SearchKey::Msg(SearchListMsg::SearchBackspace),
-            KeyCode::Char(c) => SearchKey::Msg(SearchListMsg::SearchInput(c)),
-            _ => SearchKey::Consume,
+impl<Id> SearchListState<Id> {
+    pub fn search_key(&self, code: KeyCode) -> SearchKey {
+        if self.search_active {
+            match code {
+                KeyCode::Enter => SearchKey::Passthrough,
+                KeyCode::Esc => SearchKey::Msg(SearchListMsg::DeactivateSearch),
+                KeyCode::Backspace => SearchKey::Msg(SearchListMsg::SearchBackspace),
+                KeyCode::Char(c) => SearchKey::Msg(SearchListMsg::SearchInput(c)),
+                _ => SearchKey::Consume,
+            }
+        } else if !self.search_query.is_empty() && code == KeyCode::Esc {
+            SearchKey::Msg(SearchListMsg::ClearSearch)
+        } else {
+            SearchKey::Passthrough
         }
-    } else if has_query && code == KeyCode::Esc {
-        SearchKey::Msg(SearchListMsg::ClearSearch)
-    } else {
-        SearchKey::Passthrough
     }
 }
 

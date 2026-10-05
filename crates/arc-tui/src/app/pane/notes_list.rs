@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use arc_notes::NoteDir;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
@@ -9,87 +10,60 @@ use crate::{
 
 pub use crate::app::model::NotesListState;
 
-/// Scans one subdirectory of the notes directory and returns `.md` files sorted descending.
-fn scan_subdir(notes_dir: &Path, subdir: &str) -> Vec<PathBuf> {
-    let dir = notes_dir.join(subdir);
-    let mut notes = Vec::new();
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(_) => return notes,
+fn scan_dir_newest_first(notes_dir: &Path, dir: NoteDir) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(notes_dir.join(dir)) else {
+        return Vec::new();
     };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        notes.push(path);
-    }
-
+    let mut notes: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
     notes.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     notes
 }
 
-/// Per-category note paths returned by `scan_notes`.
-pub struct NotesScan {
-    pub daily: Vec<PathBuf>,
-    pub stories: Vec<PathBuf>,
-    pub iterations: Vec<PathBuf>,
-    pub epics: Vec<PathBuf>,
-    pub scratch: Vec<PathBuf>,
-}
-
-/// Scans all note subdirectories under `notes_dir`.
-pub fn scan_notes(notes_dir: &Path) -> NotesScan {
-    NotesScan {
-        daily: scan_subdir(notes_dir, "daily"),
-        stories: scan_subdir(notes_dir, "stories"),
-        iterations: scan_subdir(notes_dir, "iterations"),
-        epics: scan_subdir(notes_dir, "epics"),
-        scratch: scan_subdir(notes_dir, "scratch"),
+impl NotesListState {
+    pub fn rescan(&mut self, notes_dir: &Path) {
+        self.notes = NoteDir::ALL
+            .into_iter()
+            .map(|dir| (dir, scan_dir_newest_first(notes_dir, dir)))
+            .collect();
     }
-}
 
-/// Fixed section order: 0=daily, 1=story, 2=iteration, 3=epic, 4=scratch.
-fn section_notes(state: &NotesListState) -> [&Vec<PathBuf>; 5] {
-    [
-        &state.daily_notes,
-        &state.story_notes,
-        &state.iteration_notes,
-        &state.epic_notes,
-        &state.scratch_notes,
-    ]
-}
+    pub fn select_first_if_none(&mut self) {
+        if self.selected_path.is_none() {
+            self.selected_path = self.all_notes().first().map(|p| (*p).clone());
+        }
+    }
 
-/// Returns the section index (0–4) that the given path belongs to.
-fn section_of(state: &NotesListState, path: &PathBuf) -> Option<usize> {
-    section_notes(state)
-        .iter()
-        .enumerate()
-        .find(|(_, notes)| notes.contains(path))
-        .map(|(i, _)| i)
-}
+    pub fn notes_in(&self, dir: NoteDir) -> &[PathBuf] {
+        self.notes.get(&dir).map(Vec::as_slice).unwrap_or_default()
+    }
 
-/// Returns a flat list of all notes in display order.
-fn all_notes(state: &NotesListState) -> Vec<&PathBuf> {
-    state
-        .daily_notes
-        .iter()
-        .chain(state.story_notes.iter())
-        .chain(state.iteration_notes.iter())
-        .chain(state.epic_notes.iter())
-        .chain(state.scratch_notes.iter())
-        .collect()
+    pub fn sections(&self) -> impl Iterator<Item = (NoteDir, &[PathBuf])> {
+        NoteDir::ALL.into_iter().map(|dir| (dir, self.notes_in(dir)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sections().all(|(_, notes)| notes.is_empty())
+    }
+
+    fn all_notes(&self) -> Vec<&PathBuf> {
+        self.sections().flat_map(|(_, notes)| notes).collect()
+    }
+
+    fn section_of(&self, path: &PathBuf) -> Option<NoteDir> {
+        self.sections()
+            .find(|(_, notes)| notes.contains(path))
+            .map(|(dir, _)| dir)
+    }
 }
 
 pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
     match msg {
         NotesListMsg::FocusNext => {
-            let notes = all_notes(state);
+            let notes = state.all_notes();
             if notes.is_empty() {
                 return vec![Cmd::None];
             }
@@ -109,7 +83,7 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
         }
 
         NotesListMsg::FocusPrev => {
-            let notes = all_notes(state);
+            let notes = state.all_notes();
             if notes.is_empty() {
                 return vec![Cmd::None];
             }
@@ -120,9 +94,8 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
                 .and_then(|sel| notes.iter().position(|p| *p == sel));
 
             let prev_idx = match current_idx {
-                Some(0) => notes.len() - 1,
+                Some(0) | None => notes.len() - 1,
                 Some(idx) => idx - 1,
-                None => notes.len() - 1,
             };
 
             state.selected_path = Some(notes[prev_idx].clone());
@@ -130,26 +103,26 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
         }
 
         NotesListMsg::FocusSectionNext | NotesListMsg::FocusSectionPrev => {
-            let sections = section_notes(state);
-            let non_empty: Vec<usize> = (0..5).filter(|&i| !sections[i].is_empty()).collect();
+            let non_empty: Vec<NoteDir> = state
+                .sections()
+                .filter(|(_, notes)| !notes.is_empty())
+                .map(|(dir, _)| dir)
+                .collect();
             if non_empty.is_empty() {
                 return vec![Cmd::None];
             }
 
-            // Save current selection for current section
-            if let Some(ref sel) = state.selected_path.clone()
-                && let Some(cur_idx) = section_of(state, sel)
-            {
-                state.section_selections.insert(cur_idx, sel.clone());
+            let cur_section = state
+                .selected_path
+                .as_ref()
+                .and_then(|sel| state.section_of(sel));
+            if let (Some(sel), Some(dir)) = (state.selected_path.clone(), cur_section) {
+                state.section_selections.insert(dir, sel);
             }
 
-            // Find current section index within non_empty list
-            let cur_section = state.selected_path.as_ref()
-                .and_then(|sel| section_of(state, sel));
             let cur_pos = cur_section
-                .and_then(|s| non_empty.iter().position(|&i| i == s))
+                .and_then(|dir| non_empty.iter().position(|&d| d == dir))
                 .unwrap_or(0);
-
             let next_pos = if matches!(msg, NotesListMsg::FocusSectionNext) {
                 (cur_pos + 1) % non_empty.len()
             } else {
@@ -157,14 +130,13 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
             };
             let target = non_empty[next_pos];
 
-            // Restore saved selection for target section, or default to first item
-            let sections = section_notes(state);
+            let target_notes = state.notes_in(target);
             state.selected_path = state
                 .section_selections
                 .get(&target)
-                .filter(|p| sections[target].contains(p))
-                .cloned()
-                .or_else(|| sections[target].first().cloned());
+                .filter(|p| target_notes.contains(p))
+                .or_else(|| target_notes.first())
+                .cloned();
 
             vec![Cmd::None]
         }
@@ -191,5 +163,30 @@ pub fn key_to_msg(key: KeyEvent) -> Option<NotesListMsg> {
         navkey!(up) => Some(NotesListMsg::FocusPrev),
         KeyCode::Enter => Some(NotesListMsg::OpenNote),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn section_jump_wraps_in_display_order_and_restores_last_selection() {
+        let daily = PathBuf::from("/n/daily/a.md");
+        let (b, c) = (PathBuf::from("/n/stories/b.md"), PathBuf::from("/n/stories/c.md"));
+        let mut state = NotesListState {
+            selected_path: Some(c.clone()),
+            notes: [
+                (NoteDir::Daily, vec![daily.clone()]),
+                (NoteDir::Stories, vec![b, c.clone()]),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        update(&mut state, NotesListMsg::FocusSectionNext);
+        assert_eq!(state.selected_path, Some(daily));
+        update(&mut state, NotesListMsg::FocusSectionPrev);
+        assert_eq!(state.selected_path, Some(c));
     }
 }

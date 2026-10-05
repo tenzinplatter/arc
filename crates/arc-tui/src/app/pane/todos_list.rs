@@ -4,6 +4,8 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
+use arc_notes::Checkbox;
+
 use crate::{
     app::{cmd::Cmd, msg::TodosListMsg, pane::nav},
     todos::Todo,
@@ -11,7 +13,7 @@ use crate::{
 
 pub use crate::app::model::TodosListState;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SectionKind {
     Overdue,
     Today,
@@ -21,22 +23,6 @@ pub enum SectionKind {
 }
 
 impl SectionKind {
-    pub const OVERDUE: &'static str = "Overdue";
-    pub const TODAY: &'static str = "Today";
-    pub const TOMORROW: &'static str = "Tomorrow";
-    pub const FUTURE: &'static str = "Future";
-    pub const NO_DATE: &'static str = "No date";
-
-    pub fn discriminant(&self) -> &'static str {
-        match self {
-            SectionKind::Overdue => Self::OVERDUE,
-            SectionKind::Today => Self::TODAY,
-            SectionKind::Tomorrow => Self::TOMORROW,
-            SectionKind::Future(_) => Self::FUTURE,
-            SectionKind::NoDate => Self::NO_DATE,
-        }
-    }
-
     pub fn header(&self) -> String {
         match self {
             SectionKind::Overdue => "Overdue".to_string(),
@@ -53,84 +39,55 @@ pub struct DaySection {
     pub todos: Vec<Todo>,
 }
 
-/// Partition of todos by date-relative section. Empty buckets are `None` / empty
-/// so the view can decide what to render without filtering an `Vec` of variants.
 pub struct GroupedTodos {
-    pub overdue: Option<Vec<Todo>>,
-    pub today: Option<Vec<Todo>>,
-    pub tomorrow: Option<Vec<Todo>>,
+    pub overdue: Vec<Todo>,
+    pub today: Vec<Todo>,
+    pub tomorrow: Vec<Todo>,
     pub future: BTreeMap<NaiveDate, Vec<Todo>>,
-    pub no_date: Option<Vec<Todo>>,
+    pub no_date: Vec<Todo>,
 }
 
 impl GroupedTodos {
-    /// Flatten into a `Vec<DaySection>` in display order, dropping empty sections.
-    /// Used by both the renderer and the section-index-based nav helpers.
-    pub fn ordered_sections(&self) -> Vec<DaySection> {
-        let mut out = Vec::new();
-        if let Some(todos) = &self.overdue {
-            out.push(DaySection {
-                kind: SectionKind::Overdue,
-                todos: todos.clone(),
-            });
-        }
-        if let Some(todos) = &self.today {
-            out.push(DaySection {
-                kind: SectionKind::Today,
-                todos: todos.clone(),
-            });
-        }
-        if let Some(todos) = &self.tomorrow {
-            out.push(DaySection {
-                kind: SectionKind::Tomorrow,
-                todos: todos.clone(),
-            });
-        }
-        for (d, todos) in &self.future {
-            out.push(DaySection {
-                kind: SectionKind::Future(*d),
-                todos: todos.clone(),
-            });
-        }
-        if let Some(todos) = &self.no_date {
-            out.push(DaySection {
-                kind: SectionKind::NoDate,
-                todos: todos.clone(),
-            });
-        }
-        out
+    pub fn into_sections(self) -> Vec<DaySection> {
+        let dated = [
+            (SectionKind::Overdue, self.overdue),
+            (SectionKind::Today, self.today),
+            (SectionKind::Tomorrow, self.tomorrow),
+        ]
+        .into_iter()
+        .chain(self.future.into_iter().map(|(d, todos)| (SectionKind::Future(d), todos)))
+        .chain([(SectionKind::NoDate, self.no_date)]);
+        dated
+            .filter(|(_, todos)| !todos.is_empty())
+            .map(|(kind, todos)| DaySection { kind, todos })
+            .collect()
     }
 }
 
 pub fn group_todos_by_section(todos: &[Todo], today: NaiveDate) -> GroupedTodos {
     let tomorrow = today.succ_opt().expect("today + 1 day fits in NaiveDate");
-
-    let mut overdue: Vec<Todo> = Vec::new();
-    let mut today_section: Vec<Todo> = Vec::new();
-    let mut tomorrow_section: Vec<Todo> = Vec::new();
-    let mut future: BTreeMap<NaiveDate, Vec<Todo>> = BTreeMap::new();
-    let mut no_date: Vec<Todo> = Vec::new();
+    let mut grouped = GroupedTodos {
+        overdue: Vec::new(),
+        today: Vec::new(),
+        tomorrow: Vec::new(),
+        future: BTreeMap::new(),
+        no_date: Vec::new(),
+    };
 
     for todo in todos {
-        match todo.date {
-            None => no_date.push(todo.clone()),
-            Some(d) if d < today => overdue.push(todo.clone()),
-            Some(d) if d == today => today_section.push(todo.clone()),
-            Some(d) if d == tomorrow => tomorrow_section.push(todo.clone()),
-            Some(d) => future.entry(d).or_default().push(todo.clone()),
-        }
+        let bucket = match todo.date {
+            None => &mut grouped.no_date,
+            Some(d) if d < today => &mut grouped.overdue,
+            Some(d) if d == today => &mut grouped.today,
+            Some(d) if d == tomorrow => &mut grouped.tomorrow,
+            Some(d) => grouped.future.entry(d).or_default(),
+        };
+        bucket.push(todo.clone());
     }
 
-    GroupedTodos {
-        overdue: (!overdue.is_empty()).then_some(overdue),
-        today: (!today_section.is_empty()).then_some(today_section),
-        tomorrow: (!tomorrow_section.is_empty()).then_some(tomorrow_section),
-        future,
-        no_date: (!no_date.is_empty()).then_some(no_date),
-    }
+    grouped
 }
 
-/// Section + within-section index of a todo. Used for section-level jumps.
 fn find_todo_position(todo_id: Uuid, sections: &[DaySection]) -> Option<(usize, usize)> {
     for (section_idx, section) in sections.iter().enumerate() {
         if let Some(todo_idx) = section.todos.iter().position(|t| t.id == todo_id) {
@@ -140,7 +97,6 @@ fn find_todo_position(todo_id: Uuid, sections: &[DaySection]) -> Option<(usize, 
     None
 }
 
-/// Ids of all todos across sections, in display order.
 fn ordered_ids(sections: &[DaySection]) -> Vec<Uuid> {
     sections
         .iter()
@@ -156,12 +112,9 @@ fn prev_todo_id(current_id: Uuid, sections: &[DaySection]) -> Option<Uuid> {
     nav::step_wrapping(&ordered_ids(sections), current_id, false)
 }
 
-/// Sections built from only the todos that should currently be shown (incomplete,
-/// or completed during this session). Hidden completed todos are skipped so the
-/// UI never navigates onto them.
 fn visible_sections(state: &TodosListState, todos: &[Todo]) -> Vec<DaySection> {
     let visible: Vec<Todo> = todos.iter().filter(|t| state.is_visible(t)).cloned().collect();
-    group_todos_by_section(&visible, arc_core::time::today()).ordered_sections()
+    group_todos_by_section(&visible, arc_core::time::today()).into_sections()
 }
 
 pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListMsg) -> Vec<Cmd> {
@@ -200,8 +153,6 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
                 return vec![Cmd::None];
             };
             todo.completed = !todo.completed;
-            // Keep it on screen once completed so an accidental tick can be undone
-            // without the row vanishing.
             state.visible.insert(id);
 
             let mut cmds = vec![Cmd::WriteTodos];
@@ -209,7 +160,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
                 cmds.push(Cmd::SyncNoteCheckbox {
                     file: file.clone(),
                     text: todo.text.clone(),
-                    complete: todo.completed,
+                    to: Checkbox::from_completed(todo.completed),
                 });
             }
             cmds
@@ -241,7 +192,6 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             let Some(id) = state.selected_id else {
                 return vec![Cmd::None];
             };
-            // Don't allow deleting note-sourced todos via the TUI.
             let is_note_parsed = todos
                 .iter()
                 .find(|t| t.id == id)
@@ -363,10 +313,9 @@ mod tests {
     fn refresh_visible_drops_ids_that_disappear() {
         let todo = manual_undated("gone soon");
         let mut state = TodosListState::default();
-        state.refresh_visible(&[todo.clone()]);
+        state.refresh_visible(std::slice::from_ref(&todo));
         assert!(state.visible.contains(&todo.id));
 
-        // Todo no longer in the list (e.g. note line deleted) -> id pruned.
         state.refresh_visible(&[]);
         assert!(state.visible.is_empty());
     }
@@ -387,22 +336,15 @@ mod tests {
         ];
 
         let grouped = group_todos_by_section(&todos, today);
-        assert!(grouped.overdue.is_some());
-        assert!(grouped.today.is_some());
-        assert!(grouped.tomorrow.is_some());
-        assert_eq!(grouped.future.len(), 1);
-        assert!(grouped.no_date.is_some());
-
-        let sections = grouped.ordered_sections();
-        let kinds: Vec<_> = sections.iter().map(|s| s.kind.discriminant()).collect();
+        let kinds: Vec<_> = grouped.into_sections().into_iter().map(|s| s.kind).collect();
         assert_eq!(
             kinds,
             vec![
-                SectionKind::OVERDUE,
-                SectionKind::TODAY,
-                SectionKind::TOMORROW,
-                SectionKind::FUTURE,
-                SectionKind::NO_DATE,
+                SectionKind::Overdue,
+                SectionKind::Today,
+                SectionKind::Tomorrow,
+                SectionKind::Future(next_week),
+                SectionKind::NoDate,
             ]
         );
     }

@@ -159,13 +159,13 @@ impl App {
             cmd::Cmd::SyncNoteCheckbox {
                 file,
                 text,
-                complete,
+                to,
             } => {
                 let notes_dir = self.model.config.notes_dir.clone();
                 let sender = self.sender.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        crate::todos::toggle_note_checkbox(&notes_dir, &file, &text, complete).await
+                        crate::todos::toggle_note_checkbox_to(&notes_dir, &file, &text, to).await
                     {
                         let info = ErrorInfo::new(
                             "Failed to sync todo state to note".to_string(),
@@ -268,7 +268,7 @@ impl App {
             ViewType::Stories => {
                 let story_list_view = StoryListView::new(
                     &self.model.data.stories,
-                    self.model.data.current_iterations.as_deref(),
+                    self.model.data.current_iterations.as_deref().unwrap_or(&[]),
                     &self.model.ui.story_list,
                     self.model.data.active_story.as_ref(),
                     self.model.ui.loading,

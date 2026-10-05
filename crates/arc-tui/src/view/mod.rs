@@ -6,6 +6,7 @@ pub mod keybinds_panel;
 pub mod description_modal;
 pub mod navbar;
 pub mod notes_list;
+pub mod search_bar;
 pub mod story_item_builder;
 pub mod story_list;
 pub mod todos_list;

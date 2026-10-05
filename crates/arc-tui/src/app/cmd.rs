@@ -6,7 +6,7 @@ use std::{
 
 use slugify::slugify;
 
-use arc_notes::NoteRelPath;
+use arc_notes::{Checkbox, NoteDir, NoteRelPath};
 
 use crate::{
     api::{epic::EpicSlim, iteration::Iteration, story::Story},
@@ -44,7 +44,7 @@ pub enum Cmd {
     SyncNoteCheckbox {
         file: NoteRelPath,
         text: String,
-        complete: bool,
+        to: Checkbox,
     },
 }
 
@@ -79,8 +79,8 @@ pub enum NotePath {
 }
 
 impl NotePath {
-    fn in_notes_dir(rel: String) -> Self {
-        NotePath::InNotesDir(NoteRelPath::from_trusted(rel))
+    fn in_dir(dir: NoteDir, slug: &str) -> Self {
+        NotePath::InNotesDir(NoteRelPath::in_dir(dir, slug))
     }
 
     fn resolve(&self, notes_dir: &Path) -> PathBuf {
@@ -109,7 +109,7 @@ impl NoteToOpen {
     pub fn story(story: &Story, iteration_app_url: Option<String>) -> Self {
         let slug = slugify!(&story.name);
         Self {
-            path: NotePath::in_notes_dir(format!("stories/{slug}.md")),
+            path: NotePath::in_dir(NoteDir::Stories, &slug),
             template: Frontmatter::story(
                 slug,
                 story.id,
@@ -123,7 +123,7 @@ impl NoteToOpen {
     pub fn iteration(iteration: &Iteration) -> Self {
         let slug = slugify!(&iteration.name);
         Self {
-            path: NotePath::in_notes_dir(format!("iterations/{slug}.md")),
+            path: NotePath::in_dir(NoteDir::Iterations, &slug),
             template: Frontmatter::iteration(
                 slug,
                 iteration.id,
@@ -136,17 +136,17 @@ impl NoteToOpen {
     pub fn epic(epic: &EpicSlim) -> Self {
         let slug = slugify!(&epic.name);
         Self {
-            path: NotePath::in_notes_dir(format!("epics/{slug}.md")),
+            path: NotePath::in_dir(NoteDir::Epics, &slug),
             template: Frontmatter::epic(slug, epic.id, epic.name.clone(), epic.app_url.clone()),
         }
     }
 
     pub fn daily(date: chrono::NaiveDate) -> Self {
-        Self::existing_or_daily_template(NotePath::in_notes_dir(format!("daily/{date}.md")))
+        Self::existing_or_daily_template(NotePath::in_dir(NoteDir::Daily, &date.to_string()))
     }
 
     pub fn scratch(name: &str) -> Self {
-        let path = NotePath::in_notes_dir(format!("scratch/{}.md", slugify!(name)));
+        let path = NotePath::in_dir(NoteDir::Scratch, &slugify!(name));
         let template = Frontmatter::scratch(path.obsidian_id());
         Self { path, template }
     }

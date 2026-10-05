@@ -12,8 +12,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
     if let Some(cmd) = args.command {
-        // Migrate runs before config is loaded, since it exists precisely
-        // to move config into place.
+        // Must precede Config::read: migrate is what moves the config into place.
         if matches!(cmd, Commands::Migrate) {
             migrate::migrate()?;
             return Ok(());
@@ -26,7 +25,6 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // need to do the ratatui stuff manually since we are using await in the main
     let mut terminal = ratatui::init();
     let result = arc_tui::run(&mut terminal).await;
     ratatui::restore();

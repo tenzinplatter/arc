@@ -8,38 +8,23 @@ use ratatui::{
 
 use crate::api::story::Story;
 
-/// Renders a single story item with divider at the bottom. When it's the first
-/// story of an iteration group, an optional section header rides above it so
-/// the whole list can be one scrolling `ListView`.
 pub struct StoryItemWidget<'a> {
     story: &'a Story,
     is_active: bool,
     is_selected: bool,
-    _width: u16,
-    is_completed: bool,
     header: Option<String>,
 }
 
 impl<'a> StoryItemWidget<'a> {
-    pub fn new(
-        story: &'a Story,
-        is_active: bool,
-        is_selected: bool,
-        width: u16,
-        is_completed: bool,
-        header: Option<String>,
-    ) -> Self {
+    pub fn new(story: &'a Story, is_active: bool, is_selected: bool, header: Option<String>) -> Self {
         Self {
             story,
             is_active,
             is_selected,
-            _width: width,
-            is_completed,
             header,
         }
     }
 
-    /// Total height: story line + divider, plus a header row when present.
     pub fn height(&self) -> u16 {
         2 + self.header.is_some() as u16
     }
@@ -51,7 +36,6 @@ impl Widget for StoryItemWidget<'_> {
             return;
         }
 
-        // Optional section header on the first row.
         let mut y = area.y;
         if let Some(header) = &self.header {
             let line = Line::from(format!(" ── {header} ──")).style(Style::default().dark_gray());
@@ -62,12 +46,10 @@ impl Widget for StoryItemWidget<'_> {
             return;
         }
 
-        // Render story content
         let content = self.render_story_line();
         buf.set_line(area.x, y, &content, area.width);
         y += 1;
 
-        // Render divider below it
         if y < area.y + area.height {
             let divider_style = if self.is_selected {
                 Style::default().fg(Color::Yellow)
@@ -82,39 +64,28 @@ impl Widget for StoryItemWidget<'_> {
 
 impl StoryItemWidget<'_> {
     fn render_story_line(&self) -> Line<'static> {
+        let completed = self.story.completed;
         let mut spans = Vec::new();
 
-        // Base style: gray if completed
-        let base_style = if self.is_completed {
+        let base_style = if completed {
             Style::default().gray()
         } else {
             Style::default()
         };
 
-        // Active indicator
         if self.is_active {
-            let color = if self.is_completed {
-                Color::DarkGray
-            } else {
-                Color::Green
-            };
+            let color = if completed { Color::DarkGray } else { Color::Green };
             spans.push(Span::styled("● ", Style::default().fg(color)));
         } else {
             spans.push(Span::raw("  "));
         }
 
-        // Story ID
-        let id_color = if self.is_completed {
-            Color::DarkGray
-        } else {
-            Color::Blue
-        };
+        let id_color = if completed { Color::DarkGray } else { Color::Blue };
         spans.push(Span::styled(
             format!("sc-{} ", self.story.id),
             Style::default().fg(id_color),
         ));
 
-        // Story name (apply bold if selected)
         let name_style = if self.is_selected {
             base_style.bold()
         } else {

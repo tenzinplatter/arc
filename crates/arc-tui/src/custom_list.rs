@@ -7,7 +7,6 @@ use ratatui::{
     widgets::{Block, Padding, Paragraph, Widget, WidgetRef},
 };
 
-/// Items that can appear in a `LinearList` must expose an id and a display label.
 pub trait LinearListItem {
     type Id: Copy + Eq;
     fn id(&self) -> Self::Id;
@@ -26,7 +25,6 @@ impl LinearListItem for arc_shortcut::api::epic::EpicSlim {
     fn label(&self) -> &str { &self.name }
 }
 
-/// A simple, bordered linear list widget with selection highlighting and dividers.
 pub struct LinearList<'a, T: LinearListItem> {
     pub items: &'a [T],
     pub selected_id: Option<T::Id>,
@@ -63,8 +61,6 @@ impl<T: LinearListItem> WidgetRef for LinearList<'_, T> {
             return;
         }
 
-        // Each item is 2 rows (label + divider). Scroll so the selected item
-        // stays on screen instead of clipping off the bottom.
         const PER_ITEM: u16 = 2;
         let visible = (inner.height / PER_ITEM).max(1) as usize;
         let selected_idx = self

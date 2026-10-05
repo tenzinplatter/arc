@@ -11,9 +11,7 @@ pub fn migrate() -> Result<()> {
     let old_config_dir = home.join(".config").join(OLD_NAME);
     let new_config_dir = home.join(".config").join(NEW_NAME);
 
-    // Read paths from the old config before moving anything, so we can also
-    // chase down user-customised cache_dir / notes_dir locations after the
-    // directory rename.
+    // Read before the rename so customised cache_dir/notes_dir can still be found after it.
     let old_config_file = old_config_dir.join("config.toml");
     let old_notes_dir = read_string_field(&old_config_file, "notes_dir")?;
     let old_cache_dir_in_config = read_string_field(&old_config_file, "cache_dir")?;
@@ -88,8 +86,7 @@ fn rewrite_paths_in_config(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// Minimal TOML reader that handles the `key = "value"` lines confy emits.
-// We only need this to peek at the old config before we move it.
+// Only handles the `key = "value"` lines confy emits.
 fn read_string_field(config_path: &Path, field: &str) -> Result<Option<String>> {
     if !config_path.exists() {
         return Ok(None);

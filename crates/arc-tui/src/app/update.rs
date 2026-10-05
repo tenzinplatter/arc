@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::{
-    api::story::get_story_associated_iteration,
     app::{
         App,
         cmd::{Cmd, NotePath, NoteToOpen},
@@ -38,7 +37,7 @@ impl App {
             Msg::StoryList(story_msg) => story_list::update(
                 &mut self.model.ui.story_list,
                 &self.model.data.stories,
-                self.model.data.current_iterations_ref(),
+                self.model.data.current_iterations.as_deref().unwrap_or(&[]),
                 story_msg,
             ),
 
@@ -92,34 +91,15 @@ impl App {
             Msg::SwitchToView(view_type) => {
                 self.model.ui.active_view = view_type;
                 if view_type == ViewType::Notes {
-                    let scan = notes_list::scan_notes(&self.model.config.notes_dir);
-                    self.model.ui.notes_list.daily_notes = scan.daily;
-                    self.model.ui.notes_list.story_notes = scan.stories;
-                    self.model.ui.notes_list.iteration_notes = scan.iterations;
-                    self.model.ui.notes_list.epic_notes = scan.epics;
-                    self.model.ui.notes_list.scratch_notes = scan.scratch;
-                    if self.model.ui.notes_list.selected_path.is_none() {
-                        let nl = &self.model.ui.notes_list;
-                        let first = nl.daily_notes.first()
-                            .or_else(|| nl.story_notes.first())
-                            .or_else(|| nl.iteration_notes.first())
-                            .or_else(|| nl.epic_notes.first())
-                            .or_else(|| nl.scratch_notes.first())
-                            .cloned();
-                        self.model.ui.notes_list.selected_path = first;
-                    }
+                    self.model.ui.notes_list.rescan(&self.model.config.notes_dir);
+                    self.model.ui.notes_list.select_first_if_none();
                 }
                 vec![Cmd::None]
             }
 
             Msg::NoteOpened => {
                 if self.model.ui.active_view == ViewType::Notes {
-                    let scan = notes_list::scan_notes(&self.model.config.notes_dir);
-                    self.model.ui.notes_list.daily_notes = scan.daily;
-                    self.model.ui.notes_list.story_notes = scan.stories;
-                    self.model.ui.notes_list.iteration_notes = scan.iterations;
-                    self.model.ui.notes_list.epic_notes = scan.epics;
-                    self.model.ui.notes_list.scratch_notes = scan.scratch;
+                    self.model.ui.notes_list.rescan(&self.model.config.notes_dir);
                 }
                 vec![Cmd::None]
             }
@@ -202,19 +182,13 @@ impl App {
     }
 
     fn try_handle_search_key(&mut self, key: KeyEvent) -> Option<Vec<Cmd>> {
-        let (search_active, has_query) = match self.model.ui.active_view {
-            ViewType::Iterations => {
-                let state = &self.model.ui.iteration_list;
-                (state.search_active, !state.search_query.is_empty())
-            }
-            ViewType::Epics => {
-                let state = &self.model.ui.epic_list;
-                (state.search_active, !state.search_query.is_empty())
-            }
+        let search_key = match self.model.ui.active_view {
+            ViewType::Iterations => self.model.ui.iteration_list.search_key(key.code),
+            ViewType::Epics => self.model.ui.epic_list.search_key(key.code),
             _ => return None,
         };
 
-        match searchable_list::search_key(key.code, search_active, has_query) {
+        match search_key {
             searchable_list::SearchKey::Passthrough => None,
             searchable_list::SearchKey::Consume => Some(vec![Cmd::None]),
             searchable_list::SearchKey::Msg(list_msg) => {
@@ -328,15 +302,7 @@ impl App {
                                 .and_then(|id| self.model.data.stories.iter().find(|s| s.id == id));
 
                             if let Some(story) = story {
-                                let iteration = self
-                                    .model
-                                    .data
-                                    .current_iterations_ref()
-                                    .and_then(|its| {
-                                        get_story_associated_iteration(story.iteration_id, its)
-                                    });
-
-                                return match iteration {
+                                return match self.model.data.iteration_for(story) {
                                     Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
                                     None => {
                                         self.model.ui.errors.push(ErrorInfo::new(
@@ -416,7 +382,7 @@ impl App {
                 active,
                 &stories,
                 self.model.data.current_iterations.as_deref().unwrap_or(&[]),
-                self.model.cache.user_id,
+                self.api_client.user().id,
             )
         {
             self.model.data.active_story = None;
@@ -473,13 +439,11 @@ fn active_story_left_iteration(
     active: &crate::api::story::Story,
     stories: &[crate::api::story::Story],
     current_iterations: &[crate::api::iteration::Iteration],
-    user_id: Option<crate::api::user::MemberId>,
+    user_id: crate::api::user::MemberId,
 ) -> bool {
     !stories.iter().any(|s| s.id == active.id)
-        && active
-            .iteration_id
-            .is_some_and(|id| current_iterations.iter().any(|it| it.id == id))
-        && user_id.is_some_and(|uid| active.owner_ids.contains(&uid))
+        && crate::api::story::iteration_of(active, current_iterations).is_some()
+        &&active.owner_ids.contains(&user_id)
 }
 
 fn id_set_unchanged<T, Id: PartialEq>(old: &[T], new: &[T], id: impl Fn(&T) -> Id) -> bool {
@@ -526,23 +490,22 @@ mod tests {
         let listed = [story(1, Some(10), vec![me])];
 
         let still_listed = story(1, Some(10), vec![me]);
-        assert!(!active_story_left_iteration(&still_listed, &listed, &current, Some(me)));
+        assert!(!active_story_left_iteration(&still_listed, &listed, &current, me));
 
         let dropped_out = story(2, Some(10), vec![me]);
-        assert!(active_story_left_iteration(&dropped_out, &listed, &current, Some(me)));
+        assert!(active_story_left_iteration(&dropped_out, &listed, &current, me));
 
         let other_iteration = story(3, Some(99), vec![me]);
-        assert!(!active_story_left_iteration(&other_iteration, &listed, &current, Some(me)));
+        assert!(!active_story_left_iteration(&other_iteration, &listed, &current, me));
 
         let no_iteration = story(4, None, vec![me]);
-        assert!(!active_story_left_iteration(&no_iteration, &listed, &current, Some(me)));
+        assert!(!active_story_left_iteration(&no_iteration, &listed, &current, me));
 
         let someone_elses = story(5, Some(10), vec![other]);
-        assert!(!active_story_left_iteration(&someone_elses, &listed, &current, Some(me)));
+        assert!(!active_story_left_iteration(&someone_elses, &listed, &current, me));
 
         let old_cache_copy = story(6, Some(10), vec![]);
-        assert!(!active_story_left_iteration(&old_cache_copy, &listed, &current, Some(me)));
+        assert!(!active_story_left_iteration(&old_cache_copy, &listed, &current, me));
 
-        assert!(!active_story_left_iteration(&dropped_out, &listed, &current, None));
     }
 }

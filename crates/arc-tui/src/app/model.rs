@@ -11,12 +11,17 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    api::{epic::EpicSlim, iteration::Iteration, story::Story},
+    api::{
+        epic::EpicSlim,
+        iteration::Iteration,
+        story::{Story, iteration_of},
+    },
     cache::Cache,
     error::ErrorInfo,
     todos::Todo,
 };
 use arc_core::{Config, EpicId, IterationId, StoryId};
+use arc_notes::NoteDir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoadingState {
@@ -178,12 +183,8 @@ impl Default for StoryListState {
 #[derive(Clone, Debug, Default)]
 pub struct NotesListState {
     pub selected_path: Option<PathBuf>,
-    pub daily_notes: Vec<PathBuf>,
-    pub story_notes: Vec<PathBuf>,
-    pub iteration_notes: Vec<PathBuf>,
-    pub epic_notes: Vec<PathBuf>,
-    pub scratch_notes: Vec<PathBuf>,
-    pub section_selections: HashMap<usize, PathBuf>,
+    pub notes: HashMap<NoteDir, Vec<PathBuf>>,
+    pub section_selections: HashMap<NoteDir, PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -206,8 +207,8 @@ impl TodosListState {
 }
 
 impl DataState {
-    pub fn current_iterations_ref(&self) -> Option<Vec<&Iteration>> {
-        self.current_iterations.as_ref().map(|v| v.iter().collect())
+    pub fn iteration_for(&self, story: &Story) -> Option<&Iteration> {
+        iteration_of(story, self.current_iterations.as_deref()?)
     }
 }
 

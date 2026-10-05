@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use arc_notes::NoteDir;
 use chrono::NaiveDate;
 use ratatui::{
     buffer::Buffer,
@@ -22,13 +23,11 @@ impl<'a> NotesListView<'a> {
     }
 }
 
-/// Format a daily note stem like `2026-02-18` into "Tue, Feb 18 2026"
 fn format_daily_name(stem: &str) -> Option<String> {
     let date = NaiveDate::parse_from_str(stem, "%Y-%m-%d").ok()?;
     Some(date.format("%a, %b %-d %Y").to_string())
 }
 
-/// Format a slug like `iteration-42-sprint-name` into "Iteration 42 Sprint Name"
 fn format_slug(stem: &str) -> String {
     stem.split('-')
         .map(|word| {
@@ -45,13 +44,23 @@ fn format_slug(stem: &str) -> String {
         .join(" ")
 }
 
-fn display_name(path: &Path, is_daily: bool) -> String {
+fn section_title(dir: NoteDir) -> &'static str {
+    match dir {
+        NoteDir::Daily => "Daily Notes",
+        NoteDir::Stories => "Story Notes",
+        NoteDir::Iterations => "Iteration Notes",
+        NoteDir::Epics => "Epic Notes",
+        NoteDir::Scratch => "Scratch Notes",
+    }
+}
+
+fn display_name(path: &Path, dir: NoteDir) -> String {
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(s) => s,
         None => return "???".to_string(),
     };
 
-    if is_daily
+    if dir == NoteDir::Daily
         && let Some(formatted) = format_daily_name(stem)
     {
         return formatted;
@@ -62,13 +71,7 @@ fn display_name(path: &Path, is_daily: bool) -> String {
 
 impl<'a> WidgetRef for NotesListView<'a> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let s = self.state;
-        if s.daily_notes.is_empty()
-            && s.story_notes.is_empty()
-            && s.iteration_notes.is_empty()
-            && s.epic_notes.is_empty()
-            && s.scratch_notes.is_empty()
-        {
+        if self.state.is_empty() {
             let block = Block::bordered().border_set(border::THICK);
             let inner = block.inner(area);
             block.render(area, buf);
@@ -87,24 +90,17 @@ impl<'a> WidgetRef for NotesListView<'a> {
             return;
         }
 
-        let all_sections: Vec<(&str, &[PathBuf], bool)> = vec![
-            ("Daily Notes",     &self.state.daily_notes,     true),
-            ("Story Notes",     &self.state.story_notes,     false),
-            ("Iteration Notes", &self.state.iteration_notes, false),
-            ("Epic Notes",      &self.state.epic_notes,      false),
-            ("Scratch Notes",   &self.state.scratch_notes,   false),
-        ];
-
-        let sections: Vec<_> = all_sections
-            .into_iter()
-            .filter(|(_, notes, _)| !notes.is_empty())
+        let sections: Vec<(NoteDir, &[PathBuf])> = self
+            .state
+            .sections()
+            .filter(|(_, notes)| !notes.is_empty())
             .collect();
 
         let n = sections.len() as u32;
         let outer_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Fill(1)).collect();
         let section_chunks = Layout::vertical(outer_constraints).split(area);
 
-        for (idx, (title, notes, is_daily)) in sections.iter().enumerate() {
+        for (idx, (dir, notes)) in sections.iter().enumerate() {
             let section_area = section_chunks[idx];
 
             let inner_chunks = Layout::vertical([
@@ -113,20 +109,17 @@ impl<'a> WidgetRef for NotesListView<'a> {
             ])
             .split(section_area);
 
-            // Render section header
             let header_style = Style::default().dark_gray();
-            let display = format!(" ── {} ──", title);
+            let display = format!(" ── {} ──", section_title(*dir));
             let title_line = Line::from(display).style(header_style);
             buf.set_line(inner_chunks[0].x, inner_chunks[0].y, &title_line, inner_chunks[0].width);
 
-            // Render bordered note items
             let list_block = Block::bordered()
                 .border_set(border::THICK)
                 .padding(Padding::vertical(1));
             let items_area = list_block.inner(inner_chunks[1]);
             list_block.render(inner_chunks[1], buf);
 
-            // Compute scroll offset so selected item stays visible
             let visible_items = (items_area.height / 2) as usize;
             let sel_idx = self.state.selected_path.as_ref()
                 .and_then(|sel| notes.iter().position(|p| p == sel));
@@ -144,7 +137,7 @@ impl<'a> WidgetRef for NotesListView<'a> {
                 }
 
                 let is_selected = self.state.selected_path.as_ref() == Some(note_path);
-                let name = display_name(note_path, *is_daily);
+                let name = display_name(note_path, *dir);
 
                 let name_style = if is_selected {
                     Style::default().bold()

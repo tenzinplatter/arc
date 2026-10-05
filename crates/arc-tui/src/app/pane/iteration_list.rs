@@ -10,8 +10,6 @@ use crate::app::model::IterationListState;
 use crate::app::msg::IterationListMsg;
 use crate::app::pane::searchable_list::{self, Outcome};
 
-/// Returns the subset of `items` whose name fuzzy-matches `query`.
-/// If `query` is empty, all items are returned.
 pub fn filter_items<'a>(items: &'a [Iteration], query: &str) -> Vec<&'a Iteration> {
     if query.is_empty() {
         return items.iter().collect();
@@ -23,7 +21,6 @@ pub fn filter_items<'a>(items: &'a [Iteration], query: &str) -> Vec<&'a Iteratio
         .collect()
 }
 
-/// Active iterations first, then all others (excluding actives), both filtered by query.
 pub fn combined_visible<'a>(
     current: &'a [Iteration],
     all: &'a [Iteration],

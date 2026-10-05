@@ -30,8 +30,6 @@ impl<'a> TodosListView<'a> {
 
 impl WidgetRef for TodosListView<'_> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        // Only render todos that are incomplete or were completed this session;
-        // completed todos hidden since launch are filtered out.
         let visible: Vec<Todo> = self
             .todos
             .iter()
@@ -59,10 +57,8 @@ impl WidgetRef for TodosListView<'_> {
         }
 
         let today = today();
-        let sections = group_todos_by_section(&visible, today).ordered_sections();
+        let sections = group_todos_by_section(&visible, today).into_sections();
 
-        // Flatten sections into one scrolling list; the first todo of each
-        // section carries its header, so the selection can't clip off-screen.
         struct Row {
             todo: Todo,
             header: Option<String>,

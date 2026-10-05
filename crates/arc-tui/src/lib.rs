@@ -4,10 +4,7 @@ use anyhow::Context;
 use ratatui::DefaultTerminal;
 
 use crate::{
-    api::{
-        ApiClient,
-        story::{Story, get_story_associated_iteration},
-    },
+    api::{ApiClient, story::Story},
     app::{
         App,
         cmd::{NoteToOpen, open_mux_session},
@@ -58,12 +55,7 @@ pub async fn handle_command(
     match command {
         Commands::Note => {
             if let Some(story) = &cache.active_story {
-                let iteration_app_url = cache
-                    .current_iterations_ref()
-                    .and_then(|iterations| {
-                        get_story_associated_iteration(story.iteration_id, iterations)
-                    })
-                    .map(|it| it.app_url.clone());
+                let iteration_app_url = cache.iteration_for(story).map(|it| it.app_url.clone());
 
                 NoteToOpen::story(story, iteration_app_url).open(config)
             } else {
@@ -98,12 +90,7 @@ pub async fn handle_command(
 
         Commands::Cat => {
             if let Some(story) = &cache.active_story {
-                let iteration_app_url = cache
-                    .current_iterations_ref()
-                    .and_then(|iterations| {
-                        get_story_associated_iteration(story.iteration_id, iterations)
-                    })
-                    .map(|it| it.app_url.clone());
+                let iteration_app_url = cache.iteration_for(story).map(|it| it.app_url.clone());
 
                 let note = Note::new(
                     &config.notes_dir,

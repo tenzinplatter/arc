@@ -1,6 +1,5 @@
 use textwrap::wrap;
 
-/// Count how many visual lines text will occupy when wrapped to max_width.
 pub fn count_wrapped_lines(text: &str, max_width: usize) -> usize {
     if text.is_empty() || max_width == 0 {
         return 1;
@@ -8,8 +7,6 @@ pub fn count_wrapped_lines(text: &str, max_width: usize) -> usize {
     wrap(text, max_width).len().max(1)
 }
 
-/// Truncate text to fit within max_lines when wrapped to max_width.
-/// Adds "..." if truncation occurs.
 pub fn truncate_to_lines(text: &str, max_width: usize, max_lines: usize) -> String {
     if max_width == 0 || max_lines == 0 {
         return String::new();
@@ -21,14 +18,12 @@ pub fn truncate_to_lines(text: &str, max_width: usize, max_lines: usize) -> Stri
         return text.to_string();
     }
 
-    // Take first max_lines, join them, and add ellipsis
     let mut result: String = lines[..max_lines]
         .iter()
         .map(|l| l.as_ref())
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Trim to make room for ellipsis if needed
     while !result.is_empty() && wrap(&format!("{}...", result), max_width).len() > max_lines {
         result.pop();
     }
@@ -61,14 +56,11 @@ mod tests {
 
         #[test]
         fn text_wraps_to_multiple_lines() {
-            // "hello world" with width 6 -> "hello" + "world" = 2 lines
             assert_eq!(count_wrapped_lines("hello world", 6), 2);
         }
 
         #[test]
         fn long_text_wraps_to_many_lines() {
-            // "the quick brown fox" with width 10
-            // "the quick" (9) + "brown fox" (9) = 2 lines
             assert_eq!(count_wrapped_lines("the quick brown fox", 10), 2);
         }
     }
@@ -93,14 +85,11 @@ mod tests {
 
         #[test]
         fn text_wrapping_within_limit_returns_original() {
-            // "hello world" wraps to 2 lines at width 6, max 3 lines = no truncation
             assert_eq!(truncate_to_lines("hello world", 6, 3), "hello world");
         }
 
         #[test]
         fn text_exceeding_limit_is_truncated_with_ellipsis() {
-            // "one two three four five" at width 10, max 1 line
-            // Should truncate and add "..."
             let result = truncate_to_lines("one two three four five", 10, 1);
             assert!(
                 result.ends_with("..."),
@@ -115,7 +104,6 @@ mod tests {
 
         #[test]
         fn truncation_respects_max_lines() {
-            // Long text at width 10, max 2 lines
             let result = truncate_to_lines(
                 "this is a very long text that should wrap to many lines",
                 10,

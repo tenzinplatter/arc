@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
@@ -11,71 +9,19 @@ use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
     api::{iteration::Iteration, story::Story},
-    app::model::{LoadingState, StoryListState},
+    app::{
+        model::{LoadingState, StoryListState},
+        pane::story_list::group_stories_by_iteration,
+    },
 };
 
 use super::story_item_builder::StoryItemWidget;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// Represents a group of stories belonging to the same iteration
-pub struct IterationSection<'a> {
-    pub iteration: Option<&'a Iteration>,
-    pub stories: Vec<&'a Story>,
-}
-
-/// Groups stories by their iteration, sorted by iteration start date
-fn group_stories_by_iteration<'a>(
-    stories: &'a [Story],
-    iterations: Option<&'a [Iteration]>,
-    show_finished: bool,
-) -> Vec<IterationSection<'a>> {
-    // Build a HashMap grouping stories by iteration_id
-    let mut grouped: HashMap<Option<arc_core::IterationId>, Vec<&'a Story>> = HashMap::new();
-    for story in stories {
-        // Filter out completed stories if show_finished is false
-        if !show_finished && story.completed {
-            continue;
-        }
-        grouped.entry(story.iteration_id).or_default().push(story);
-    }
-
-    let mut sections = Vec::new();
-
-    // If we have iterations, sort them by start_date and create sections
-    if let Some(iterations) = iterations {
-        let mut sorted_iterations: Vec<_> = iterations.iter().collect();
-        sorted_iterations.sort_by_key(|it| it.start_date);
-
-        for iteration in sorted_iterations {
-            if let Some(mut stories) = grouped.remove(&Some(iteration.id)) {
-                // Sort: unfinished first, then completed
-                stories.sort_by_key(|s| s.completed);
-
-                sections.push(IterationSection {
-                    iteration: Some(iteration),
-                    stories,
-                });
-            }
-        }
-    }
-
-    // Add "No Iteration" section at the end if there are stories without an iteration
-    if let Some(mut stories) = grouped.remove(&None) {
-        stories.sort_by_key(|s| s.completed);
-
-        sections.push(IterationSection {
-            iteration: None,
-            stories,
-        });
-    }
-
-    sections
-}
-
 pub struct StoryListView<'a> {
     stories: &'a [Story],
-    iterations: Option<&'a [Iteration]>,
+    iterations: &'a [Iteration],
     state: &'a StoryListState,
     active_story: Option<&'a Story>,
     loading: LoadingState,
@@ -85,7 +31,7 @@ pub struct StoryListView<'a> {
 impl<'a> StoryListView<'a> {
     pub fn new(
         stories: &'a [Story],
-        iterations: Option<&'a [Iteration]>,
+        iterations: &'a [Iteration],
         state: &'a StoryListState,
         active_story: Option<&'a Story>,
         loading: LoadingState,
@@ -108,7 +54,6 @@ impl<'a> StoryListView<'a> {
 
 impl<'a> WidgetRef for StoryListView<'a> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        // Handle loading and empty states with a single bordered block
         if self.stories.is_empty() {
             let block = Block::bordered().border_set(border::THICK);
             let inner = block.inner(area);
@@ -132,9 +77,6 @@ impl<'a> WidgetRef for StoryListView<'a> {
             return;
         }
 
-        // Group stories by iteration, then flatten to one list. The first
-        // story of each group carries its section header, so a single
-        // `ListView` scrolls the whole thing and keeps the selection visible.
         let sections = group_stories_by_iteration(self.stories, self.iterations, self.state.show_finished);
 
         struct Row<'a> {
@@ -167,7 +109,6 @@ impl<'a> WidgetRef for StoryListView<'a> {
             .and_then(|id| rows.iter().position(|r| r.story.id == id));
 
         let active_story = self.active_story;
-        let width = stories_area.width;
         let count = rows.len();
 
         let builder = ListBuilder::new(move |context| {
@@ -177,8 +118,6 @@ impl<'a> WidgetRef for StoryListView<'a> {
                 row.story,
                 is_active,
                 context.is_selected,
-                width,
-                row.story.completed,
                 row.header.clone(),
             );
             let height = widget.height();

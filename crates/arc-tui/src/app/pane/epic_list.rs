@@ -7,8 +7,6 @@ use crate::app::model::EpicListState;
 use crate::app::msg::EpicListMsg;
 use crate::app::pane::searchable_list::{self, Outcome};
 
-/// Returns the subset of `items` whose name fuzzy-matches `query`.
-/// If `query` is empty, all items are returned.
 pub fn filter_items<'a>(items: &'a [EpicSlim], query: &str) -> Vec<&'a EpicSlim> {
     if query.is_empty() {
         return items.iter().collect();

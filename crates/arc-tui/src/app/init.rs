@@ -5,7 +5,7 @@ use anyhow::Result;
 use tokio::{sync::mpsc::{self, UnboundedSender}, task::JoinHandle};
 use uuid::Uuid;
 
-use crate::api::user::MemberId;
+use crate::api::user::{CurrentUser, MemberId};
 
 use crate::{
     api::ApiClient,
@@ -62,16 +62,12 @@ impl App {
     }
 
     async fn init_with_dummy_data(config: Config, mut cache: Cache) -> Result<Self> {
-        let dummy_user_id = MemberId::from(Uuid::nil());
-        let dummy_mention_name = "dummy".to_string();
-        let api_client = ApiClient::new(
-            config.api_token.to_owned(),
-            dummy_user_id,
-            dummy_mention_name.clone(),
-        );
-
-        cache.user_id = Some(dummy_user_id);
-        cache.user_mention_name = Some(dummy_mention_name);
+        let dummy_user = CurrentUser {
+            id: MemberId::from(Uuid::nil()),
+            mention_name: "dummy".to_string(),
+        };
+        let api_client = ApiClient::with_user(config.api_token.to_owned(), dummy_user.clone());
+        cache.set_user(dummy_user);
 
         let (sender, receiver) = mpsc::unbounded_channel();
         let sender_clone = sender.clone();
