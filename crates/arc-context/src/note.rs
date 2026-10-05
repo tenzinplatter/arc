@@ -10,6 +10,7 @@ use arc_shortcut::api::story::{Story, iteration_of};
 use slugify::slugify;
 
 use crate::branch::LinkableBranch;
+use crate::sessions::{SessionEntry, append_session};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoteLinks {
@@ -41,6 +42,14 @@ impl NoteLinks {
 pub enum StoryNote {
     Created { slug: String, rel: NoteRelPath },
     Existing(NoteRelPath),
+}
+
+impl StoryNote {
+    pub fn rel(&self) -> &NoteRelPath {
+        match self {
+            StoryNote::Created { rel, .. } | StoryNote::Existing(rel) => rel,
+        }
+    }
 }
 
 fn live_indexed_note(
@@ -135,6 +144,18 @@ fn edit_note(
     std::fs::write(rel.abs(notes_dir), &updated)?;
     arc_index::reindex_note(conn, rel, &updated)?;
     Ok(true)
+}
+
+pub fn write_session(
+    conn: &Connection,
+    notes_dir: &Path,
+    rel: &NoteRelPath,
+    entry: &SessionEntry,
+) -> anyhow::Result<()> {
+    edit_note(conn, notes_dir, rel, |content| {
+        Ok(append_session(content, entry))
+    })?;
+    Ok(())
 }
 
 pub fn link_branch(

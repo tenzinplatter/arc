@@ -11,6 +11,7 @@ pub mod context;
 pub mod git;
 pub mod note;
 pub mod resolve;
+pub mod section;
 pub mod sessions;
 pub mod story;
 
@@ -19,10 +20,14 @@ pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails
 pub use git::GitHead;
 pub use note::{
     LinkOutcome, NoteLinks, NoteRename, StoryNote, create_story_note, link_branch,
-    rename_linked_branch,
+    rename_linked_branch, write_session,
 };
 pub use resolve::{ResolvedStory, Via, resolve};
-pub use sessions::latest_sessions;
+pub use section::{Newline, SectionHeading, append_to_section};
+pub use sessions::{
+    EntryText, Handoff, SessionEntry, SessionTime, append_session, latest_session_at,
+    latest_sessions,
+};
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 
 pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
@@ -109,6 +114,63 @@ pub async fn link_current_branch(
     };
     let outcome = link_branch(&conn, &config.notes_dir, &note, &branch)?;
     Ok((branch.into_branch(), note, outcome))
+}
+
+#[derive(Debug)]
+pub struct LoggedSession {
+    pub story: StoryId,
+    pub note: StoryNote,
+    pub entry: SessionEntry,
+}
+
+pub async fn log_session(
+    dir: &Path,
+    config: &Config,
+    cache: &mut Cache,
+    story: Option<StoryId>,
+    handoff: Handoff,
+) -> anyhow::Result<LoggedSession> {
+    let head = git::head(dir)?;
+    let (id, resolved) = match story {
+        Some(id) => (
+            id,
+            resolve(&head, &config.cache_dir)
+                .ok()
+                .flatten()
+                .filter(|r| r.id == id),
+        ),
+        None => {
+            let resolved = resolve(&head, &config.cache_dir)?
+                .context("the current branch doesn't resolve to a story; pass a story id")?;
+            (resolved.id, Some(resolved))
+        }
+    };
+    let conn = arc_index::open(&config.cache_dir)?;
+    let existing = match &resolved {
+        Some(resolved) => context::find_note(resolved, &conn, &config.notes_dir)?,
+        None => arc_index::story_note(&conn, &config.notes_dir, id)?,
+    };
+    let note = match existing {
+        Some((rel, _)) => StoryNote::Existing(rel),
+        None => {
+            let story = lookup_story(cache, &config.api_token, id)
+                .await
+                .with_context(|| format!("couldn't load story {id} to create its note"))?;
+            let links = NoteLinks::for_story(cache, &story);
+            create_story_note(&conn, &config.notes_dir, &story, links, "")?
+        }
+    };
+    let entry = SessionEntry {
+        at: SessionTime::now(),
+        branch: head.branch().cloned(),
+        handoff,
+    };
+    write_session(&conn, &config.notes_dir, note.rel(), &entry)?;
+    Ok(LoggedSession {
+        story: id,
+        note,
+        entry,
+    })
 }
 
 #[derive(Debug)]
@@ -655,6 +717,111 @@ mod tests {
                 .unwrap(),
             br("tenzin/sc-7/story-seven-v2")
         );
+    }
+
+    fn handoff(done: &str) -> Handoff {
+        Handoff {
+            done: EntryText::parse(done).unwrap(),
+            state: EntryText::parse("s").unwrap(),
+            next: EntryText::parse("n").unwrap(),
+            questions: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn log_session_creates_the_note_for_the_branch_story() {
+        let Some(env) = env_on("tenzin/sc-7/story-seven") else {
+            return;
+        };
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        let logged = log_session(&env.repo, &env.config, &mut cache, None, handoff("one"))
+            .await
+            .unwrap();
+        assert_eq!(logged.story, 7.into());
+        assert!(
+            matches!(logged.note, StoryNote::Created { ref rel, .. } if *rel == "stories/story-seven.md"),
+            "{:?}",
+            logged.note
+        );
+        assert_eq!(logged.entry.branch, Some(br("tenzin/sc-7/story-seven")));
+
+        let logged = log_session(&env.repo, &env.config, &mut cache, None, handoff("two"))
+            .await
+            .unwrap();
+        assert_eq!(
+            logged.note,
+            StoryNote::Existing(rel("stories/story-seven.md"))
+        );
+        let body =
+            std::fs::read_to_string(env.config.notes_dir.join("stories/story-seven.md")).unwrap();
+        let sessions = latest_sessions(&body, 5);
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions[0].contains("**Done:** one"), "{body}");
+        assert_eq!(sessions[1], logged.entry.to_string());
+        let conn = arc_index::open(&env.config.cache_dir).unwrap();
+        assert_eq!(
+            arc_index::note_for_story(&conn, 7.into()).unwrap(),
+            Some(rel("stories/story-seven.md"))
+        );
+    }
+
+    #[tokio::test]
+    async fn log_session_uses_explicit_ids_and_linking_notes() {
+        let Some(env) = env_on("linked") else { return };
+        let mut cache = cache_for(&env);
+        let err = log_session(&env.repo, &env.config, &mut cache, None, handoff("x"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pass a story id"), "{err}");
+
+        write_note(
+            &env,
+            "stories/seven.md",
+            "---\nstory_id: sc-7\n---\n# Seven\n",
+        );
+        let logged = log_session(
+            &env.repo,
+            &env.config,
+            &mut cache,
+            Some(7.into()),
+            handoff("x"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
+        assert_eq!(logged.entry.branch, Some(br("linked")));
+
+        write_note(
+            &env,
+            "work.md",
+            "---\nstory_id: sc-7\nbranches: [linked]\n---\n# Work\n",
+        );
+        let logged = log_session(&env.repo, &env.config, &mut cache, None, handoff("y"))
+            .await
+            .unwrap();
+        assert_eq!(logged.note, StoryNote::Existing(rel("work.md")));
+        let body = std::fs::read_to_string(env.config.notes_dir.join("work.md")).unwrap();
+        assert_eq!(
+            body,
+            format!(
+                "---\nstory_id: sc-7\nbranches: [linked]\n---\n# Work\n\n## Sessions\n\n{}\n",
+                logged.entry
+            )
+        );
+
+        let outside = tempfile::tempdir().unwrap();
+        let logged = log_session(
+            outside.path(),
+            &env.config,
+            &mut cache,
+            Some(7.into()),
+            handoff("z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(logged.entry.branch, None);
+        assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
     }
 
     #[test]

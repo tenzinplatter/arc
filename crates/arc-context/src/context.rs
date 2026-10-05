@@ -65,7 +65,7 @@ impl From<&Via> for ResolvedBy {
     }
 }
 
-fn find_note(
+pub(crate) fn find_note(
     resolved: &ResolvedStory,
     conn: &Connection,
     notes_dir: &Path,
