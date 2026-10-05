@@ -506,14 +506,13 @@ fn scan_story_note(notes_dir: &Path, story_id: StoryId) -> Result<Option<(NoteRe
     let mut names: Vec<String> = match std::fs::read_dir(notes_dir.join(NoteDir::Stories)) {
         Ok(dir) => dir
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter(|n| n.ends_with(".md"))
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
     names.sort();
-    for name in names {
-        let rel = NoteRelPath::from_trusted(format!("{}/{name}", NoteDir::Stories));
+    for stem in names.iter().filter_map(|n| n.strip_suffix(".md")) {
+        let rel = NoteRelPath::in_dir(NoteDir::Stories, stem);
         if let Some(body) = arc_index::read_note(notes_dir, &rel)?
             && links_story(&body, story_id)
         {
@@ -584,7 +583,7 @@ fn create_note(
     if slug.is_empty() {
         bail!("title produced an empty slug");
     }
-    let rel = NoteRelPath::from_trusted(format!("{slug}.md"));
+    let rel = NoteRelPath::parse(&format!("{slug}.md"))?;
     let abs = rel.abs(notes_dir);
     if abs.exists() {
         bail!("note '{slug}' already exists; use append_note");
@@ -697,7 +696,7 @@ mod tests {
     use arc_shortcut::api::user::MemberId;
 
     fn rel(s: &str) -> NoteRelPath {
-        NoteRelPath::from_trusted(s.into())
+        NoteRelPath::parse(s).unwrap()
     }
 
     fn resolve(conn: &Connection, id: Option<&str>, path: Option<&str>) -> Result<NoteRelPath> {
@@ -732,7 +731,7 @@ mod tests {
         append_note(&conn, notes.path(), &rel, "more\n\n").unwrap();
         let body = std::fs::read_to_string(notes.path().join(&rel)).unwrap();
         assert!(body.ends_with("body\n\nmore\n"));
-        assert!(append_note(&conn, notes.path(), &NoteRelPath::from_trusted("missing.md".into()), "x").is_err());
+        assert!(append_note(&conn, notes.path(), &NoteRelPath::parse("missing.md").unwrap(), "x").is_err());
     }
 
     #[test]
@@ -868,10 +867,8 @@ mod tests {
         a.story_type = "feature".into();
         a.estimate = Some(3);
         a.description = "long".into();
-        let mut cache = Cache {
-            iteration_stories: Some(vec![a, story(2, "B")]),
-            ..Default::default()
-        };
+        let mut cache = Cache::default();
+        cache.iteration_stories = Some(vec![a, story(2, "B")]);
         cache.workflow_states.insert(500.into(), "In Progress".into());
 
         let v = slim_stories(&cache, &conn).unwrap();

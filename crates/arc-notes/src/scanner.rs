@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     fn f() -> NoteRelPath {
-        NoteRelPath::from_trusted("note.md".into())
+        NoteRelPath::parse("note.md").unwrap()
     }
 
     #[test]

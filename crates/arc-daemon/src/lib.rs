@@ -82,7 +82,7 @@ async fn bootstrap_scan(
     info!("bootstrap: scanning {} note files", files.len());
     for abs in files {
         let Some(rel) = NoteRelPath::from_abs(notes_dir, &abs) else {
-            warn!("bootstrap: skipping {} outside notes dir", abs.display());
+            warn!("bootstrap: skipping {}: not a UTF-8 path under the notes dir", abs.display());
             continue;
         };
         let content = match std::fs::read_to_string(&abs) {
@@ -154,7 +154,7 @@ async fn handle_event(
 ) -> Result<()> {
     let abs = event.path();
     let Some(rel) = NoteRelPath::from_abs(&config.notes_dir, abs) else {
-        warn!("skipping {} outside notes dir", abs.display());
+        warn!("skipping {}: not a UTF-8 path under the notes dir", abs.display());
         return Ok(());
     };
 

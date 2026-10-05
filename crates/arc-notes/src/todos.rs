@@ -208,16 +208,6 @@ pub async fn toggle_note_checkbox(
     notes_dir: &Path,
     relative_file: &NoteRelPath,
     todo_text: &str,
-    mark_complete: bool,
-) -> anyhow::Result<()> {
-    let state = Checkbox::from_completed(mark_complete);
-    toggle_note_checkbox_to(notes_dir, relative_file, todo_text, state).await
-}
-
-pub async fn toggle_note_checkbox_to(
-    notes_dir: &Path,
-    relative_file: &NoteRelPath,
-    todo_text: &str,
     state: Checkbox,
 ) -> anyhow::Result<()> {
     let notes_dir = notes_dir.to_path_buf();
@@ -267,7 +257,7 @@ mod tests {
             date: None,
             completed: false,
             source: TodoSource::NoteParsed {
-                file: NoteRelPath::from_trusted("alpha.md".into()),
+                file: NoteRelPath::parse("alpha.md").unwrap(),
                 line: 12,
                 fingerprint: 0xdead_beef,
             },
@@ -359,13 +349,13 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_finds_line_by_text_even_after_move() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = NoteRelPath::from_trusted("note.md".into());
+        let rel = NoteRelPath::parse("note.md").unwrap();
         let path = tmp.path().join(&rel);
 
         std::fs::write(&path, "# header\n\n- [ ] ship it\n").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(toggle_note_checkbox(tmp.path(), &rel, "ship it", true))
+        rt.block_on(toggle_note_checkbox(tmp.path(), &rel, "ship it", Checkbox::Done))
             .unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
@@ -375,12 +365,12 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_matches_case_and_whitespace_insensitively() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = NoteRelPath::from_trusted("note.md".into());
+        let rel = NoteRelPath::parse("note.md").unwrap();
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [ ] Ship It\n").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(toggle_note_checkbox_to(tmp.path(), &rel, "  ship   it  ", Checkbox::Done))
+        rt.block_on(toggle_note_checkbox(tmp.path(), &rel, "  ship   it  ", Checkbox::Done))
             .unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
@@ -390,12 +380,12 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_noop_when_already_in_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = NoteRelPath::from_trusted("note.md".into());
+        let rel = NoteRelPath::parse("note.md").unwrap();
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [x] done\n").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(toggle_note_checkbox_to(tmp.path(), &rel, "done", Checkbox::Done))
+        rt.block_on(toggle_note_checkbox(tmp.path(), &rel, "done", Checkbox::Done))
             .unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
@@ -405,13 +395,13 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_errors_when_text_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = NoteRelPath::from_trusted("note.md".into());
+        let rel = NoteRelPath::parse("note.md").unwrap();
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [ ] something else\n").unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
-            .block_on(toggle_note_checkbox(tmp.path(), &rel, "nonexistent", true))
+            .block_on(toggle_note_checkbox(tmp.path(), &rel, "nonexistent", Checkbox::Done))
             .unwrap_err();
         assert!(err.to_string().contains("no checkbox"));
     }
@@ -455,7 +445,7 @@ mod tests {
                 date: None,
                 completed: true,
                 source: TodoSource::NoteParsed {
-                    file: NoteRelPath::from_trusted("stories/a.md".into()),
+                    file: NoteRelPath::parse("stories/a.md").unwrap(),
                     line: 12,
                     fingerprint: u64::MAX,
                 },

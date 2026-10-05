@@ -6,7 +6,7 @@ use rusqlite::OpenFlags;
 
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
 use arc_notes::todos::{Todo, TodoSource};
-use arc_notes::NoteRelPath;
+use arc_notes::{BranchName, NoteRelPath};
 use arc_core::StoryId;
 
 const DB_FILE: &str = "arc.db";
@@ -294,37 +294,49 @@ fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, b
     Ok((serde_json::to_string(&out)?, truncated))
 }
 
+fn stored_paths(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<NoteRelPath>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.extend(NoteRelPath::from_stored(row?));
+    }
+    Ok(out)
+}
+
 pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<NoteRelPath>> {
     let mut stmt = conn.prepare("SELECT path FROM notes WHERE id = ?1 ORDER BY path")?;
-    let paths = stmt
-        .query_map([id], |r| r.get(0).map(NoteRelPath::from_trusted))?
-        .collect::<rusqlite::Result<Vec<NoteRelPath>>>()?;
-    Ok(paths)
+    let rows = stmt.query_map([id], |r| r.get(0))?;
+    stored_paths(rows)
 }
 
 pub fn note_for_story(conn: &Connection, story_id: StoryId) -> Result<Option<NoteRelPath>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM notes WHERE link_kind = 'story' AND entity_id = ?1
-         ORDER BY path NOT LIKE 'stories/%', path LIMIT 1",
+         ORDER BY path NOT LIKE 'stories/%', path",
     )?;
-    let mut rows = stmt.query_map([story_id.get()], |r| r.get(0).map(NoteRelPath::from_trusted))?;
-    Ok(rows.next().transpose()?)
+    let rows = stmt.query_map([story_id.get()], |r| r.get(0))?;
+    Ok(stored_paths(rows)?.into_iter().next())
 }
 
-pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(StoryId, NoteRelPath)>> {
+pub fn story_for_branch(
+    conn: &Connection,
+    branch: &BranchName,
+) -> Result<Option<(StoryId, NoteRelPath)>> {
     let mut stmt = conn.prepare(
         "SELECT n.entity_id, n.path FROM note_branches b
          JOIN notes n ON n.path = b.path
          WHERE b.branch = ?1 AND n.link_kind = 'story'
-         ORDER BY n.path NOT LIKE 'stories/%', n.path LIMIT 1",
+         ORDER BY n.path NOT LIKE 'stories/%', n.path",
     )?;
-    let mut rows = stmt.query_map([branch], |r| {
-        Ok((
-            StoryId::from(r.get::<_, i32>(0)?),
-            NoteRelPath::from_trusted(r.get(1)?),
-        ))
+    let mut rows = stmt.query_map([branch.as_str()], |r| {
+        Ok((StoryId::from(r.get::<_, i32>(0)?), r.get::<_, String>(1)?))
     })?;
-    Ok(rows.next().transpose()?)
+    for row in &mut rows {
+        let (id, path) = row?;
+        if let Some(rel) = NoteRelPath::from_stored(path) {
+            return Ok(Some((id, rel)));
+        }
+    }
+    Ok(None)
 }
 
 pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> {
@@ -362,7 +374,11 @@ mod tests {
     use chrono::NaiveDate;
 
     fn rel(s: &str) -> NoteRelPath {
-        NoteRelPath::from_trusted(s.into())
+        NoteRelPath::parse(s).unwrap()
+    }
+
+    fn branch(s: &str) -> BranchName {
+        BranchName::parse(s).unwrap()
     }
 
     fn select(conn: &Connection, sql: &str) -> Result<String> {
@@ -438,10 +454,10 @@ mod tests {
         let content = "---\nid: s\nstory_id: sc-42\nbranches: [me/sc-42/s, stacked]\n---\n";
         reindex_note(&conn, p, content).unwrap();
         assert_eq!(
-            story_for_branch(&conn, "stacked").unwrap(),
+            story_for_branch(&conn, &branch("stacked")).unwrap(),
             Some((42.into(), rel("stories/s.md")))
         );
-        assert_eq!(story_for_branch(&conn, "nope").unwrap(), None);
+        assert_eq!(story_for_branch(&conn, &branch("nope")).unwrap(), None);
 
         reindex_note(
             &conn,
@@ -449,10 +465,10 @@ mod tests {
             "---\nid: s\nstory_id: sc-42\nbranches: [stacked]\n---\n",
         )
         .unwrap();
-        assert_eq!(story_for_branch(&conn, "me/sc-42/s").unwrap(), None);
+        assert_eq!(story_for_branch(&conn, &branch("me/sc-42/s")).unwrap(), None);
 
         remove_note(&conn, p).unwrap();
-        assert_eq!(story_for_branch(&conn, "stacked").unwrap(), None);
+        assert_eq!(story_for_branch(&conn, &branch("stacked")).unwrap(), None);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM note_branches", [], |r| r.get(0))
             .unwrap();
@@ -460,11 +476,34 @@ mod tests {
     }
 
     #[test]
+    fn stored_rows_with_unsafe_paths_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        let content = "---\nid: s\nstory_id: sc-7\nbranches: [b]\n---\n";
+        reindex_note(&conn, &rel("zz.md"), content).unwrap();
+        for legacy in ["/abs/s.md", "../s.md"] {
+            conn.execute(
+                "INSERT INTO notes (path, id, link_kind, entity_id) VALUES (?1, 's', 'story', 7)",
+                [legacy],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO note_branches (path, branch) VALUES (?1, 'b')", [legacy])
+                .unwrap();
+        }
+        assert_eq!(note_paths_for_id(&conn, "s").unwrap(), vec![rel("zz.md")]);
+        assert_eq!(note_for_story(&conn, 7.into()).unwrap(), Some(rel("zz.md")));
+        assert_eq!(
+            story_for_branch(&conn, &branch("b")).unwrap(),
+            Some((7.into(), rel("zz.md")))
+        );
+    }
+
+    #[test]
     fn branches_on_non_story_notes_dont_resolve() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
         reindex_note(&conn, &rel("x.md"), "---\nid: x\nbranches: [b]\n---\n").unwrap();
-        assert_eq!(story_for_branch(&conn, "b").unwrap(), None);
+        assert_eq!(story_for_branch(&conn, &branch("b")).unwrap(), None);
     }
 
     #[test]

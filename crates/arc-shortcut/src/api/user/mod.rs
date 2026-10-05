@@ -84,14 +84,14 @@ async fn fetch_current_user(api_token: &str) -> anyhow::Result<CurrentUser> {
 impl ApiClient {
     pub async fn from_token_and_cache(api_token: &str, cache: &mut Cache) -> anyhow::Result<Self> {
         if let Some(user) = cache.user() {
-            return Ok(Self::with_user(api_token.to_owned(), user));
+            return Ok(Self::new(api_token.to_owned(), user));
         }
 
         let user = fetch_current_user(api_token).await?;
         cache.set_user(user.clone());
         cache.write().await?;
 
-        Ok(Self::with_user(api_token.to_owned(), user))
+        Ok(Self::new(api_token.to_owned(), user))
     }
 
     pub async fn get_members(&self) -> anyhow::Result<Vec<MemberSlim>> {

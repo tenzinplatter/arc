@@ -66,7 +66,7 @@ impl App {
             id: MemberId::from(Uuid::nil()),
             mention_name: "dummy".to_string(),
         };
-        let api_client = ApiClient::with_user(config.api_token.to_owned(), dummy_user.clone());
+        let api_client = ApiClient::new(config.api_token.to_owned(), dummy_user.clone());
         cache.set_user(dummy_user);
 
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -132,7 +132,7 @@ async fn fetch_info_from_api(api_client: ApiClient, sender: UnboundedSender<Msg>
     let all_iter_sender = sender.clone();
 
     let epics_handle = tokio::spawn(async move {
-        match api_client.get_all_epics_slim(false).await {
+        match api_client.get_all_epics_slim().await {
             Ok(epics) => {
                 let _ = sender.send(Msg::EpicsLoaded(epics));
             }

@@ -13,13 +13,8 @@ pub struct EpicSlim {
 }
 
 impl ApiClient {
-    pub async fn get_all_epics_slim(
-        &self,
-        include_description: bool,
-    ) -> anyhow::Result<Vec<EpicSlim>> {
-        let body = serde_json::json!({
-            "includes_description": include_description
-        });
+    pub async fn get_all_epics_slim(&self) -> anyhow::Result<Vec<EpicSlim>> {
+        let body = serde_json::json!({ "includes_description": false });
 
         let response = self.get_with_body("epics", &body).await?;
         let epics_slim = response.json::<Vec<EpicSlim>>().await?;

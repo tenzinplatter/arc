@@ -27,9 +27,9 @@ pub struct Cache {
     pub iteration_stories: Option<Vec<Story>>,
     pub epics: Vec<EpicSlim>,
     pub active_story: Option<Story>,
-    pub user_id: Option<MemberId>,
+    pub(crate) user_id: Option<MemberId>,
     #[serde(default)]
-    pub user_mention_name: Option<String>,
+    pub(crate) user_mention_name: Option<String>,
     pub cache_dir: PathBuf,
     #[serde(default)]
     pub stories_by_id: HashMap<StoryId, Story>,
@@ -58,10 +58,6 @@ impl Default for Cache {
 }
 
 impl Cache {
-    pub fn current_iterations_ref(&self) -> Option<Vec<&Iteration>> {
-        self.current_iterations.as_ref().map(|v| v.iter().collect())
-    }
-
     pub fn iteration_for(&self, story: &Story) -> Option<&Iteration> {
         iteration_of(story, self.current_iterations.as_deref()?)
     }
@@ -165,7 +161,7 @@ impl Cache {
         cache_file.with_extension("json.bad")
     }
 
-    /// Unions the lookup maps with the on-disk cache (self wins) so concurrent writers keep each other's fetches.
+    /// Merges in the on-disk lookup maps and missing user (self wins) so concurrent writers keep each other's fetches.
     pub async fn write(&self) -> anyhow::Result<()> {
         let cache_file = Self::get_cache_file(self.cache_dir.clone());
         let mut merged = self.clone();

@@ -13,8 +13,8 @@ pub fn migrate() -> Result<()> {
 
     // Read before the rename so customised cache_dir/notes_dir can still be found after it.
     let old_config_file = old_config_dir.join("config.toml");
-    let old_notes_dir = read_string_field(&old_config_file, "notes_dir")?;
-    let old_cache_dir_in_config = read_string_field(&old_config_file, "cache_dir")?;
+    let old_notes_dir = read_confy_quoted_field(&old_config_file, "notes_dir")?;
+    let old_cache_dir_in_config = read_confy_quoted_field(&old_config_file, "cache_dir")?;
 
     let mut moved_anything = false;
 
@@ -86,8 +86,7 @@ fn rewrite_paths_in_config(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// Only handles the `key = "value"` lines confy emits.
-fn read_string_field(config_path: &Path, field: &str) -> Result<Option<String>> {
+fn read_confy_quoted_field(config_path: &Path, field: &str) -> Result<Option<String>> {
     if !config_path.exists() {
         return Ok(None);
     }

@@ -74,15 +74,19 @@ impl NoteRelPath {
 
     pub fn from_abs(notes_dir: &Path, abs: &Path) -> Option<Self> {
         let rel = abs.strip_prefix(notes_dir).ok()?;
-        rel.to_str().map(|s| Self(s.to_owned()))
+        Self::from_stored(rel.to_str()?.to_owned())
+    }
+
+    pub fn from_stored(rel: String) -> Option<Self> {
+        let mut components = Path::new(&rel).components().peekable();
+        components.peek()?;
+        components
+            .all(|c| matches!(c, Component::Normal(_)))
+            .then_some(Self(rel))
     }
 
     pub fn in_dir(dir: NoteDir, slug: &str) -> Self {
         Self(format!("{dir}/{slug}.md"))
-    }
-
-    pub fn from_trusted(rel: String) -> Self {
-        Self(rel)
     }
 
     pub fn as_str(&self) -> &str {
@@ -156,5 +160,20 @@ mod tests {
             "stories/a.md"
         );
         assert!(NoteRelPath::from_abs(notes, Path::new("/elsewhere/a.md")).is_none());
+        assert!(NoteRelPath::from_abs(notes, Path::new("/home/u/notes/../x/a.md")).is_none());
+        assert!(NoteRelPath::from_abs(notes, notes).is_none());
+        assert_eq!(
+            NoteRelPath::from_abs(notes, Path::new("/home/u/notes/a.TXT")).unwrap().as_str(),
+            "a.TXT"
+        );
+    }
+
+    #[test]
+    fn from_stored_rejects_empty_absolute_and_escaping_paths() {
+        assert_eq!(NoteRelPath::from_stored("stories/a.md".into()).unwrap().as_str(), "stories/a.md");
+        assert_eq!(NoteRelPath::from_stored("notes.txt".into()).unwrap().as_str(), "notes.txt");
+        for bad in ["", "/abs/a.md", "../a.md", "stories/../a.md", "./a.md"] {
+            assert!(NoteRelPath::from_stored(bad.into()).is_none(), "{bad}");
+        }
     }
 }

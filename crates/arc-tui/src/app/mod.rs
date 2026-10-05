@@ -115,7 +115,7 @@ impl App {
                 let sender = self.sender.clone();
                 let api_client = self.api_client.clone();
                 let handle = tokio::spawn(async move {
-                    match api_client.get_all_epics_slim(false).await {
+                    match api_client.get_all_epics_slim().await {
                         Ok(epics) => {
                             sender.send(Msg::EpicsLoaded(epics)).ok();
                         }
@@ -165,7 +165,7 @@ impl App {
                 let sender = self.sender.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        crate::todos::toggle_note_checkbox_to(&notes_dir, &file, &text, to).await
+                        crate::todos::toggle_note_checkbox(&notes_dir, &file, &text, to).await
                     {
                         let info = ErrorInfo::new(
                             "Failed to sync todo state to note".to_string(),

@@ -100,15 +100,8 @@ impl Story {
 }
 
 pub fn iteration_of<'a>(story: &Story, iterations: &'a [Iteration]) -> Option<&'a Iteration> {
-    get_story_associated_iteration(story.iteration_id, iterations)
-}
-
-pub fn get_story_associated_iteration<'a>(
-    iteration_id: Option<IterationId>,
-    iterations: impl IntoIterator<Item = &'a Iteration>,
-) -> Option<&'a Iteration> {
-    let iteration_id = iteration_id?;
-    iterations.into_iter().find(|it| it.id == iteration_id)
+    let iteration_id = story.iteration_id?;
+    iterations.iter().find(|it| it.id == iteration_id)
 }
 
 #[cfg(test)]

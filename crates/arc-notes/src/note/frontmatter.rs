@@ -29,58 +29,6 @@ pub enum EntityLink {
     },
 }
 
-impl EntityLink {
-    pub fn kind(&self) -> Option<&'static str> {
-        match self {
-            EntityLink::None => None,
-            EntityLink::Story { .. } => Some("story"),
-            EntityLink::Iteration { .. } => Some("iteration"),
-            EntityLink::Epic { .. } => Some("epic"),
-        }
-    }
-
-    pub fn id_raw(&self) -> Option<i32> {
-        match self {
-            EntityLink::None => None,
-            EntityLink::Story { id, .. } => Some(id.get()),
-            EntityLink::Iteration { id, .. } => Some(id.get()),
-            EntityLink::Epic { id, .. } => Some(id.get()),
-        }
-    }
-
-    pub fn url(&self) -> Option<&str> {
-        match self {
-            EntityLink::None => None,
-            EntityLink::Story { url, .. }
-            | EntityLink::Iteration { url, .. }
-            | EntityLink::Epic { url, .. } => Some(url),
-        }
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            EntityLink::None => None,
-            EntityLink::Story { name, .. }
-            | EntityLink::Iteration { name, .. }
-            | EntityLink::Epic { name, .. } => name.as_deref(),
-        }
-    }
-
-    pub fn iteration_url(&self) -> Option<&str> {
-        match self {
-            EntityLink::Story { iteration_url, .. } => iteration_url.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn epic_url(&self) -> Option<&str> {
-        match self {
-            EntityLink::Story { epic_url, .. } => epic_url.as_deref(),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
     pub id: String,
@@ -564,39 +512,6 @@ mod tests {
         assert_eq!(note.frontmatter().unwrap().id, "a");
         assert_eq!(note.with_yaml("id: b\r\n"), "\u{feff}---\r\nid: b\r\n---\r\nbody\r\n");
         assert!(SplitNote::new("---\n: [\n---\n").unwrap().frontmatter().is_none());
-    }
-
-    #[test]
-    fn entity_link_columns_match_variant() {
-        let story = EntityLink::Story {
-            id: 7.into(),
-            url: "https://s/7".into(),
-            name: Some("S".into()),
-            iteration_url: Some("https://it/3".into()),
-            epic_url: None,
-        };
-        assert_eq!(story.kind(), Some("story"));
-        assert_eq!(story.id_raw(), Some(7));
-        assert_eq!(story.url(), Some("https://s/7"));
-        assert_eq!(story.name(), Some("S"));
-        assert_eq!(story.iteration_url(), Some("https://it/3"));
-        assert_eq!(story.epic_url(), None);
-
-        let iteration = EntityLink::Iteration { id: 3.into(), url: "u".into(), name: None };
-        assert_eq!(iteration.kind(), Some("iteration"));
-        assert_eq!(iteration.id_raw(), Some(3));
-        assert_eq!(iteration.name(), None);
-        assert_eq!(iteration.iteration_url(), None);
-
-        let epic = EntityLink::Epic { id: 4.into(), url: "e".into(), name: Some("E".into()) };
-        assert_eq!(epic.kind(), Some("epic"));
-        assert_eq!(epic.url(), Some("e"));
-
-        let none = EntityLink::None;
-        assert_eq!(
-            (none.kind(), none.id_raw(), none.url(), none.name(), none.iteration_url(), none.epic_url()),
-            (None, None, None, None, None, None)
-        );
     }
 
     #[test]
