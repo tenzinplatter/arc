@@ -9,20 +9,18 @@ pub mod story;
 pub mod user;
 pub mod workflow;
 
-use user::MemberId;
+use user::{CurrentUser, MemberId};
 
 pub const API_BASE_URL: &str = "https://api.app.shortcut.com/api/v3";
 
 #[derive(Clone)]
 pub struct ApiClient {
     api_token: String,
-    pub user_id: MemberId,
-    pub mention_name: String,
+    user: CurrentUser,
     http_client: Client,
 }
 
 pub fn get_full_path(endpoint: &str) -> String {
-    // endpoint should not start with / as we append it when formatting
     assert!(!endpoint.starts_with("/"));
     format!("{}/{}", API_BASE_URL, endpoint)
 }
@@ -37,7 +35,7 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("Failed to PUT {} with body", &full_path))
+            .with_context(|| format!("Failed to PUT {} with body", full_path))
     }
 
     async fn get_with_body<Body>(&self, endpoint: &str, body: &Body) -> anyhow::Result<Response>
@@ -49,7 +47,7 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("Failed to GET {} with body", &full_path))
+            .with_context(|| format!("Failed to GET {} with body", full_path))
     }
 
     async fn get(&self, endpoint: &str) -> anyhow::Result<Response> {
@@ -57,7 +55,7 @@ impl ApiClient {
         self.get_request(&full_path)
             .send()
             .await
-            .with_context(|| format!("Failed to GET {}", &full_path))
+            .with_context(|| format!("Failed to GET {}", full_path))
     }
 
     fn get_request(&self, path: &str) -> RequestBuilder {
@@ -75,12 +73,25 @@ impl ApiClient {
     }
 
     pub fn new(api_token: String, user_id: MemberId, mention_name: String) -> Self {
+        Self::with_user(
+            api_token,
+            CurrentUser {
+                id: user_id,
+                mention_name,
+            },
+        )
+    }
+
+    pub fn with_user(api_token: String, user: CurrentUser) -> Self {
         Self {
             api_token,
-            user_id,
-            mention_name,
+            user,
             http_client: Client::new(),
         }
+    }
+
+    pub fn user(&self) -> &CurrentUser {
+        &self.user
     }
 
     pub async fn get_with_query(
@@ -93,23 +104,21 @@ impl ApiClient {
             .query(query)
             .send()
             .await
-            .with_context(|| format!("Failed to GET {}", &full_path))
+            .with_context(|| format!("Failed to GET {}", full_path))
     }
 
-    /// GETs a path returned by the API as a `next` page link.
-    /// Shortcut's pagination `next` fields are "URL path and query string"
-    /// like `/api/v3/search/stories?next=TOKEN&...`.
-    pub async fn get_absolute_path(&self, path: &str) -> anyhow::Result<Response> {
-        let url = if path.starts_with("http") {
-            path.to_string()
-        } else if let Some(rest) = path.strip_prefix("/") {
+    /// `next_path` is Shortcut's pagination `next`: a URL path and query, e.g. `/api/v3/search/stories?next=TOKEN`.
+    pub(crate) async fn get_next_page(&self, next_path: &str) -> anyhow::Result<Response> {
+        let url = if next_path.starts_with("http") {
+            next_path.to_string()
+        } else if let Some(rest) = next_path.strip_prefix("/") {
             format!("https://api.app.shortcut.com/{rest}")
         } else {
-            format!("https://api.app.shortcut.com/{path}")
+            format!("https://api.app.shortcut.com/{next_path}")
         };
         self.get_request(&url)
             .send()
             .await
-            .with_context(|| format!("Failed to GET {}", &url))
+            .with_context(|| format!("Failed to GET {}", url))
     }
 }

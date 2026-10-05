@@ -5,7 +5,17 @@ use serde::{Deserialize, Serialize};
 macro_rules! int_id {
     ($name:ident) => {
         #[derive(
-            Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+            Copy,
+            Clone,
+            Debug,
+            Default,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
         )]
         #[serde(transparent)]
         pub struct $name(i32);

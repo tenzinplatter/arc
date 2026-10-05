@@ -32,8 +32,8 @@ impl fmt::Display for MemberId {
     }
 }
 
-#[derive(Deserialize)]
-pub struct Member {
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CurrentUser {
     pub id: MemberId,
     pub mention_name: String,
 }
@@ -45,7 +45,6 @@ pub struct MemberSlim {
     pub name: String,
 }
 
-// GET /members nests names under `profile`
 #[derive(Deserialize)]
 struct RawMember {
     id: MemberId,
@@ -69,35 +68,30 @@ impl From<RawMember> for MemberSlim {
     }
 }
 
-pub async fn get_member_from_api(api_token: &str) -> anyhow::Result<Member> {
+async fn fetch_current_user(api_token: &str) -> anyhow::Result<CurrentUser> {
     let full_path = get_full_path("member");
-    // cant do with api client as it isnt instantiated at the point of calling this
     let response = Client::new()
         .get(&full_path)
         .header("Shortcut-Token", api_token)
         .header("Content-Type", "application/json")
         .send()
         .await
-        .with_context(|| format!("Failed to GET {}", &full_path))?;
+        .with_context(|| format!("Failed to GET {}", full_path))?;
 
-    let member = response.json::<Member>().await?;
-
-    Ok(member)
+    Ok(response.json::<CurrentUser>().await?)
 }
 
 impl ApiClient {
-    /// Uses the cached user id/mention name, fetching (and caching) them if missing.
     pub async fn from_token_and_cache(api_token: &str, cache: &mut Cache) -> anyhow::Result<Self> {
-        if let (Some(id), Some(name)) = (cache.user_id, cache.user_mention_name.as_ref()) {
-            return Ok(Self::new(api_token.to_owned(), id, name.clone()));
+        if let Some(user) = cache.user() {
+            return Ok(Self::with_user(api_token.to_owned(), user));
         }
 
-        let member = get_member_from_api(api_token).await?;
-        cache.user_id = Some(member.id);
-        cache.user_mention_name = Some(member.mention_name.clone());
+        let user = fetch_current_user(api_token).await?;
+        cache.set_user(user.clone());
         cache.write().await?;
 
-        Ok(Self::new(api_token.to_owned(), member.id, member.mention_name))
+        Ok(Self::with_user(api_token.to_owned(), user))
     }
 
     pub async fn get_members(&self) -> anyhow::Result<Vec<MemberSlim>> {

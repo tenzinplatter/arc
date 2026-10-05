@@ -1,11 +1,11 @@
+use crate::api::{
+    ApiClient, branch::Branch, iteration::Iteration, story::comment::StoryComment, user::MemberId,
+    workflow::WorkflowStateId,
+};
 use anyhow::Context;
+use arc_core::{EpicId, IterationId, StoryId};
 use serde::{Deserialize, Serialize};
 use slugify::slugify;
-use crate::api::{
-    ApiClient, branch::Branch, iteration::Iteration, story::comment::StoryComment,
-    user::MemberId, workflow::WorkflowStateId,
-};
-use arc_core::{EpicId, IterationId, StoryId};
 
 pub mod comment;
 
@@ -20,7 +20,6 @@ pub struct Story {
     pub iteration_id: Option<IterationId>,
     pub name: String,
     pub app_url: String,
-    // defaulted so caches written before these fields existed still parse
     #[serde(default)]
     pub workflow_state_id: Option<WorkflowStateId>,
     #[serde(default)]
@@ -38,24 +37,17 @@ struct StorySearchResults {
 }
 
 impl ApiClient {
-    pub(crate) async fn search_stories_all_pages(
-        &self,
-        query: &str,
-    ) -> anyhow::Result<Vec<Story>> {
+    pub(crate) async fn search_stories_all_pages(&self, query: &str) -> anyhow::Result<Vec<Story>> {
         let mut all = Vec::new();
         let mut next_path: Option<String> = None;
 
         loop {
             let response = match &next_path {
                 None => {
-                    let params = [
-                        ("query", query),
-                        ("page_size", "250"),
-                        ("detail", "full"),
-                    ];
+                    let params = [("query", query), ("page_size", "250"), ("detail", "full")];
                     self.get_with_query("search/stories", &params).await?
                 }
-                Some(path) => self.get_absolute_path(path).await?,
+                Some(path) => self.get_next_page(path).await?,
             };
 
             let page: StorySearchResults = response
@@ -93,12 +85,9 @@ impl ApiClient {
             "description": new_description,
         });
 
-        let response = self
-            .put_with_body(&format!("stories/{}", story_id), &body)
-            .await?;
-
-        // ignore the returned Story, we don't need and no need to parse the body of the response
-        response.error_for_status()?;
+        self.put_with_body(&format!("stories/{}", story_id), &body)
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
@@ -108,7 +97,10 @@ impl Story {
         let story_slug = slugify!(name);
         format!("scn--{}", story_slug)
     }
+}
 
+pub fn iteration_of<'a>(story: &Story, iterations: &'a [Iteration]) -> Option<&'a Iteration> {
+    get_story_associated_iteration(story.iteration_id, iterations)
 }
 
 pub fn get_story_associated_iteration<'a>(

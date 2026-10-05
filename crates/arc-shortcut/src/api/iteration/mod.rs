@@ -42,7 +42,7 @@ impl ApiClient {
         iteration_ids: Vec<IterationId>,
     ) -> anyhow::Result<Vec<Story>> {
         let iteration_stories = join_all(iteration_ids.iter().map(|id| async move {
-            let query = format!("iteration:{} owner:{}", id, self.mention_name);
+            let query = format!("iteration:{} owner:{}", id, self.user.mention_name);
             self.search_stories_all_pages(&query).await
         }))
         .await

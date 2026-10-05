@@ -33,9 +33,6 @@ impl fmt::Display for WorkflowStateId {
 pub struct WorkflowState {
     pub id: WorkflowStateId,
     pub name: String,
-    /// "unstarted" | "started" | "done"
-    #[serde(rename = "type")]
-    pub state_type: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]

@@ -5,13 +5,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-use tokio::{fs::{self, File}, io::AsyncReadExt};
 use crate::api::{
-    ApiClient, epic::EpicSlim, iteration::Iteration, story::Story, user::MemberId,
+    ApiClient,
+    epic::EpicSlim,
+    iteration::Iteration,
+    story::{Story, iteration_of},
+    user::{CurrentUser, MemberId},
     workflow::WorkflowStateId,
 };
 use arc_core::{StoryId, dbg_file};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    fs::{self, File},
+    io::AsyncReadExt,
+};
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Cache {
@@ -24,13 +31,10 @@ pub struct Cache {
     #[serde(default)]
     pub user_mention_name: Option<String>,
     pub cache_dir: PathBuf,
-    /// Stories fetched individually, e.g. outside the current iteration.
     #[serde(default)]
     pub stories_by_id: HashMap<StoryId, Story>,
-    /// Workflow state id -> name.
     #[serde(default)]
     pub workflow_states: HashMap<WorkflowStateId, String>,
-    /// Member id -> mention name.
     #[serde(default)]
     pub members: HashMap<MemberId, String>,
 }
@@ -58,14 +62,46 @@ impl Cache {
         self.current_iterations.as_ref().map(|v| v.iter().collect())
     }
 
-    /// Looks in iteration_stories, then stories_by_id, then active_story (a
-    /// frozen copy, so least likely to be fresh).
+    pub fn iteration_for(&self, story: &Story) -> Option<&Iteration> {
+        iteration_of(story, self.current_iterations.as_deref()?)
+    }
+
+    pub fn user(&self) -> Option<CurrentUser> {
+        Some(CurrentUser {
+            id: self.user_id?,
+            mention_name: self.user_mention_name.clone()?,
+        })
+    }
+
+    pub fn set_user(&mut self, user: CurrentUser) {
+        self.user_id = Some(user.id);
+        self.user_mention_name = Some(user.mention_name);
+    }
+
+    /// active_story is a frozen snapshot, so it is the last resort.
     pub fn find_story(&self, id: StoryId) -> Option<&Story> {
         self.iteration_stories
             .as_ref()
             .and_then(|stories| stories.iter().find(|s| s.id == id))
             .or_else(|| self.stories_by_id.get(&id))
             .or_else(|| self.active_story.as_ref().filter(|s| s.id == id))
+    }
+
+    pub fn upsert_story(&mut self, story: Story) {
+        if let Some(active) = self.active_story.as_mut().filter(|s| s.id == story.id) {
+            *active = story.clone();
+        }
+        match self
+            .iteration_stories
+            .iter_mut()
+            .flatten()
+            .find(|s| s.id == story.id)
+        {
+            Some(s) => *s = story,
+            None => {
+                self.stories_by_id.insert(story.id, story);
+            }
+        }
     }
 
     pub fn state_name(&self, id: Option<WorkflowStateId>) -> Option<&str> {
@@ -129,10 +165,7 @@ impl Cache {
         cache_file.with_extension("json.bad")
     }
 
-    /// Merges the on-disk cache into this one, then atomically replaces the file.
-    /// `stories_by_id`, `workflow_states` and `members` are unioned with this
-    /// cache's entries winning on conflict; every other field is taken from
-    /// `self` (except user id/name, filled from disk when missing).
+    /// Unions the lookup maps with the on-disk cache (self wins) so concurrent writers keep each other's fetches.
     pub async fn write(&self) -> anyhow::Result<()> {
         let cache_file = Self::get_cache_file(self.cache_dir.clone());
         let mut merged = self.clone();
@@ -173,20 +206,21 @@ impl Cache {
     }
 }
 
-/// Returns the cached story, or fetches it and stores it in `stories_by_id`.
-pub async fn fetch_story(cache: &mut Cache, client: &ApiClient, id: StoryId) -> anyhow::Result<Story> {
+pub async fn fetch_story(
+    cache: &mut Cache,
+    client: &ApiClient,
+    id: StoryId,
+) -> anyhow::Result<Story> {
     if let Some(story) = cache.find_story(id) {
         return Ok(story.clone());
     }
 
     let story = client.get_story(id).await?;
-    cache.stories_by_id.insert(id, story.clone());
+    cache.upsert_story(story.clone());
     cache.write().await?;
     Ok(story)
 }
 
-/// Fills `workflow_states` and `members` if they're empty. Each is persisted as
-/// soon as it's fetched, so one failing doesn't lose the other.
 pub async fn ensure_lookups(cache: &mut Cache, client: &ApiClient) -> anyhow::Result<()> {
     if cache.workflow_states.is_empty() {
         refresh_workflow_states(cache, client).await?;
@@ -197,7 +231,6 @@ pub async fn ensure_lookups(cache: &mut Cache, client: &ApiClient) -> anyhow::Re
     Ok(())
 }
 
-/// Refetches `workflow_states` and `members` unconditionally, e.g. after a lookup miss.
 pub async fn refresh_lookups(cache: &mut Cache, client: &ApiClient) -> anyhow::Result<()> {
     let states = refresh_workflow_states(cache, client).await;
     let members = refresh_members(cache, client).await;
@@ -280,7 +313,9 @@ mod tests {
     fn cache_round_trips_new_fields() {
         let mut cache = Cache::default();
         cache.stories_by_id.insert(5.into(), story(5, "five"));
-        cache.workflow_states.insert(500.into(), "In Progress".into());
+        cache
+            .workflow_states
+            .insert(500.into(), "In Progress".into());
         let id = MemberId::from(Uuid::nil());
         cache.members.insert(id, "tenzin".into());
 
@@ -313,6 +348,87 @@ mod tests {
 
         cache.stories_by_id.remove(&9.into());
         assert_eq!(cache.find_story(9.into()).unwrap().name, "active");
+    }
+
+    #[test]
+    fn upsert_story_replaces_in_place_or_stores_by_id() {
+        let mut cache = Cache {
+            iteration_stories: Some(vec![story(1, "old")]),
+            ..Default::default()
+        };
+        cache.upsert_story(story(1, "new"));
+        assert_eq!(cache.find_story(1.into()).unwrap().name, "new");
+        assert!(cache.stories_by_id.is_empty());
+        cache.upsert_story(story(9, "outside"));
+        assert_eq!(cache.stories_by_id[&9.into()].name, "outside");
+    }
+
+    #[test]
+    fn upsert_story_refreshes_active_and_by_id_copies() {
+        let mut cache = Cache {
+            active_story: Some(story(5, "old")),
+            stories_by_id: [(5.into(), story(5, "old"))].into(),
+            ..Default::default()
+        };
+        cache.upsert_story(story(5, "new"));
+        assert_eq!(cache.find_story(5.into()).unwrap().name, "new");
+        assert_eq!(cache.active_story.as_ref().unwrap().name, "new");
+    }
+
+    #[test]
+    fn upsert_story_gives_lone_active_story_a_by_id_copy() {
+        let mut cache = Cache {
+            active_story: Some(story(6, "old")),
+            ..Default::default()
+        };
+        cache.upsert_story(story(6, "new"));
+        assert_eq!(cache.stories_by_id[&6.into()].name, "new");
+        assert_eq!(cache.active_story.unwrap().name, "new");
+    }
+
+    #[test]
+    fn user_requires_both_id_and_mention_name() {
+        let id = MemberId::from(Uuid::from_u128(1));
+        let mut cache = Cache {
+            user_id: Some(id),
+            ..Default::default()
+        };
+        assert_eq!(cache.user(), None);
+        cache.user_id = None;
+        cache.user_mention_name = Some("tenzin".into());
+        assert_eq!(cache.user(), None);
+        let user = CurrentUser {
+            id,
+            mention_name: "tenzin".into(),
+        };
+        cache.set_user(user.clone());
+        assert_eq!(cache.user(), Some(user));
+        assert_eq!(cache.user_id, Some(id));
+        assert_eq!(cache.user_mention_name.as_deref(), Some("tenzin"));
+    }
+
+    #[test]
+    fn iteration_for_searches_current_iterations_only() {
+        let iteration = |id: i32| Iteration {
+            id: id.into(),
+            name: String::new(),
+            start_date: Default::default(),
+            end_date: Default::default(),
+            app_url: String::new(),
+            status: crate::api::iteration::IterationStatus::Started,
+        };
+        let mut cache = Cache {
+            iterations: vec![iteration(3)],
+            ..Default::default()
+        };
+        let in_three = Story {
+            iteration_id: Some(3.into()),
+            ..story(1, "a")
+        };
+        assert!(cache.iteration_for(&in_three).is_none());
+        cache.current_iterations = Some(vec![iteration(2), iteration(3)]);
+        assert_eq!(cache.iteration_for(&in_three).unwrap().id, 3.into());
+        assert!(cache.iteration_for(&story(1, "no iteration")).is_none());
     }
 
     fn cache_in(dir: &Path) -> Cache {
@@ -460,7 +576,8 @@ mod tests {
     }
 
     fn golden_full_cache() -> Cache {
-        let member = MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
+        let member =
+            MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
         let iteration = |id: i32, name: &str, start: &str, end: &str, status| Iteration {
             id: id.into(),
             name: name.into(),
@@ -470,7 +587,10 @@ mod tests {
             status,
         };
         let seven = Story {
-            branches: vec![serde_json::from_value(serde_json::json!({"id": 11, "name": "sc-7-feature"})).unwrap()],
+            branches: vec![
+                serde_json::from_value(serde_json::json!({"id": 11, "name": "sc-7-feature"}))
+                    .unwrap(),
+            ],
             completed: false,
             comments: vec![crate::api::story::comment::StoryComment {
                 id: 99,
@@ -537,19 +657,25 @@ mod tests {
             ..Default::default()
         };
         cache.stories_by_id.insert(5.into(), five);
-        cache.workflow_states.insert(500.into(), "In Progress".into());
+        cache
+            .workflow_states
+            .insert(500.into(), "In Progress".into());
         cache.members.insert(member, "tenzin".into());
         cache
     }
 
     #[test]
     fn golden_cache_json_format_is_stable() {
-        assert_eq!(serde_json::to_value(golden_full_cache()).unwrap(), golden_full_cache_json());
+        assert_eq!(
+            serde_json::to_value(golden_full_cache()).unwrap(),
+            golden_full_cache_json()
+        );
     }
 
     #[test]
     fn golden_cache_json_literal_deserializes() {
-        let member = MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
+        let member =
+            MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
         let cache: Cache = serde_json::from_value(golden_full_cache_json()).unwrap();
         assert_eq!(cache.user_id, Some(member));
         assert_eq!(cache.user_mention_name.as_deref(), Some("tenzin"));

@@ -1,7 +1,6 @@
 use chrono::{FixedOffset, Local, NaiveDate, NaiveDateTime, Utc};
 
-/// AEST = UTC+10
-const AEST_OFFSET_SECS: i32 = 10 * 3600;
+const AEST_UTC_PLUS_10_SECS: i32 = 10 * 3600;
 
 pub fn today() -> NaiveDate {
     now().date_naive()
@@ -13,15 +12,15 @@ pub fn now_naive() -> NaiveDateTime {
 
 fn now() -> chrono::DateTime<FixedOffset> {
     let local = Local::now().fixed_offset();
-
-    // If detected offset is UTC and there's no explicit timezone config,
-    // the system likely has no timezone set — use AEST as fallback.
-    if local.offset().local_minus_utc() == 0 && !is_utc_intentional() {
-        let aest = FixedOffset::east_opt(AEST_OFFSET_SECS).unwrap();
+    if system_timezone_unset(&local) {
+        let aest = FixedOffset::east_opt(AEST_UTC_PLUS_10_SECS).unwrap();
         return Utc::now().with_timezone(&aest);
     }
-
     local
+}
+
+fn system_timezone_unset(local: &chrono::DateTime<FixedOffset>) -> bool {
+    local.offset().local_minus_utc() == 0 && !is_utc_intentional()
 }
 
 fn is_utc_intentional() -> bool {

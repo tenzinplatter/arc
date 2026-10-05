@@ -5,3 +5,9 @@ pub struct Branch {
     id: i32,
     name: String,
 }
+
+impl Branch {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
