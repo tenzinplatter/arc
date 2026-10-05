@@ -8,27 +8,23 @@ mod migrate;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    check_worktree_dependencies()?;
-
-    let args = Cli::parse();
-    if let Some(cmd) = args.command {
-        // Must precede Config::read: migrate is what moves the config into place.
-        if matches!(cmd, Commands::Migrate) {
-            migrate::migrate()?;
-            return Ok(());
+    match Cli::parse().command {
+        None => {
+            check_worktree_dependencies()?;
+            let mut terminal = ratatui::init();
+            let result = arc_tui::run(&mut terminal).await;
+            ratatui::restore();
+            result
         }
-
-        let config = Config::read()?;
-        let cache = Cache::read(config.cache_dir.clone()).await;
-        arc_tui::handle_command(cmd, cache, &config).await?;
-        config.write()?;
-        return Ok(());
+        Some(Commands::Migrate) => migrate::migrate(),
+        Some(Commands::Context { format }) => {
+            arc_tui::print_context(format).await;
+            Ok(())
+        }
+        Some(cmd) => {
+            let config = Config::read()?;
+            let cache = Cache::read(config.cache_dir.clone()).await;
+            arc_tui::handle_command(cmd, cache, &config).await
+        }
     }
-
-    let mut terminal = ratatui::init();
-    let result = arc_tui::run(&mut terminal).await;
-    ratatui::restore();
-
-    result?;
-    Ok(())
 }

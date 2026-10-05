@@ -102,15 +102,9 @@ pub fn build_context(
     todos: &[Todo],
 ) -> anyhow::Result<StoryContext> {
     let note = find_note(&resolved, conn, notes_dir)?;
-    let canonical = match (cache.user(), story) {
-        (Some(user), Some(story)) => Some(canonical_branch(
-            &user.mention_name,
-            resolved.id,
-            &story.name,
-            None,
-        )?),
-        _ => None,
-    };
+    let canonical = cache.user().zip(story).and_then(|(user, story)| {
+        canonical_branch(&user.mention_name, resolved.id, &story.name, None).ok()
+    });
     let details = story.map(|s| StoryDetails {
         name: s.name.clone(),
         state: cache.state_name(s.workflow_state_id).map(str::to_owned),

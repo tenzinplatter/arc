@@ -1,8 +1,13 @@
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use anyhow::{Context, bail};
 use arc_notes::BranchName;
+
+const HEADS: &str = "refs/heads/";
+const ORIGIN_HEAD: &str = "refs/remotes/origin/HEAD";
+const ORIGIN: &str = "refs/remotes/origin/";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHead {
@@ -28,22 +33,30 @@ impl GitHead {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .context("failed to run git")
+fn git(dir: &Path, args: &[&str]) -> std::io::Result<Output> {
+    Command::new("git").arg("-C").arg(dir).args(args).output()
+}
+
+fn symbolic_ref(out: Output) -> anyhow::Result<Option<String>> {
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let target = String::from_utf8(out.stdout).context("git ref is not UTF-8")?;
+    Ok(Some(target.trim_end().to_owned()))
 }
 
 pub fn head(dir: &Path) -> anyhow::Result<GitHead> {
-    let out = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    if out.status.success() {
-        let name = String::from_utf8(out.stdout).context("branch name is not UTF-8")?;
-        return Ok(GitHead::Branch(BranchName::parse(name.trim_end())?));
+    let out = match git(dir, &["symbolic-ref", "--quiet", "HEAD"]) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(GitHead::NotARepo),
+        out => out.context("failed to run git")?,
+    };
+    if let Some(target) = symbolic_ref(out)? {
+        return Ok(match target.strip_prefix(HEADS) {
+            Some(name) => GitHead::Branch(BranchName::parse(name)?),
+            None => GitHead::Detached,
+        });
     }
-    let inside = git(dir, &["rev-parse", "--git-dir"])?;
+    let inside = git(dir, &["rev-parse", "--git-dir"]).context("failed to run git")?;
     Ok(if inside.status.success() {
         GitHead::Detached
     } else {
@@ -51,8 +64,17 @@ pub fn head(dir: &Path) -> anyhow::Result<GitHead> {
     })
 }
 
+pub fn default_branch(dir: &Path) -> anyhow::Result<Option<BranchName>> {
+    let out = git(dir, &["symbolic-ref", "--quiet", ORIGIN_HEAD]).context("failed to run git")?;
+    symbolic_ref(out)?
+        .as_deref()
+        .and_then(|target| target.strip_prefix(ORIGIN))
+        .map(BranchName::parse)
+        .transpose()
+}
+
 pub fn rename_current_branch(dir: &Path, to: &BranchName) -> anyhow::Result<()> {
-    let out = git(dir, &["branch", "-m", to.as_str()])?;
+    let out = git(dir, &["branch", "-m", to.as_str()]).context("failed to run git")?;
     if !out.status.success() {
         bail!(
             "git branch -m {to} failed: {}",

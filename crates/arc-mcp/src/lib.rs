@@ -17,7 +17,7 @@ use slugify::slugify;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use arc_context::NoteLinks;
+use arc_context::{NoteLinks, StoryNote};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
@@ -309,7 +309,7 @@ impl ArcMcp {
         })
         .await
         .map_err(internal)?;
-        Ok(created_result(tool_try!(created)))
+        Ok(story_note_result(story_id, tool_try!(created)))
     }
 
     #[tool(
@@ -408,6 +408,15 @@ fn fail(e: impl std::fmt::Display) -> CallToolResult {
 
 fn created_result((id, path): (String, NoteRelPath)) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(format!("id: {id}\npath: {path}"))])
+}
+
+fn story_note_result(story_id: StoryId, note: StoryNote) -> CallToolResult {
+    match note {
+        StoryNote::Created { slug, rel } => created_result((slug, rel)),
+        StoryNote::Existing(rel) => fail(format!(
+            "story {story_id} already has a note at '{rel}'; use append_note"
+        )),
+    }
 }
 
 fn with_notes(text: String, notes: impl IntoIterator<Item = String>) -> CallToolResult {
@@ -716,6 +725,26 @@ mod tests {
         assert_eq!(v["comments"][0]["text"], "first");
         assert_eq!(v["comments"][0]["author"], "tenzin");
         assert_eq!(v["note"], "stories/c.md");
+    }
+
+    #[test]
+    fn story_note_result_points_existing_notes_at_append_note() {
+        let (_c, notes, conn) = setup();
+        let created = arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "").unwrap();
+        assert_eq!(
+            serde_json::to_value(story_note_result(8.into(), created)).unwrap()["content"][0]["text"],
+            "id: x\npath: stories/x.md"
+        );
+        let body = std::fs::read_to_string(notes.path().join("stories/x.md")).unwrap();
+        assert!(body.ends_with("---\n\n# X\n"), "{body:?}");
+        let again = arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "y").unwrap();
+        assert_eq!(
+            serde_json::to_value(story_note_result(8.into(), again)).unwrap(),
+            json!({
+                "content": [{"type": "text", "text": "story 8 already has a note at 'stories/x.md'; use append_note"}],
+                "isError": true
+            })
+        );
     }
 
     #[test]

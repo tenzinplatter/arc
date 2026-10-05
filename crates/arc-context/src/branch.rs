@@ -1,9 +1,41 @@
+use std::fmt;
+
 use anyhow::bail;
 use arc_core::StoryId;
 use arc_notes::BranchName;
+use arc_shortcut::api::user::MentionName;
 use slugify::slugify;
 
 const STORY_PREFIX: &str = "sc-";
+const TRUNK_BRANCHES: [&str; 4] = ["main", "master", "develop", "trunk"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkableBranch(BranchName);
+
+impl LinkableBranch {
+    pub fn parse(branch: BranchName, default_branch: Option<&BranchName>) -> anyhow::Result<Self> {
+        if TRUNK_BRANCHES.contains(&branch.as_str()) || default_branch == Some(&branch) {
+            bail!(
+                "'{branch}' is a trunk branch; links apply to every repo with a branch of that name, so link a story branch instead"
+            );
+        }
+        Ok(Self(branch))
+    }
+
+    pub fn as_branch(&self) -> &BranchName {
+        &self.0
+    }
+
+    pub fn into_branch(self) -> BranchName {
+        self.0
+    }
+}
+
+impl fmt::Display for LinkableBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 pub fn story_id_in_branch(branch: &BranchName) -> Option<StoryId> {
     let lower = branch.as_str().to_ascii_lowercase();
@@ -25,14 +57,11 @@ pub fn story_id_in_branch(branch: &BranchName) -> Option<StoryId> {
 }
 
 pub fn canonical_branch(
-    mention_name: &str,
+    mention_name: &MentionName,
     id: StoryId,
     story_name: &str,
     suffix: Option<&str>,
 ) -> anyhow::Result<BranchName> {
-    if mention_name.is_empty() {
-        bail!("empty mention name");
-    }
     let tail = [Some(slugify!(story_name)), suffix.map(|s| slugify!(s))]
         .into_iter()
         .flatten()
@@ -86,8 +115,12 @@ mod tests {
         assert_eq!(id_in("sc-1abc/sc-9"), Some(9));
     }
 
-    fn canonical(mention: &str, id: i32, name: &str, suffix: Option<&str>) -> String {
-        canonical_branch(mention, id.into(), name, suffix)
+    fn mention(name: &str) -> MentionName {
+        MentionName::parse(name).unwrap()
+    }
+
+    fn canonical(name_of: &str, id: i32, name: &str, suffix: Option<&str>) -> String {
+        canonical_branch(&mention(name_of), id.into(), name, suffix)
             .unwrap()
             .to_string()
     }
@@ -108,12 +141,34 @@ mod tests {
             canonical("tenzin", 7, "Seven", Some("")),
             "tenzin/sc-7/seven"
         );
-        assert!(canonical_branch("", 7.into(), "Seven", None).is_err());
     }
 
     #[test]
     fn canonical_branch_resolves_back_to_its_story() {
-        let branch = canonical_branch("tenzin", 16727.into(), "sc-1 regression", None).unwrap();
+        let branch =
+            canonical_branch(&mention("tenzin"), 16727.into(), "sc-1 regression", None).unwrap();
         assert_eq!(story_id_in_branch(&branch), Some(16727.into()));
+    }
+
+    fn linkable(name: &str, default: Option<&str>) -> anyhow::Result<LinkableBranch> {
+        let default = default.map(|d| BranchName::parse(d).unwrap());
+        LinkableBranch::parse(BranchName::parse(name).unwrap(), default.as_ref())
+    }
+
+    #[test]
+    fn trunk_branches_are_not_linkable() {
+        for trunk in TRUNK_BRANCHES {
+            let err = linkable(trunk, None).unwrap_err();
+            assert!(err.to_string().contains("trunk branch"), "{err}");
+        }
+        assert!(linkable("release", Some("release")).is_err());
+        assert_eq!(
+            linkable("feature/x", Some("release"))
+                .unwrap()
+                .into_branch(),
+            BranchName::parse("feature/x").unwrap()
+        );
+        assert!(linkable("main-fix", None).is_ok());
+        assert!(linkable("me/main", Some("main")).is_ok());
     }
 }

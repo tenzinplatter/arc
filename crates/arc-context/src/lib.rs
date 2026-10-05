@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use arc_core::{Config, StoryId};
+use arc_index::Connection;
 use arc_notes::{BranchName, NoteRelPath};
 use arc_shortcut::Cache;
 
@@ -13,18 +14,19 @@ pub mod resolve;
 pub mod sessions;
 pub mod story;
 
-pub use branch::{canonical_branch, story_id_in_branch};
+pub use branch::{LinkableBranch, canonical_branch, story_id_in_branch};
 pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails, build_context};
 pub use git::GitHead;
-pub use note::{LinkOutcome, NoteLinks, create_story_note, link_branch};
+pub use note::{
+    LinkOutcome, NoteLinks, NoteRename, StoryNote, create_story_note, link_branch,
+    rename_linked_branch,
+};
 pub use resolve::{ResolvedStory, Via, resolve};
 pub use sessions::latest_sessions;
-pub use story::{lookup_story, lookup_user};
+pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 
 pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
-    let head = git::head(dir)?;
-    let conn = arc_index::open(&config.cache_dir)?;
-    resolve(&head, &conn)
+    resolve(&git::head(dir)?, &config.cache_dir)
 }
 
 pub async fn current_context(
@@ -35,11 +37,11 @@ pub async fn current_context(
     let Some(resolved) = resolve_dir(dir, config)? else {
         return Ok(None);
     };
-    let story = lookup_story(cache, &config.api_token, resolved.id)
+    let story = lookup_story_backing_off(cache, &config.api_token, &config.cache_dir, resolved.id)
         .await
         .ok();
     let todos = arc_notes::todos::load_todos(&config.cache_dir).await;
-    let conn = arc_index::open(&config.cache_dir)?;
+    let conn = arc_index::open_for_reading(&config.cache_dir)?;
     build_context(
         resolved,
         story.as_ref(),
@@ -66,6 +68,23 @@ pub async fn branch_for_story(
     canonical_branch(&user.mention_name, id, &story.name, suffix)
 }
 
+fn linked_note(
+    conn: &Connection,
+    branch: &BranchName,
+    id: StoryId,
+) -> anyhow::Result<Option<NoteRelPath>> {
+    if let Some(named) = story_id_in_branch(branch).filter(|&named| named != id) {
+        bail!("branch '{branch}' already names story {named}");
+    }
+    match arc_index::story_for_branch(conn, branch)? {
+        Some((other, note)) if other != id => {
+            bail!("branch '{branch}' is already linked to story {other} in '{note}'")
+        }
+        Some((_, note)) => Ok(Some(note)),
+        None => Ok(None),
+    }
+}
+
 pub async fn link_current_branch(
     dir: &Path,
     config: &Config,
@@ -73,15 +92,9 @@ pub async fn link_current_branch(
     id: StoryId,
 ) -> anyhow::Result<(BranchName, NoteRelPath, LinkOutcome)> {
     let branch = git::head(dir)?.require_branch()?.clone();
-    if let Some(named) = story_id_in_branch(&branch).filter(|&named| named != id) {
-        bail!("branch '{branch}' already names story {named}");
-    }
+    let branch = LinkableBranch::parse(branch, git::default_branch(dir)?.as_ref())?;
     let conn = arc_index::open(&config.cache_dir)?;
-    if let Some((other, note)) =
-        arc_index::story_for_branch(&conn, &branch)?.filter(|&(other, _)| other != id)
-    {
-        bail!("branch '{branch}' is already linked to story {other} in '{note}'");
-    }
+    linked_note(&conn, branch.as_branch(), id)?;
     let note = match arc_index::story_note(&conn, &config.notes_dir, id)? {
         Some((rel, _)) => rel,
         None => {
@@ -89,11 +102,20 @@ pub async fn link_current_branch(
                 .await
                 .with_context(|| format!("couldn't load story {id} to create its note"))?;
             let links = NoteLinks::for_story(cache, &story);
-            create_story_note(&conn, &config.notes_dir, &story, links, "")?.1
+            match create_story_note(&conn, &config.notes_dir, &story, links, "")? {
+                StoryNote::Created { rel, .. } | StoryNote::Existing(rel) => rel,
+            }
         }
     };
     let outcome = link_branch(&conn, &config.notes_dir, &note, &branch)?;
-    Ok((branch, note, outcome))
+    Ok((branch.into_branch(), note, outcome))
+}
+
+#[derive(Debug)]
+pub struct Renamed {
+    pub from: BranchName,
+    pub to: BranchName,
+    pub note: NoteRename,
 }
 
 pub async fn rename_to_canonical(
@@ -101,14 +123,24 @@ pub async fn rename_to_canonical(
     config: &Config,
     cache: &mut Cache,
     id: StoryId,
-) -> anyhow::Result<(BranchName, BranchName)> {
+) -> anyhow::Result<Renamed> {
     let current = git::head(dir)?.require_branch()?.clone();
     let canonical = branch_for_story(config, cache, id, None).await?;
     if canonical == current {
         bail!("already on the canonical branch '{canonical}'");
     }
+    let conn = arc_index::open(&config.cache_dir)?;
+    let linked = linked_note(&conn, &current, id)?;
     git::rename_current_branch(dir, &canonical)?;
-    Ok((current, canonical))
+    let note = match linked {
+        Some(rel) => rename_linked_branch(&conn, &config.notes_dir, &rel, &current, &canonical),
+        None => NoteRename::NotListed,
+    };
+    Ok(Renamed {
+        from: current,
+        to: canonical,
+        note,
+    })
 }
 
 #[cfg(test)]
@@ -119,7 +151,7 @@ mod tests {
     use arc_notes::note::frontmatter::Frontmatter;
     use arc_notes::todos::{Todo, TodoSource};
     use arc_shortcut::api::story::Story;
-    use arc_shortcut::api::user::{CurrentUser, MemberId};
+    use arc_shortcut::api::user::{CurrentUser, MemberId, MentionName};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -207,7 +239,7 @@ mod tests {
         let mut cache = Cache::default().with_cache_dir(env.config.cache_dir.clone());
         cache.set_user(CurrentUser {
             id: MemberId::from(Uuid::nil()),
-            mention_name: "tenzin".into(),
+            mention_name: MentionName::parse("tenzin").unwrap(),
         });
         cache
     }
@@ -315,7 +347,7 @@ mod tests {
             .insert(500.into(), "In Progress".into());
         cache.set_user(CurrentUser {
             id: MemberId::from(Uuid::nil()),
-            mention_name: "tenzin".into(),
+            mention_name: MentionName::parse("tenzin").unwrap(),
         });
         let mut todos = note_todos("stories/story-seven.md", SEVEN_NOTE);
         todos.extend(note_todos("stories/elsewhere.md", "- [ ] not this note\n"));
@@ -590,14 +622,19 @@ mod tests {
         run_git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
         let mut cache = cache_for(&env);
         cache.upsert_story(story_seven());
-        let (from, to) = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
+        let renamed = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
             .await
             .unwrap();
         assert_eq!(
-            (from, to.clone()),
+            (renamed.from, renamed.to.clone()),
             (br("wip"), br("tenzin/sc-7/story-seven"))
         );
-        assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(to));
+        assert!(
+            matches!(renamed.note, NoteRename::NotListed),
+            "{:?}",
+            renamed.note
+        );
+        assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(renamed.to));
         let err = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
             .await
             .unwrap_err();
@@ -618,5 +655,137 @@ mod tests {
                 .unwrap(),
             br("tenzin/sc-7/story-seven-v2")
         );
+    }
+
+    #[test]
+    fn head_ignores_same_named_tags() {
+        let Some(env) = env_on("x") else { return };
+        run_git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        run_git(&env.repo, &["tag", "x"]);
+        assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(br("x")));
+    }
+
+    #[test]
+    fn branch_id_resolution_never_touches_the_index() {
+        let Some(env) = env_on("me/sc-12/x") else {
+            return;
+        };
+        assert_eq!(
+            resolve_dir(&env.repo, &env.config).unwrap().unwrap().id,
+            12.into()
+        );
+        run_git(&env.repo, &["symbolic-ref", "HEAD", "refs/heads/unlinked"]);
+        assert_eq!(resolve_dir(&env.repo, &env.config).unwrap(), None);
+        assert!(!env.config.cache_dir.join("arc.db").exists());
+    }
+
+    #[tokio::test]
+    async fn corrupt_index_is_an_error_not_a_panic() {
+        let Some(env) = env_on("linked") else { return };
+        std::fs::create_dir_all(&env.config.cache_dir).unwrap();
+        std::fs::write(env.config.cache_dir.join("arc.db"), "not a database").unwrap();
+        let mut cache = cache_for(&env);
+        assert!(
+            current_context(&env.repo, &env.config, &mut cache)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn link_refuses_trunk_branches() {
+        let Some(env) = env_on("main") else { return };
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        let err = link_current_branch(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("trunk branch"), "{err}");
+
+        run_git(&env.repo, &["symbolic-ref", "HEAD", "refs/heads/release"]);
+        run_git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        run_git(
+            &env.repo,
+            &["update-ref", "refs/remotes/origin/release", "HEAD"],
+        );
+        run_git(
+            &env.repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/release",
+            ],
+        );
+        let err = link_current_branch(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("trunk branch"), "{err}");
+        assert!(!env.config.notes_dir.join("stories/story-seven.md").exists());
+
+        run_git(&env.repo, &["checkout", "-q", "-b", "feature"]);
+        let (branch, _, outcome) =
+            link_current_branch(&env.repo, &env.config, &mut cache, 7.into())
+                .await
+                .unwrap();
+        assert_eq!((branch, outcome), (br("feature"), LinkOutcome::Added));
+    }
+
+    #[tokio::test]
+    async fn rename_updates_the_linked_note() {
+        let Some(env) = env_on("wip") else { return };
+        run_git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        link_current_branch(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap();
+        let renamed = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap();
+        let note = rel("stories/story-seven.md");
+        assert!(
+            matches!(renamed.note, NoteRename::Updated(ref r) if *r == note),
+            "{:?}",
+            renamed.note
+        );
+        let body = std::fs::read_to_string(note.abs(&env.config.notes_dir)).unwrap();
+        assert_eq!(
+            Frontmatter::from_note(&body).unwrap().branches,
+            vec!["tenzin/sc-7/story-seven"]
+        );
+        let conn = arc_index::open(&env.config.cache_dir).unwrap();
+        assert_eq!(
+            arc_index::story_for_branch(&conn, &br("wip")).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_refuses_branches_of_other_stories() {
+        let Some(env) = env_on("me/sc-12/x") else {
+            return;
+        };
+        run_git(&env.repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        let err = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already names story 12"), "{err}");
+
+        write_note(
+            &env,
+            "stories/other.md",
+            "---\nstory_id: sc-99\nbranches: [taken]\n---\n",
+        );
+        run_git(&env.repo, &["checkout", "-q", "-b", "taken"]);
+        let err = rename_to_canonical(&env.repo, &env.config, &mut cache, 7.into())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already linked to story 99"),
+            "{err}"
+        );
+        assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(br("taken")));
     }
 }

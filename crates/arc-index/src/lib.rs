@@ -71,6 +71,15 @@ pub fn open_readonly(cache_dir: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+pub fn open_for_reading(cache_dir: &Path) -> Result<Connection> {
+    if db_path(cache_dir).exists() {
+        return open_readonly(cache_dir);
+    }
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(conn)
+}
+
 pub fn reindex_note(conn: &Connection, rel: &NoteRelPath, content: &str) -> Result<()> {
     conn.execute_batch("SAVEPOINT reindex_note")?;
     match write_note_rows(conn, rel, content) {
@@ -570,6 +579,24 @@ mod tests {
             vec![rel("foo.md"), rel("stories/foo.md")]
         );
         assert!(note_paths_for_id(&conn, "bar").unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_for_reading_never_creates_or_writes_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_for_reading(tmp.path()).unwrap();
+        assert_eq!(story_for_branch(&conn, &branch("b")).unwrap(), None);
+        assert!(!db_path(tmp.path()).exists());
+
+        let writer = open(tmp.path()).unwrap();
+        reindex_note(&writer, &rel("stories/a.md"), "---\nstory_id: sc-4\nbranches: [b]\n---\n")
+            .unwrap();
+        let conn = open_for_reading(tmp.path()).unwrap();
+        assert_eq!(
+            story_for_branch(&conn, &branch("b")).unwrap(),
+            Some((4.into(), rel("stories/a.md")))
+        );
+        assert!(reindex_note(&conn, &rel("x.md"), "x").is_err());
     }
 
     #[test]

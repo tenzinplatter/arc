@@ -1,6 +1,6 @@
 use std::fmt;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -33,9 +33,40 @@ impl fmt::Display for MemberId {
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(try_from = "String")]
+pub struct MentionName(String);
+
+impl MentionName {
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        if name.is_empty() {
+            bail!("empty mention name");
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for MentionName {
+    type Error = anyhow::Error;
+
+    fn try_from(name: String) -> anyhow::Result<Self> {
+        Self::parse(&name)
+    }
+}
+
+impl fmt::Display for MentionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CurrentUser {
     pub id: MemberId,
-    pub mention_name: String,
+    pub mention_name: MentionName,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -123,5 +154,21 @@ mod tests {
             .collect();
         assert_eq!(members[0].mention_name, "tenzin");
         assert_eq!(members[0].name, "Tenzin P");
+    }
+
+    #[test]
+    fn current_user_needs_a_mention_name() {
+        let user: CurrentUser = serde_json::from_str(
+            r#"{"id": "12345678-1234-1234-1234-123456789abc", "mention_name": "tenzin"}"#,
+        )
+        .unwrap();
+        assert_eq!(user.mention_name.as_str(), "tenzin");
+        assert!(
+            serde_json::from_str::<CurrentUser>(
+                r#"{"id": "12345678-1234-1234-1234-123456789abc", "mention_name": ""}"#
+            )
+            .is_err()
+        );
+        assert!(MentionName::parse("").is_err());
     }
 }

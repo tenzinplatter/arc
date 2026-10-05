@@ -10,7 +10,7 @@ use crate::api::{
     epic::EpicSlim,
     iteration::Iteration,
     story::{Story, iteration_of},
-    user::{CurrentUser, MemberId},
+    user::{CurrentUser, MemberId, MentionName},
     workflow::WorkflowStateId,
 };
 use arc_core::{StoryId, dbg_file};
@@ -70,7 +70,7 @@ impl Cache {
     pub fn user(&self) -> Option<CurrentUser> {
         Some(CurrentUser {
             id: self.user_id?,
-            mention_name: self.user_mention_name.clone()?,
+            mention_name: MentionName::parse(self.user_mention_name.as_deref()?).ok()?,
         })
     }
 
@@ -80,7 +80,7 @@ impl Cache {
 
     pub fn set_user(&mut self, user: CurrentUser) {
         self.user_id = Some(user.id);
-        self.user_mention_name = Some(user.mention_name);
+        self.user_mention_name = Some(user.mention_name.as_str().to_owned());
     }
 
     /// active_story is a frozen snapshot, so it is the last resort.
@@ -399,12 +399,14 @@ mod tests {
         assert_eq!(cache.user(), None);
         let user = CurrentUser {
             id,
-            mention_name: "tenzin".into(),
+            mention_name: MentionName::parse("tenzin").unwrap(),
         };
         cache.set_user(user.clone());
         assert_eq!(cache.user(), Some(user));
         assert_eq!(cache.user_id, Some(id));
         assert_eq!(cache.user_mention_name.as_deref(), Some("tenzin"));
+        cache.user_mention_name = Some(String::new());
+        assert_eq!(cache.user(), None);
     }
 
     #[test]

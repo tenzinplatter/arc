@@ -1,5 +1,6 @@
+use std::path::Path;
+
 use arc_core::StoryId;
-use arc_index::Connection;
 use arc_notes::{BranchName, NoteRelPath};
 
 use crate::branch::story_id_in_branch;
@@ -18,14 +19,16 @@ pub struct ResolvedStory {
     pub via: Via,
 }
 
-pub fn resolve(head: &GitHead, conn: &Connection) -> anyhow::Result<Option<ResolvedStory>> {
+pub fn resolve(head: &GitHead, cache_dir: &Path) -> anyhow::Result<Option<ResolvedStory>> {
     let Some(branch) = head.branch() else {
         return Ok(None);
     };
     let found = match story_id_in_branch(branch) {
         Some(id) => Some((id, Via::BranchId)),
         None => {
-            arc_index::story_for_branch(conn, branch)?.map(|(id, note)| (id, Via::LinkedNote(note)))
+            let conn = arc_index::open_for_reading(cache_dir)?;
+            arc_index::story_for_branch(&conn, branch)?
+                .map(|(id, note)| (id, Via::LinkedNote(note)))
         }
     };
     Ok(found.map(|(id, via)| ResolvedStory {

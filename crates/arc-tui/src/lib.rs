@@ -1,4 +1,8 @@
-use std::{env, fs, process::Command};
+use std::{
+    env, fs,
+    io::{self, Write},
+    process::Command,
+};
 
 use anyhow::Context;
 use ratatui::DefaultTerminal;
@@ -10,11 +14,11 @@ use crate::{
         cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
-    cli::{Commands, ContextFormat, DaemonCommands},
+    cli::{Commands, ContextFormat, DaemonCommands, LinkMode},
     note::Note,
 };
-use arc_context::LinkOutcome;
-use arc_core::{Config, StoryId};
+use arc_context::{LinkOutcome, NoteRename};
+use arc_core::{Config, dbg_file};
 use arc_shortcut::fetch_story;
 
 pub use arc_shortcut::{api, cache};
@@ -46,6 +50,45 @@ pub async fn run(terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
     app.model.config.write()?;
 
     Ok(())
+}
+
+async fn render_context(
+    format: ContextFormat,
+    config: &Config,
+    cache: Cache,
+) -> anyhow::Result<Option<String>> {
+    let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+    let dir = env::current_dir()?;
+    let Some(context) = arc_context::current_context(&dir, config, &mut cache).await? else {
+        return Ok(None);
+    };
+    Ok(Some(match format {
+        ContextFormat::Text => context.to_string(),
+        ContextFormat::Json => format!("{}\n", serde_json::to_string_pretty(&context)?),
+    }))
+}
+
+fn emit_context(rendered: anyhow::Result<Option<String>>) {
+    match rendered {
+        Ok(Some(context)) => {
+            let _ = io::stdout().write_all(context.as_bytes());
+        }
+        Ok(None) => {}
+        Err(e) => dbg_file!("arc context: {e:#}"),
+    }
+}
+
+pub async fn print_context(format: ContextFormat) {
+    std::panic::set_hook(Box::new(|panic| dbg_file!("arc context: {panic}")));
+    let rendered = tokio::spawn(async move {
+        let config = Config::read()?;
+        let cache = Cache::read(config.cache_dir.clone()).await;
+        render_context(format, &config, cache).await
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|rendered| rendered);
+    emit_context(rendered);
 }
 
 pub async fn handle_command(
@@ -115,12 +158,12 @@ pub async fn handle_command(
 
         Commands::Active { id } => {
             let mut cache = cache;
-            let story = match cache.find_story(id.into()) {
+            let story = match cache.find_story(id) {
                 Some(story) => story.clone(),
                 None => {
                     let client =
                         ApiClient::from_token_and_cache(&config.api_token, &mut cache).await?;
-                    fetch_story(&mut cache, &client, id.into())
+                    fetch_story(&mut cache, &client, id)
                         .await
                         .with_context(|| format!("Failed to fetch story {id}"))?
                 }
@@ -138,23 +181,14 @@ pub async fn handle_command(
         Commands::Mcp => arc_mcp::run_stdio(config).await,
 
         Commands::Context { format } => {
-            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
-            let dir = env::current_dir()?;
-            let Some(context) = arc_context::current_context(&dir, config, &mut cache).await?
-            else {
-                return Ok(());
-            };
-            match format {
-                ContextFormat::Text => print!("{context}"),
-                ContextFormat::Json => println!("{}", serde_json::to_string_pretty(&context)?),
-            }
+            emit_context(render_context(format, config, cache).await);
             Ok(())
         }
 
         Commands::Branch { id, suffix } => {
             let mut cache = cache.with_cache_dir(config.cache_dir.clone());
             let id = match id {
-                Some(id) => StoryId::from(id),
+                Some(id) => id,
                 None => {
                     arc_context::resolve_dir(&env::current_dir()?, config)?
                         .context("the current branch doesn't resolve to a story; pass a story id")?
@@ -167,24 +201,39 @@ pub async fn handle_command(
             Ok(())
         }
 
-        Commands::Link { id, rename: false } => {
+        Commands::Link {
+            id,
+            mode: LinkMode::Link,
+        } => {
             let mut cache = cache.with_cache_dir(config.cache_dir.clone());
             let dir = env::current_dir()?;
             let (branch, note, outcome) =
-                arc_context::link_current_branch(&dir, config, &mut cache, id.into()).await?;
+                arc_context::link_current_branch(&dir, config, &mut cache, id).await?;
             match outcome {
                 LinkOutcome::Added => println!("linked {branch} to sc-{id} in {note}"),
-                LinkOutcome::AlreadyLinked => println!("{branch} is already linked to sc-{id} in {note}"),
+                LinkOutcome::AlreadyLinked => {
+                    println!("{branch} is already linked to sc-{id} in {note}")
+                }
             }
             Ok(())
         }
 
-        Commands::Link { id, rename: true } => {
+        Commands::Link {
+            id,
+            mode: LinkMode::RenameToCanonical,
+        } => {
             let mut cache = cache.with_cache_dir(config.cache_dir.clone());
             let dir = env::current_dir()?;
-            let (from, to) =
-                arc_context::rename_to_canonical(&dir, config, &mut cache, id.into()).await?;
-            println!("renamed {from} to {to}");
+            let renamed = arc_context::rename_to_canonical(&dir, config, &mut cache, id).await?;
+            println!("renamed {} to {}", renamed.from, renamed.to);
+            match renamed.note {
+                NoteRename::NotListed => {}
+                NoteRename::Updated(note) => println!("updated branches in {note}"),
+                NoteRename::Failed(note, e) => eprintln!(
+                    "couldn't update branches in {note} ({e:#}); replace {} with {} there by hand",
+                    renamed.from, renamed.to
+                ),
+            }
             Ok(())
         }
 

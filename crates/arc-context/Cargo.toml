@@ -11,10 +11,10 @@ arc-shortcut = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 slugify = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
-tempfile = { workspace = true }
 uuid = { workspace = true }
