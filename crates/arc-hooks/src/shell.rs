@@ -1,12 +1,32 @@
 use std::iter::Peekable;
 use std::str::Chars;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Indent {
+    Kept,
+    Stripped,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Target {
+    #[default]
+    Command,
+    File,
+    Heredoc(Indent),
+}
+
+struct Heredoc {
+    delimiter: String,
+    indent: Indent,
+}
+
 #[derive(Default)]
 struct Splitter {
     commands: Vec<Vec<String>>,
     words: Vec<String>,
     word: Option<String>,
-    redirect_target: bool,
+    target: Target,
+    heredocs: Vec<Heredoc>,
 }
 
 impl Splitter {
@@ -16,31 +36,56 @@ impl Splitter {
 
     fn finish_word(&mut self) {
         if let Some(word) = self.word.take() {
-            match std::mem::take(&mut self.redirect_target) {
-                true => {}
-                false => self.words.push(word),
+            match std::mem::take(&mut self.target) {
+                Target::Command => self.words.push(word),
+                Target::File => {}
+                Target::Heredoc(indent) => self.heredocs.push(Heredoc {
+                    delimiter: word,
+                    indent,
+                }),
             }
         }
     }
 
     fn finish_command(&mut self) {
         self.finish_word();
-        self.redirect_target = false;
+        self.target = Target::Command;
         if !self.words.is_empty() {
             self.commands.push(std::mem::take(&mut self.words));
         }
     }
 
-    fn redirect(&mut self, chars: &mut Peekable<Chars>) {
+    fn redirect(&mut self, first: char, chars: &mut Peekable<Chars>) {
         match self.word.as_deref() {
             Some(fd) if fd.chars().all(|c| c.is_ascii_digit()) => self.word = None,
             _ => self.finish_word(),
         }
-        while chars
-            .next_if(|&c| matches!(c, '>' | '<' | '&' | '|'))
-            .is_some()
-        {}
-        self.redirect_target = true;
+        let mut operator = String::from(first);
+        while let Some(c) = chars.next_if(|&c| matches!(c, '>' | '<' | '&' | '|')) {
+            operator.push(c);
+        }
+        self.target = match operator.as_str() {
+            "<<" => Target::Heredoc(match chars.next_if_eq(&'-') {
+                Some(_) => Indent::Stripped,
+                None => Indent::Kept,
+            }),
+            _ => Target::File,
+        };
+    }
+
+    fn skip_heredocs(&mut self, chars: &mut Peekable<Chars>) {
+        for doc in std::mem::take(&mut self.heredocs) {
+            while chars.peek().is_some() {
+                let body: String = chars.by_ref().take_while(|&c| c != '\n').collect();
+                let line = match doc.indent {
+                    Indent::Stripped => body.trim_start_matches('\t'),
+                    Indent::Kept => body.as_str(),
+                };
+                if line == doc.delimiter {
+                    break;
+                }
+            }
+        }
     }
 
     fn single_quoted(&mut self, chars: &mut Peekable<Chars>) {
@@ -91,7 +136,11 @@ pub fn simple_commands(script: &str) -> Vec<Vec<String>> {
     while let Some(c) = chars.next() {
         match c {
             ' ' | '\t' => split.finish_word(),
-            '\n' | ';' | '&' | '|' | '(' | ')' => split.finish_command(),
+            '\n' => {
+                split.finish_command();
+                split.skip_heredocs(&mut chars);
+            }
+            ';' | '&' | '|' | '(' | ')' => split.finish_command(),
             '#' if split.word.is_none() => while chars.next_if(|&c| c != '\n').is_some() {},
             '\'' => split.single_quoted(&mut chars),
             '"' => split.double_quoted(&mut chars),
@@ -99,7 +148,7 @@ pub fn simple_commands(script: &str) -> Vec<Vec<String>> {
                 Some('\n') | None => {}
                 Some(escaped) => split.word().push(escaped),
             },
-            '>' | '<' => split.redirect(&mut chars),
+            '>' | '<' => split.redirect(c, &mut chars),
             '$' if chars.peek() == Some(&'(') => {
                 split.word().push('$');
                 chars.next();
@@ -187,6 +236,30 @@ mod tests {
             ]
         );
         assert_eq!(split("a#b"), vec![vec!["a#b"]]);
+    }
+
+    #[test]
+    fn heredoc_bodies_are_not_commands() {
+        assert_eq!(
+            split("cat <<EOF > f\ngit checkout -b x\n EOF\nEOF\ngit branch y"),
+            vec![vec!["cat"], vec!["git", "branch", "y"]]
+        );
+        assert_eq!(
+            split("cat <<-'END'; echo a\n\t\tgit branch x\n\tEND\nls"),
+            vec![vec!["cat"], vec!["echo", "a"], vec!["ls"]]
+        );
+        assert_eq!(
+            split("a <<\"ONE\" && b << TWO\nx\nONE\ny\nTWO\nc"),
+            vec![vec!["a"], vec!["b"], vec!["c"]]
+        );
+        assert_eq!(
+            split("git commit -F- <<MSG\nunterminated\ngit branch z"),
+            vec![vec!["git", "commit", "-F-"]]
+        );
+        assert_eq!(
+            split("grep x <<< 'git branch y'\ngit branch z"),
+            vec![vec!["grep", "x"], vec!["git", "branch", "z"]]
+        );
     }
 
     #[test]

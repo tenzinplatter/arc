@@ -7,24 +7,9 @@ use crate::shell::simple_commands;
 const REF_FORBIDDEN: [char; 11] = [' ', '~', '^', ':', '?', '*', '[', '\\', '$', '`', '\''];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Creator {
-    Checkout,
-    Branch,
-    Worktree,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ParentRef {
-    StartPoint(String),
-    PreviousCheckout,
-    CurrentHead,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchCreation {
     pub repo: PathBuf,
     pub new: BranchName,
-    pub parent: ParentRef,
 }
 
 fn ref_name(word: &str) -> Option<BranchName> {
@@ -38,15 +23,8 @@ fn ref_name(word: &str) -> Option<BranchName> {
     plausible.then(|| BranchName::parse(word).ok()).flatten()
 }
 
-fn start_point(word: Option<&String>, creator: &Creator) -> Option<ParentRef> {
-    Some(match word.map(String::as_str) {
-        None | Some("HEAD" | "@") => match creator {
-            Creator::Checkout => ParentRef::PreviousCheckout,
-            Creator::Branch | Creator::Worktree => ParentRef::CurrentHead,
-        },
-        Some(start) if start.starts_with('-') => return None,
-        Some(start) => ParentRef::StartPoint(start.to_owned()),
-    })
+fn plausible_start(word: Option<&String>) -> bool {
+    word.is_none_or(|start| !start.starts_with('-'))
 }
 
 fn short_flag_value<'a>(
@@ -91,11 +69,9 @@ fn switching(
         }
     }
     let new = ref_name(new?)?;
-    let parent = start_point(positionals.first(), &Creator::Checkout)?;
-    Some(BranchCreation {
+    plausible_start(positionals.first()).then(|| BranchCreation {
         repo: repo.to_path_buf(),
         new,
-        parent,
     })
 }
 
@@ -126,10 +102,12 @@ fn branching(args: &[String], repo: &Path) -> Option<BranchCreation> {
         [new, start] => (new, Some(start)),
         _ => return None,
     };
+    if !plausible_start(start) {
+        return None;
+    }
     Some(BranchCreation {
         repo: repo.to_path_buf(),
         new: ref_name(new)?,
-        parent: start_point(start, &Creator::Branch)?,
     })
 }
 
@@ -155,21 +133,13 @@ fn worktree(args: &[String], repo: &Path) -> Option<BranchCreation> {
             a => positionals.push(a.to_owned()),
         }
     }
-    let (path, start) = match positionals.as_slice() {
-        [path] => (path, None),
-        [path, start] => (path, Some(start)),
-        _ => return None,
-    };
-    let new = match (new, start) {
-        (Some(new), _) => new,
-        (None, Some(_)) => return None,
-        (None, None) => Path::new(path).file_name()?.to_str()?,
-    };
-    Some(BranchCreation {
-        repo: repo.to_path_buf(),
-        new: ref_name(new)?,
-        parent: start_point(start, &Creator::Worktree)?,
-    })
+    match positionals.as_slice() {
+        [_] | [_, _] => Some(BranchCreation {
+            repo: repo.to_path_buf(),
+            new: ref_name(new?)?,
+        }),
+        _ => None,
+    }
 }
 
 fn git_creation(args: &[String], dir: &Path, home: Option<&Path>) -> Option<BranchCreation> {
@@ -243,83 +213,52 @@ pub fn branch_creations(script: &str, cwd: &Path, home: Option<&Path>) -> Vec<Br
 mod tests {
     use super::*;
 
-    fn created(script: &str) -> Vec<(String, String, ParentRef)> {
+    fn created(script: &str) -> Vec<(String, String)> {
         branch_creations(script, Path::new("/work/repo"), Some(Path::new("/home/me")))
             .into_iter()
-            .map(|c| (c.repo.display().to_string(), c.new.to_string(), c.parent))
+            .map(|c| (c.repo.display().to_string(), c.new.to_string()))
             .collect()
     }
 
-    fn one(script: &str) -> Option<(String, ParentRef)> {
+    fn one(script: &str) -> Option<String> {
         match created(script).as_slice() {
-            [(repo, new, parent)] if repo == "/work/repo" => Some((new.clone(), parent.clone())),
+            [(repo, new)] if repo == "/work/repo" => Some(new.clone()),
             [] => None,
             other => panic!("{script}: {other:?}"),
         }
     }
 
-    fn start(s: &str) -> ParentRef {
-        ParentRef::StartPoint(s.into())
-    }
-
-    use ParentRef::{CurrentHead, PreviousCheckout};
-
     #[test]
     fn creation_commands() {
-        let cases: &[(&str, &str, ParentRef)] = &[
-            ("git checkout -b feat", "feat", PreviousCheckout),
-            ("git checkout -B feat", "feat", PreviousCheckout),
-            ("git checkout -b feat main", "feat", start("main")),
-            ("git checkout -b feat HEAD", "feat", PreviousCheckout),
-            (
-                "git checkout -q -b feat origin/main",
-                "feat",
-                start("origin/main"),
-            ),
-            ("git checkout -bfeat", "feat", PreviousCheckout),
-            ("git checkout -qb feat", "feat", PreviousCheckout),
-            (
-                "git checkout --track -b feat origin/feat",
-                "feat",
-                start("origin/feat"),
-            ),
-            ("git switch -c feat", "feat", PreviousCheckout),
-            ("git switch -C feat dev", "feat", start("dev")),
-            ("git switch --create feat", "feat", PreviousCheckout),
-            ("git switch --create=feat dev", "feat", start("dev")),
-            ("git switch --force-create feat", "feat", PreviousCheckout),
-            ("git branch feat", "feat", CurrentHead),
-            ("git branch feat dev", "feat", start("dev")),
-            ("git branch -f feat dev", "feat", start("dev")),
-            (
-                "git branch --track=inherit feat origin/x",
-                "feat",
-                start("origin/x"),
-            ),
-            ("git worktree add -b feat ../wt", "feat", CurrentHead),
-            ("git worktree add -B feat ../wt dev", "feat", start("dev")),
-            (
-                "git worktree add --lock --reason why -b feat ../wt",
-                "feat",
-                CurrentHead,
-            ),
-            ("git worktree add ../me/sc-12-wt", "sc-12-wt", CurrentHead),
-            ("git worktree add -f ../wt", "wt", CurrentHead),
-            (
-                "git -c core.x=1 --no-pager checkout -b feat",
-                "feat",
-                PreviousCheckout,
-            ),
-            ("FOO=1 git switch -c 'me/sc-1/x y'", "", PreviousCheckout),
-            ("git switch -c \"me/sc-1/x\"", "me/sc-1/x", PreviousCheckout),
-            (
-                "git checkout -b feat 2>&1 | tail -1",
-                "feat",
-                PreviousCheckout,
-            ),
+        let cases: &[(&str, &str)] = &[
+            ("git checkout -b feat", "feat"),
+            ("git checkout -B feat", "feat"),
+            ("git checkout -b feat main", "feat"),
+            ("git checkout -b feat HEAD", "feat"),
+            ("git checkout -q -b feat origin/main", "feat"),
+            ("git checkout -bfeat", "feat"),
+            ("git checkout -qb feat", "feat"),
+            ("git checkout --track -b feat origin/feat", "feat"),
+            ("git switch -c feat", "feat"),
+            ("git switch -C feat dev", "feat"),
+            ("git switch --create feat", "feat"),
+            ("git switch --create=feat dev", "feat"),
+            ("git switch --force-create feat", "feat"),
+            ("git branch feat", "feat"),
+            ("git branch feat dev", "feat"),
+            ("git branch -f feat dev", "feat"),
+            ("git branch --track=inherit feat origin/x", "feat"),
+            ("git worktree add -b feat ../wt", "feat"),
+            ("git worktree add -B feat ../wt dev", "feat"),
+            ("git worktree add --lock --reason why -b feat ../wt", "feat"),
+            ("git -c core.x=1 --no-pager checkout -b feat", "feat"),
+            ("FOO=1 git switch -c 'me/sc-1/x y'", ""),
+            ("git switch -c \"me/sc-1/x\"", "me/sc-1/x"),
+            ("git checkout -b feat 2>&1 | tail -1", "feat"),
+            ("cat <<EOF\nnotes\nEOF\ngit branch feat", "feat"),
         ];
-        for (script, new, parent) in cases {
-            let expected = (!new.is_empty()).then(|| (new.to_string(), parent.clone()));
+        for (script, new) in cases {
+            let expected = (!new.is_empty()).then(|| new.to_string());
             assert_eq!(one(script), expected, "{script}");
         }
     }
@@ -350,6 +289,11 @@ mod tests {
             "git switch -d HEAD~1",
             "git switch --orphan x",
             "git worktree add ../wt existing",
+            "git worktree add ../me/sc-12-wt",
+            "git worktree add -f ../wt",
+            "cat <<EOF\ngit checkout -b x\nEOF",
+            "cat <<-'END' > notes.md\n\tgit branch x\n\tEND\n",
+            "git commit -F- <<\"MSG\"\ngit switch -c x\nMSG",
             "git worktree add --detach ../wt",
             "git worktree add -d ../wt",
             "git worktree list",
@@ -370,27 +314,22 @@ mod tests {
 
     #[test]
     fn directories_follow_cd_and_dash_c() {
+        let at = |repo: &str, new: &str| (repo.to_owned(), new.to_owned());
         assert_eq!(
             created(
                 "cd ../other && git checkout -b a; git -C sub branch b; cd ~/r && git -C /abs switch -c c"
             ),
             vec![
-                ("/work/repo/../other".into(), "a".into(), PreviousCheckout),
-                ("/work/repo/../other/sub".into(), "b".into(), CurrentHead),
-                ("/abs".into(), "c".into(), PreviousCheckout),
+                at("/work/repo/../other", "a"),
+                at("/work/repo/../other/sub", "b"),
+                at("/abs", "c"),
             ]
         );
-        assert_eq!(
-            created("cd && git branch x"),
-            vec![("/home/me".into(), "x".into(), CurrentHead)]
-        );
+        assert_eq!(created("cd && git branch x"), vec![at("/home/me", "x")]);
         assert_eq!(created("cd $DIR && git branch x"), vec![]);
         assert_eq!(
             created("git checkout -b one && git checkout -b two"),
-            vec![
-                ("/work/repo".into(), "one".into(), PreviousCheckout),
-                ("/work/repo".into(), "two".into(), PreviousCheckout),
-            ]
+            vec![at("/work/repo", "one"), at("/work/repo", "two")]
         );
     }
 }

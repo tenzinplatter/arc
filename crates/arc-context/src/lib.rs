@@ -16,7 +16,7 @@ pub mod section;
 pub mod sessions;
 pub mod story;
 
-pub use branch::{LinkableBranch, canonical_branch, story_id_in_branch};
+pub use branch::{LinkableBranch, StackableBranch, canonical_branch, story_id_in_branch};
 pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails, build_context};
 pub use git::GitHead;
 pub use note::{
@@ -151,8 +151,9 @@ pub fn link_stacked_branch(
     config: &Config,
     cache: &Cache,
     parent: &ResolvedStory,
-    branch: &LinkableBranch,
+    branch: &StackableBranch,
 ) -> anyhow::Result<StackLink> {
+    let branch = branch.as_linkable();
     let conn = arc_index::open(&config.cache_dir)?;
     let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
     linked_note(&conn, branch.as_branch(), parent.id)?;
@@ -1092,6 +1093,10 @@ mod tests {
         assert_eq!(git::head(&env.repo).unwrap(), GitHead::Branch(br("taken")));
     }
 
+    fn stackable(name: &str) -> StackableBranch {
+        StackableBranch::parse(LinkableBranch::parse(br(name), None).unwrap()).unwrap()
+    }
+
     #[test]
     fn stacked_links_use_the_parent_note_or_cached_story() {
         let Some(env) = env_on("unused") else { return };
@@ -1100,7 +1105,7 @@ mod tests {
             branch: br("tenzin/sc-7/x"),
             via: Via::BranchId,
         };
-        let stacked = LinkableBranch::parse(br("stacked"), None).unwrap();
+        let stacked = stackable("me/stacked");
         let mut cache = cache_for(&env);
         assert_eq!(
             link_stacked_branch(&env.config, &cache, &parent, &stacked).unwrap(),
@@ -1118,14 +1123,14 @@ mod tests {
         );
         let resolved = ResolvedStory {
             id: 7.into(),
-            branch: br("stacked"),
+            branch: br("me/stacked"),
             via: Via::LinkedNote(note.clone()),
         };
         assert_eq!(
             story_note_for(&resolved, &env.config).unwrap().unwrap().0,
             note
         );
-        let other = LinkableBranch::parse(br("me/sc-12/y"), None).unwrap();
+        let other = stackable("me/sc-12/y");
         assert!(link_stacked_branch(&env.config, &cache, &parent, &other).is_err());
     }
 }

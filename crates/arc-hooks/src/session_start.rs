@@ -26,7 +26,7 @@ impl fmt::Display for Briefing<'_> {
         };
         writeln!(
             f,
-            "- New branches for this story: name them with `arc branch sc-{id} [--suffix <part>]`{canonical}; branches created from a story branch are linked to its story automatically."
+            "- New branches for this story: name them with `arc branch sc-{id} [--suffix <part>]`{canonical}; branches created from a story branch are linked to its story automatically when their name contains a `/` (e.g. `me/topic`)."
         )?;
         writeln!(
             f,
@@ -138,7 +138,7 @@ mod tests {
              Note: none\n\
              \n\
              arc workflow for sc-7:\n\
-             - New branches for this story: name them with `arc branch sc-7 [--suffix <part>]` (canonical: me/sc-7/story-seven); branches created from a story branch are linked to its story automatically.\n\
+             - New branches for this story: name them with `arc branch sc-7 [--suffix <part>]` (canonical: me/sc-7/story-seven); branches created from a story branch are linked to its story automatically when their name contains a `/` (e.g. `me/topic`).\n\
              - Handoffs: call the arc MCP tool `log_session` with cwd: \"/work/repo\" (Done / State / Next / Open questions) at milestones and before finishing.\n\
              - Shortcut: create or update stories, workflow states and comments with the Shortcut MCP.\n"
         );

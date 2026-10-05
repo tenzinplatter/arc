@@ -82,7 +82,16 @@ pub async fn respond(
     env: HookEnv,
     cache: Cache,
 ) -> anyhow::Result<Option<String>> {
-    match (hook, HookInput::parse(stdin)?) {
+    respond_to(hook, HookInput::parse(stdin)?, env, cache).await
+}
+
+async fn respond_to(
+    hook: Hook,
+    input: HookInput,
+    env: HookEnv,
+    cache: Cache,
+) -> anyhow::Result<Option<String>> {
+    match (hook, input) {
         (Hook::SessionStart, HookInput::SessionStart(input)) => {
             session_start::run(input, &env, cache).await
         }
@@ -97,12 +106,25 @@ pub async fn respond(
     }
 }
 
+fn nothing_to_do(hook: Hook, input: &HookInput) -> bool {
+    match (hook, input) {
+        (Hook::PostBash, HookInput::PostToolUse(input)) => {
+            !post_bash::creates_branches(input, std::env::home_dir().as_deref())
+        }
+        _ => false,
+    }
+}
+
 async fn respond_to_stdin(hook: Hook, stdin: String) -> anyhow::Result<Option<String>> {
+    let input = HookInput::parse(&stdin)?;
+    if nothing_to_do(hook, &input) {
+        return Ok(None);
+    }
     let config = Config::read()?;
     let cache = Cache::read(config.cache_dir.clone())
         .await
         .with_cache_dir(config.cache_dir.clone());
-    respond(hook, &stdin, HookEnv::new(config), cache).await
+    respond_to(hook, input, HookEnv::new(config), cache).await
 }
 
 pub async fn run(hook: Hook) {

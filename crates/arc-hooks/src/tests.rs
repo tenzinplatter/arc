@@ -39,7 +39,16 @@ fn git_available() -> bool {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    git_with(dir, args, None);
+}
+
+fn git_at(dir: &Path, at: i64, args: &[&str]) {
+    git_with(dir, args, Some(at));
+}
+
+fn git_with(dir: &Path, args: &[&str], at: Option<i64>) {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(dir)
         .args([
@@ -50,14 +59,20 @@ fn git(dir: &Path, args: &[&str]) {
             "-c",
             "commit.gpgsign=false",
         ])
-        .args(args)
-        .output()
-        .unwrap();
+        .args(args);
+    if let Some(at) = at {
+        command.env("GIT_COMMITTER_DATE", format!("@{at} +0000"));
+    }
+    let out = command.output().unwrap();
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn minutes_ago(minutes: i64) -> i64 {
+    arc_core::time::now().timestamp() - minutes * 60
 }
 
 fn env_on(branch: &str) -> Option<Env> {
@@ -191,51 +206,153 @@ fn story_seven() -> Story {
 }
 
 #[tokio::test]
-async fn post_bash_links_branches_stacked_on_a_story_branch() {
+async fn post_bash_links_specific_branches_stacked_on_a_story_branch() {
     let Some(env) = env_on("tenzin/sc-7/x") else {
         return;
     };
     env.write_note("stories/story-seven.md", SEVEN);
-    git(&env.repo, &["checkout", "-q", "-b", "stacked"]);
+    let t = minutes_ago(5);
+    git_at(&env.repo, t, &["checkout", "-q", "-b", "me/stacked"]);
     assert_eq!(
-        context_of(env.bash("git checkout -b stacked").await).as_deref(),
-        Some("arc: linked stacked to sc-7 (stacked on tenzin/sc-7/x)")
+        context_of(env.bash("git checkout -b me/stacked").await).as_deref(),
+        Some("arc: linked me/stacked to sc-7 (stacked on tenzin/sc-7/x)")
     );
-    assert_eq!(branches(&env.note("stories/story-seven.md")), ["stacked"]);
-
-    git(&env.repo, &["switch", "-q", "-c", "deeper"]);
     assert_eq!(
-        context_of(env.bash("git switch -c deeper").await).as_deref(),
-        Some("arc: linked deeper to sc-7 (stacked on stacked)")
+        branches(&env.note("stories/story-seven.md")),
+        ["me/stacked"]
     );
 
-    git(&env.repo, &["branch", "side", "tenzin/sc-7/x"]);
+    git_at(&env.repo, t + 10, &["switch", "-q", "-c", "me/deeper"]);
+    assert_eq!(
+        context_of(env.bash("git switch -c me/deeper").await).as_deref(),
+        Some("arc: linked me/deeper to sc-7 (stacked on me/stacked)")
+    );
+
+    git_at(&env.repo, t + 20, &["branch", "me/side", "tenzin/sc-7/x"]);
     std::fs::create_dir_all(env.repo.join("sub")).unwrap();
     let wt = env.tmp.path().join("wt");
-    git(
+    git_at(
         &env.repo,
+        t + 30,
         &[
             "worktree",
             "add",
             "-q",
             "-b",
-            "in-tree",
+            "me/in-tree",
             wt.to_str().unwrap(),
         ],
     );
     let both = format!(
-        "cd sub && git branch side tenzin/sc-7/x; git -C .. worktree add -b in-tree {}",
+        "cd sub && git branch me/side tenzin/sc-7/x; git -C .. worktree add -b me/in-tree {}",
         wt.display()
     );
     assert_eq!(
         context_of(env.bash(&both).await).as_deref(),
         Some(
-            "arc: linked side to sc-7 (stacked on tenzin/sc-7/x)\narc: linked in-tree to sc-7 (stacked on deeper)"
+            "arc: linked me/side to sc-7 (stacked on tenzin/sc-7/x)\narc: linked me/in-tree to sc-7 (stacked on me/deeper)"
         )
     );
     assert_eq!(
         branches(&env.note("stories/story-seven.md")),
-        ["stacked", "deeper", "side", "in-tree"]
+        ["me/stacked", "me/deeper", "me/side", "me/in-tree"]
+    );
+}
+
+#[tokio::test]
+async fn post_bash_only_suggests_linking_generic_names() {
+    let Some(env) = env_on("tenzin/sc-7/x") else {
+        return;
+    };
+    env.write_note("stories/story-seven.md", SEVEN);
+    for (name, at) in [("review", 5), ("wip", 4), ("wt", 3)] {
+        git_at(&env.repo, minutes_ago(at), &["branch", name]);
+        let suggestion = context_of(env.bash(&format!("git branch {name}")).await).unwrap();
+        assert!(
+            suggestion.starts_with(&format!(
+                "arc: {name} was created from tenzin/sc-7/x (sc-7). Generic branch names aren't linked automatically"
+            )),
+            "{suggestion}"
+        );
+        assert!(suggestion.contains("`arc link sc-7`"), "{suggestion}");
+    }
+    assert!(branches(&env.note("stories/story-seven.md")).is_empty());
+
+    let wt = env.tmp.path().join("me-sc-7-wt");
+    git(&env.repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    assert_eq!(
+        env.bash(&format!("git worktree add {}", wt.display()))
+            .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn post_bash_reads_the_parent_from_the_reflog_not_the_current_head() {
+    let Some(env) = env_on("tenzin/sc-7/x") else {
+        return;
+    };
+    env.write_note("stories/story-seven.md", SEVEN);
+    env.write_note(
+        "stories/story-nine.md",
+        "---\nid: story-nine\nstory_id: sc-9\n---\n\n# Story nine\n",
+    );
+    let t = minutes_ago(5);
+    git_at(&env.repo, t - 60, &["branch", "me/sc-9/y"]);
+    git_at(&env.repo, t, &["branch", "me/wip-save"]);
+    git_at(&env.repo, t + 5, &["checkout", "-q", "me/sc-9/y"]);
+    assert_eq!(
+        context_of(
+            env.bash("git branch me/wip-save && git checkout me/sc-9/y")
+                .await
+        )
+        .as_deref(),
+        Some("arc: linked me/wip-save to sc-7 (stacked on tenzin/sc-7/x)")
+    );
+    assert!(branches(&env.note("stories/story-nine.md")).is_empty());
+
+    git_at(&env.repo, t + 60, &["branch", "me/from-head", "HEAD"]);
+    git_at(&env.repo, t + 65, &["checkout", "-q", "tenzin/sc-7/x"]);
+    assert_eq!(
+        context_of(
+            env.bash("git branch me/from-head HEAD && git checkout tenzin/sc-7/x")
+                .await
+        )
+        .as_deref(),
+        Some("arc: linked me/from-head to sc-9 (stacked on me/sc-9/y)")
+    );
+
+    git_at(&env.repo, t + 90, &["branch", "me/same-second", "HEAD"]);
+    git_at(&env.repo, t + 90, &["checkout", "-q", "me/sc-9/y"]);
+    let nudge = context_of(
+        env.bash("git branch me/same-second HEAD && git checkout me/sc-9/y")
+            .await,
+    )
+    .unwrap();
+    assert!(
+        nudge.starts_with("arc: new branch me/same-second isn't linked"),
+        "{nudge}"
+    );
+    assert_eq!(
+        branches(&env.note("stories/story-nine.md")),
+        ["me/from-head"]
+    );
+
+    git_at(&env.repo, t + 120, &["checkout", "-q", "-b", "me/heredoc"]);
+    assert_eq!(
+        env.bash("cat <<EOF > notes.md\ngit checkout -b me/heredoc\nEOF")
+            .await,
+        None
+    );
+
+    git(
+        &env.repo,
+        &["-c", "core.logAllRefUpdates=false", "branch", "me/unlogged"],
+    );
+    assert_eq!(env.bash("git branch me/unlogged").await, None);
+    assert_eq!(
+        branches(&env.note("stories/story-seven.md")),
+        ["me/wip-save"]
     );
 }
 
@@ -267,37 +384,41 @@ async fn post_bash_respects_other_stories_and_missing_notes() {
     let Some(env) = env_on("tenzin/sc-7/x") else {
         return;
     };
-    git(&env.repo, &["branch", "orphan-work"]);
-    let missing = context_of(env.bash("git branch orphan-work").await).unwrap();
+    git(&env.repo, &["branch", "me/orphan-work"]);
+    let missing = context_of(env.bash("git branch me/orphan-work").await).unwrap();
     assert!(
         missing.starts_with(
-            "arc: orphan-work was created from tenzin/sc-7/x (sc-7), but sc-7 has no story note"
+            "arc: me/orphan-work was created from tenzin/sc-7/x (sc-7), but sc-7 has no story note"
         ),
         "{missing}"
     );
 
     let mut cache = env.cache();
     cache.upsert_story(story_seven());
-    git(&env.repo, &["branch", "cached"]);
+    git(&env.repo, &["branch", "me/cached"]);
     let linked = context_of(
-        env.hook_with(Hook::PostBash, env.bash_input("git branch cached"), cache)
-            .await,
+        env.hook_with(
+            Hook::PostBash,
+            env.bash_input("git branch me/cached"),
+            cache,
+        )
+        .await,
     );
     assert_eq!(
         linked.as_deref(),
-        Some("arc: linked cached to sc-7 (stacked on tenzin/sc-7/x)")
+        Some("arc: linked me/cached to sc-7 (stacked on tenzin/sc-7/x)")
     );
-    assert_eq!(branches(&env.note("stories/story-seven.md")), ["cached"]);
+    assert_eq!(branches(&env.note("stories/story-seven.md")), ["me/cached"]);
 
     env.write_note(
         "stories/other.md",
-        "---\nstory_id: sc-99\nbranches: [taken]\n---\n",
+        "---\nstory_id: sc-99\nbranches: [me/taken]\n---\n",
     );
-    git(&env.repo, &["branch", "taken"]);
-    assert_eq!(env.bash("git branch taken").await, None);
+    git(&env.repo, &["branch", "me/taken"]);
+    assert_eq!(env.bash("git branch me/taken").await, None);
     git(&env.repo, &["branch", "me/sc-12/z"]);
     assert_eq!(env.bash("git branch me/sc-12/z").await, None);
-    assert_eq!(branches(&env.note("stories/story-seven.md")), ["cached"]);
+    assert_eq!(branches(&env.note("stories/story-seven.md")), ["me/cached"]);
 }
 
 #[tokio::test]

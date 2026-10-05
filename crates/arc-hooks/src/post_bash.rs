@@ -1,20 +1,29 @@
 use std::fmt;
+use std::path::Path;
 
 use arc_context::git::{self, GitHead};
-use arc_context::{LinkableBranch, ResolvedStory, StackLink, link_stacked_branch, resolve};
+use arc_context::{
+    LinkableBranch, ResolvedStory, StackLink, StackableBranch, link_stacked_branch, resolve,
+};
 use arc_core::{StoryId, dbg_file};
 use arc_notes::BranchName;
 use arc_shortcut::Cache;
 
 use crate::HookEnv;
-use crate::command::{BranchCreation, ParentRef, branch_creations};
+use crate::command::{BranchCreation, branch_creations};
 use crate::input::{PostToolUseInput, ToolCall};
 use crate::output::ContextOutput;
-use crate::repo::{self, Freshness};
+use crate::repo::{self, Created, Freshness, HeadAt, StartPoint};
+
+const GIT_WORDS: [&str; 4] = ["checkout", "switch", "branch", "worktree"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
     Link {
+        branch: StackableBranch,
+        parent: ResolvedStory,
+    },
+    Suggest {
         branch: LinkableBranch,
         parent: ResolvedStory,
     },
@@ -29,7 +38,10 @@ pub fn plan(
 ) -> Plan {
     match (new_story, parent, branch) {
         (Some(_), _, _) | (None, _, None) => Plan::Nothing,
-        (None, Some(parent), Some(branch)) => Plan::Link { branch, parent },
+        (None, Some(parent), Some(branch)) => match StackableBranch::parse(branch) {
+            Ok(branch) => Plan::Link { branch, parent },
+            Err(branch) => Plan::Suggest { branch, parent },
+        },
         (None, None, Some(branch)) => Plan::Nudge(branch),
     }
 }
@@ -42,6 +54,11 @@ pub enum Outcome {
         parent: BranchName,
     },
     Unlinked(BranchName),
+    Generic {
+        branch: BranchName,
+        story: StoryId,
+        parent: BranchName,
+    },
     NoStoryNote {
         branch: BranchName,
         story: StoryId,
@@ -65,6 +82,14 @@ impl fmt::Display for Outcome {
                 f,
                 "arc: new branch {branch} isn't linked to a Shortcut story. If this is story work, run `arc link <id>` with it checked out, or name it with `arc branch <id>`; otherwise ignore this."
             ),
+            Outcome::Generic {
+                branch,
+                story,
+                parent,
+            } => write!(
+                f,
+                "arc: {branch} was created from {parent} (sc-{story}). Generic branch names aren't linked automatically because links apply to that name in every repo; if it is part of sc-{story}, run `arc link sc-{story}` with it checked out, or create it with a specific name via `arc branch sc-{story} --suffix <part>`; otherwise ignore this."
+            ),
             Outcome::NoStoryNote {
                 branch,
                 story,
@@ -78,11 +103,18 @@ impl fmt::Display for Outcome {
     }
 }
 
-fn parent_branch(creation: &BranchCreation) -> anyhow::Result<Option<BranchName>> {
-    match &creation.parent {
-        ParentRef::StartPoint(start) => repo::branch_named_by(&creation.repo, start),
-        ParentRef::PreviousCheckout => repo::branch_before_checkout(&creation.repo, &creation.new),
-        ParentRef::CurrentHead => Ok(git::head(&creation.repo)?.branch().cloned()),
+fn parent_branch(
+    creation: &BranchCreation,
+    created: &Created,
+) -> anyhow::Result<Option<BranchName>> {
+    let repo = &creation.repo;
+    match &created.from {
+        StartPoint::Named(start) => repo::branch_named_by(repo, start),
+        StartPoint::Head => match repo::head_when_created(repo, &creation.new, created.at)? {
+            HeadAt::Branch(name) => repo::local_branch(repo, &name),
+            HeadAt::Current => Ok(git::head(repo)?.branch().cloned()),
+            HeadAt::Unknown => Ok(None),
+        },
     }
 }
 
@@ -91,12 +123,12 @@ fn story_of(branch: &BranchName, env: &HookEnv) -> anyhow::Result<Option<Resolve
 }
 
 fn handle(creation: &BranchCreation, env: &HookEnv, cache: &Cache) -> anyhow::Result<Outcome> {
-    match repo::branch_freshness(&creation.repo, &creation.new, env.now)? {
+    let created = match repo::branch_freshness(&creation.repo, &creation.new, env.now)? {
         Freshness::Missing | Freshness::Stale => return Ok(Outcome::Silent),
-        Freshness::Fresh | Freshness::Unlogged => {}
-    }
+        Freshness::Fresh(created) => created,
+    };
     let new_story = story_of(&creation.new, env)?;
-    let parent = match parent_branch(creation)? {
+    let parent = match parent_branch(creation, &created)? {
         Some(branch) => story_of(&branch, env)?,
         None => None,
     };
@@ -105,6 +137,11 @@ fn handle(creation: &BranchCreation, env: &HookEnv, cache: &Cache) -> anyhow::Re
     Ok(match plan(new_story.as_ref(), parent, linkable) {
         Plan::Nothing => Outcome::Silent,
         Plan::Nudge(branch) => Outcome::Unlinked(branch.into_branch()),
+        Plan::Suggest { branch, parent } => Outcome::Generic {
+            branch: branch.into_branch(),
+            story: parent.id,
+            parent: parent.branch,
+        },
         Plan::Link { branch, parent } => {
             match link_stacked_branch(&env.config, cache, &parent, &branch)? {
                 StackLink::Linked(..) => Outcome::Linked {
@@ -120,6 +157,16 @@ fn handle(creation: &BranchCreation, env: &HookEnv, cache: &Cache) -> anyhow::Re
             }
         }
     })
+}
+
+pub fn creates_branches(input: &PostToolUseInput, home: Option<&Path>) -> bool {
+    let ToolCall::Bash { tool_input } = &input.tool else {
+        return false;
+    };
+    let command = tool_input.command.as_str();
+    command.contains("git")
+        && GIT_WORDS.iter().any(|word| command.contains(word))
+        && !branch_creations(command, input.cwd.path(), home).is_empty()
 }
 
 pub fn run(

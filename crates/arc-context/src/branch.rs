@@ -37,6 +37,33 @@ impl fmt::Display for LinkableBranch {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackableBranch(LinkableBranch);
+
+impl StackableBranch {
+    pub fn parse(branch: LinkableBranch) -> Result<Self, LinkableBranch> {
+        let name = branch.as_branch();
+        match name.as_str().contains('/') || story_id_in_branch(name).is_some() {
+            true => Ok(Self(branch)),
+            false => Err(branch),
+        }
+    }
+
+    pub fn as_linkable(&self) -> &LinkableBranch {
+        &self.0
+    }
+
+    pub fn into_branch(self) -> BranchName {
+        self.0.into_branch()
+    }
+}
+
+impl fmt::Display for StackableBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 pub fn story_id_in_branch(branch: &BranchName) -> Option<StoryId> {
     let lower = branch.as_str().to_ascii_lowercase();
     lower
@@ -170,5 +197,20 @@ mod tests {
         );
         assert!(linkable("main-fix", None).is_ok());
         assert!(linkable("me/main", Some("main")).is_ok());
+    }
+
+    #[test]
+    fn only_specific_names_stack_automatically() {
+        let stackable = |name: &str| StackableBranch::parse(linkable(name, None).unwrap()).is_ok();
+        for generic in ["review", "wip", "tmp", "wt", "fix-sc", "sc-x"] {
+            assert!(!stackable(generic), "{generic}");
+        }
+        for specific in ["me/review", "feature/x", "sc-12", "fix-sc-12-retry"] {
+            assert!(stackable(specific), "{specific}");
+        }
+        assert_eq!(
+            StackableBranch::parse(linkable("wip", None).unwrap()).unwrap_err(),
+            linkable("wip", None).unwrap()
+        );
     }
 }

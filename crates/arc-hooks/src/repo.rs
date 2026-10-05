@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -5,17 +6,18 @@ use std::time::SystemTime;
 use anyhow::Context;
 use arc_context::OneLine;
 use arc_notes::BranchName;
-use chrono::{DateTime, FixedOffset, TimeDelta};
+use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
 
 const HEADS: &str = "refs/heads/";
 const REMOTES: &str = "refs/remotes/";
 const CHECKOUT_PREFIX: &str = "checkout: moving from ";
 const CREATED_PREFIX: &str = "branch: Created from ";
-const REFLOG_SCAN: &str = "20";
+const HEAD_REFLOG_SCAN: usize = 200;
 pub const FRESH_BRANCH_WINDOW: TimeDelta = TimeDelta::minutes(10);
 
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
     let out = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -61,51 +63,82 @@ pub fn branch_named_by(dir: &Path, start: &str) -> anyhow::Result<Option<BranchN
         .transpose()
 }
 
-pub fn previous_checkout<'a>(reflog: &'a [String], new: &BranchName) -> Option<&'a str> {
-    reflog.iter().find_map(|entry| {
-        let (from, to) = entry.strip_prefix(CHECKOUT_PREFIX)?.rsplit_once(" to ")?;
-        (to == new.as_str()).then_some(from)
-    })
-}
-
-pub fn branch_before_checkout(dir: &Path, new: &BranchName) -> anyhow::Result<Option<BranchName>> {
-    let reflog = lines(git(
-        dir,
-        &["reflog", "-n", REFLOG_SCAN, "--format=%gs", "HEAD"],
-    )?);
-    match previous_checkout(&reflog, new) {
-        Some(from) => local_branch(dir, from),
-        None => Ok(None),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Freshness {
-    Fresh,
-    Stale,
-    Missing,
-    Unlogged,
+pub struct ReflogEntry {
+    pub at: DateTime<Utc>,
+    pub message: String,
 }
 
-pub fn freshness(oldest_entry: Option<&str>, now: DateTime<FixedOffset>) -> Freshness {
-    let Some(entry) = oldest_entry else {
-        return Freshness::Unlogged;
-    };
-    let created = entry.split_once('\t').and_then(|(selector, message)| {
+impl ReflogEntry {
+    pub fn parse(line: &str) -> Option<Self> {
+        let (selector, message) = line.split_once('\t')?;
         let secs = selector
             .rsplit_once("@{")?
             .1
             .strip_suffix('}')?
             .parse()
             .ok()?;
-        message
-            .starts_with(CREATED_PREFIX)
-            .then(|| DateTime::from_timestamp(secs, 0))
-            .flatten()
-    });
-    match created {
-        Some(at) if now.to_utc() - at <= FRESH_BRANCH_WINDOW => Freshness::Fresh,
-        _ => Freshness::Stale,
+        Some(Self {
+            at: DateTime::from_timestamp(secs, 0)?,
+            message: message.to_owned(),
+        })
+    }
+
+    fn checkout(&self) -> Option<(&str, &str)> {
+        self.message
+            .strip_prefix(CHECKOUT_PREFIX)?
+            .rsplit_once(" to ")
+    }
+}
+
+fn reflog(dir: &Path, args: &[&str]) -> anyhow::Result<Vec<ReflogEntry>> {
+    let mut command = vec!["reflog", "show", "--date=unix", "--format=%gd%x09%gs"];
+    command.extend(args);
+    Ok(lines(git(dir, &command)?)
+        .iter()
+        .filter_map(|line| ReflogEntry::parse(line))
+        .collect())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartPoint {
+    Head,
+    Named(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Created {
+    pub at: DateTime<Utc>,
+    pub from: StartPoint,
+}
+
+impl Created {
+    pub fn parse(entry: &ReflogEntry) -> Option<Self> {
+        let from = entry.message.strip_prefix(CREATED_PREFIX)?.trim();
+        Some(Self {
+            at: entry.at,
+            from: match from {
+                "" => return None,
+                "HEAD" | "@" => StartPoint::Head,
+                named => StartPoint::Named(named.to_owned()),
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Freshness {
+    Fresh(Created),
+    Stale,
+    Missing,
+}
+
+pub fn freshness(oldest_entry: Option<&ReflogEntry>, now: DateTime<FixedOffset>) -> Freshness {
+    match oldest_entry.and_then(Created::parse) {
+        Some(created) if now.to_utc() - created.at <= FRESH_BRANCH_WINDOW => {
+            Freshness::Fresh(created)
+        }
+        Some(_) | None => Freshness::Stale,
     }
 }
 
@@ -118,17 +151,51 @@ pub fn branch_freshness(
     if !has_ref(dir, &full)? {
         return Ok(Freshness::Missing);
     }
-    let reflog = lines(git(
-        dir,
-        &[
-            "reflog",
-            "show",
-            "--date=unix",
-            "--format=%gd%x09%gs",
-            &full,
-        ],
-    )?);
-    Ok(freshness(reflog.last().map(String::as_str), now))
+    Ok(freshness(reflog(dir, &[&full])?.last(), now))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeadAt {
+    Branch(String),
+    Current,
+    Unknown,
+}
+
+pub fn head_at(
+    newest_first: &[ReflogEntry],
+    complete: bool,
+    new: &BranchName,
+    at: DateTime<Utc>,
+) -> HeadAt {
+    let mut left_at_creation = None;
+    for entry in newest_first {
+        let Some((from, to)) = entry.checkout() else {
+            continue;
+        };
+        match entry.at.cmp(&at) {
+            Ordering::Greater => left_at_creation = Some(from),
+            Ordering::Equal if to == new.as_str() => return HeadAt::Branch(from.to_owned()),
+            Ordering::Equal if from == new.as_str() => {}
+            Ordering::Equal => return HeadAt::Unknown,
+            Ordering::Less if to == new.as_str() => return HeadAt::Unknown,
+            Ordering::Less => return HeadAt::Branch(to.to_owned()),
+        }
+    }
+    match (complete, left_at_creation) {
+        (false, _) => HeadAt::Unknown,
+        (true, Some(from)) => HeadAt::Branch(from.to_owned()),
+        (true, None) => HeadAt::Current,
+    }
+}
+
+pub fn head_when_created(
+    dir: &Path,
+    new: &BranchName,
+    at: DateTime<Utc>,
+) -> anyhow::Result<HeadAt> {
+    let entries = reflog(dir, &[&format!("-n{HEAD_REFLOG_SCAN}"), "HEAD"])?;
+    let complete = entries.len() < HEAD_REFLOG_SCAN;
+    Ok(head_at(&entries, complete, new, at))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,42 +320,102 @@ mod tests {
         BranchName::parse(s).unwrap()
     }
 
-    #[test]
-    fn previous_checkout_reads_the_newest_matching_move() {
-        let reflog: Vec<String> = [
-            "checkout: moving from one to two",
-            "commit: x",
-            "checkout: moving from main to one",
-            "checkout: moving from dev to one",
-        ]
-        .map(String::from)
-        .to_vec();
-        assert_eq!(previous_checkout(&reflog, &br("one")), Some("main"));
-        assert_eq!(previous_checkout(&reflog, &br("two")), Some("one"));
-        assert_eq!(previous_checkout(&reflog, &br("three")), None);
-        let odd = vec!["checkout: moving from a to b to c".to_owned()];
-        assert_eq!(previous_checkout(&odd, &br("c")), Some("a to b"));
+    fn entry(at: i64, message: &str) -> ReflogEntry {
+        ReflogEntry {
+            at: DateTime::from_timestamp(at, 0).unwrap(),
+            message: message.to_owned(),
+        }
     }
 
     #[test]
     fn freshness_needs_a_recent_creation_entry() {
         let now = DateTime::parse_from_rfc3339("2026-10-05T10:00:00+10:00").unwrap();
         let secs = now.timestamp();
-        let entry = |offset: i64, msg: &str| format!("x@{{{}}}\t{msg}", secs - offset);
+        let created = |offset: i64, msg: &str| entry(secs - offset, msg);
         assert_eq!(
-            freshness(Some(&entry(30, "branch: Created from HEAD")), now),
-            Freshness::Fresh
+            freshness(Some(&created(30, "branch: Created from HEAD")), now),
+            Freshness::Fresh(Created {
+                at: DateTime::from_timestamp(secs - 30, 0).unwrap(),
+                from: StartPoint::Head
+            })
         );
+        assert!(matches!(
+            freshness(Some(&created(30, "branch: Created from origin/main")), now),
+            Freshness::Fresh(Created { from: StartPoint::Named(n), .. }) if n == "origin/main"
+        ));
         assert_eq!(
-            freshness(Some(&entry(3600, "branch: Created from HEAD")), now),
+            freshness(Some(&created(3600, "branch: Created from HEAD")), now),
             Freshness::Stale
         );
         assert_eq!(
-            freshness(Some(&entry(5, "branch: Reset to dev")), now),
+            freshness(Some(&created(5, "branch: Reset to dev")), now),
             Freshness::Stale
         );
-        assert_eq!(freshness(Some("garbage"), now), Freshness::Stale);
-        assert_eq!(freshness(None, now), Freshness::Unlogged);
+        assert_eq!(freshness(None, now), Freshness::Stale);
+        assert_eq!(ReflogEntry::parse("garbage"), None);
+        assert_eq!(
+            ReflogEntry::parse("refs/heads/x@{1700000000}\tbranch: Created from HEAD"),
+            Some(entry(1_700_000_000, "branch: Created from HEAD"))
+        );
+    }
+
+    #[test]
+    fn head_at_creation_comes_from_the_reflog_around_it() {
+        let new = br("me/new");
+        let at = DateTime::from_timestamp(100, 0).unwrap();
+        let head = |entries: &[ReflogEntry]| head_at(entries, true, &new, at);
+        let branch = |b: &str| HeadAt::Branch(b.to_owned());
+        assert_eq!(
+            head(&[
+                entry(100, "checkout: moving from sc-7 to me/new"),
+                entry(90, "checkout: moving from main to sc-7"),
+            ]),
+            branch("sc-7")
+        );
+        assert_eq!(
+            head(&[
+                entry(160, "checkout: moving from sc-7 to me/sc-9/y"),
+                entry(120, "commit: x"),
+                entry(90, "checkout: moving from main to sc-7"),
+            ]),
+            branch("sc-7")
+        );
+        assert_eq!(
+            head(&[
+                entry(160, "checkout: moving from sc-7 to me/sc-9/y"),
+                entry(50, "commit (initial): init"),
+            ]),
+            branch("sc-7")
+        );
+        assert_eq!(
+            head(&[
+                entry(100, "checkout: moving from sc-7 to me/sc-9/y"),
+                entry(90, "checkout: moving from main to sc-7"),
+            ]),
+            HeadAt::Unknown
+        );
+        assert_eq!(
+            head(&[
+                entry(100, "checkout: moving from me/new to main"),
+                entry(100, "checkout: moving from sc-7 to me/new"),
+            ]),
+            branch("sc-7")
+        );
+        assert_eq!(head(&[entry(50, "commit (initial): x")]), HeadAt::Current);
+        assert_eq!(head(&[]), HeadAt::Current);
+        assert_eq!(
+            head_at(
+                &[entry(160, "checkout: moving from a to b")],
+                false,
+                &new,
+                at
+            ),
+            HeadAt::Unknown
+        );
+        assert_eq!(
+            head(&[entry(50, "checkout: moving from main to me/new")]),
+            HeadAt::Unknown
+        );
     }
 
     #[test]
