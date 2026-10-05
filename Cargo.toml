@@ -52,6 +52,7 @@ arc-notes = { path = "crates/arc-notes" }
 arc-index = { path = "crates/arc-index" }
 arc-context = { path = "crates/arc-context" }
 arc-mcp = { path = "crates/arc-mcp" }
+arc-hooks = { path = "crates/arc-hooks" }
 arc-daemon = { path = "crates/arc-daemon" }
 arc-tui = { path = "crates/arc-tui" }
 

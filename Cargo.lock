@@ -143,6 +143,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-hooks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-context",
+ "arc-core",
+ "arc-index",
+ "arc-notes",
+ "arc-shortcut",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "arc-index"
 version = "0.1.0"
 dependencies = [

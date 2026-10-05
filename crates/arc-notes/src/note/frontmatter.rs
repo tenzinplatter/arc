@@ -166,9 +166,23 @@ impl<'a> SplitNote<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct BranchName(String);
+
+impl TryFrom<String> for BranchName {
+    type Error = anyhow::Error;
+
+    fn try_from(name: String) -> anyhow::Result<Self> {
+        Self::parse(&name)
+    }
+}
+
+impl From<BranchName> for String {
+    fn from(branch: BranchName) -> Self {
+        branch.0
+    }
+}
 
 impl BranchName {
     pub fn parse(name: &str) -> anyhow::Result<Self> {
