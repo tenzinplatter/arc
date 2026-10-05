@@ -131,8 +131,7 @@ pub async fn hook(command: HookCommands) -> anyhow::Result<()> {
             return installer(args)?.uninstall(mode, &mut io::stdout());
         }
     };
-    arc_hooks::run(event).await;
-    Ok(())
+    arc_hooks::run(event).await
 }
 
 pub async fn handle_command(

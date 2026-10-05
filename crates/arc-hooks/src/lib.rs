@@ -128,23 +128,34 @@ async fn respond_to_stdin(hook: Hook, stdin: String) -> anyhow::Result<Option<St
     respond_to(hook, input, HookEnv::new(config), cache).await
 }
 
-pub async fn run(hook: Hook) {
+fn finish(hook: Hook, output: Option<String>) -> ! {
+    let mut stdout = io::stdout().lock();
+    let written = output
+        .map_or(Ok(()), |out| stdout.write_all(out.as_bytes()))
+        .and_then(|()| stdout.flush());
+    if let Err(e) = written {
+        dbg_file!("arc hook {hook}: writing the response: {e}");
+    }
+    std::process::exit(0)
+}
+
+pub async fn run(hook: Hook) -> ! {
     std::panic::set_hook(Box::new(move |panic| dbg_file!("arc hook {hook}: {panic}")));
     let mut stdin = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut stdin) {
         dbg_file!("arc hook {hook}: reading stdin: {e}");
-        return;
+        finish(hook, None);
     }
     let responded = tokio::spawn(respond_to_stdin(hook, stdin))
         .await
         .map_err(anyhow::Error::from)
         .and_then(|responded| responded);
     match responded {
-        Ok(Some(out)) => {
-            let _ = io::stdout().write_all(out.as_bytes());
+        Ok(output) => finish(hook, output),
+        Err(e) => {
+            dbg_file!("arc hook {hook}: {e:#}");
+            finish(hook, None)
         }
-        Ok(None) => {}
-        Err(e) => dbg_file!("arc hook {hook}: {e:#}"),
     }
 }
 
