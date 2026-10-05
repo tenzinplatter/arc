@@ -7,12 +7,6 @@ use arc_notes::NoteRelPath;
 use arc_notes::scanner::ParsedTodo;
 use arc_notes::todos::{Todo, TodoSource, modify_with_lock};
 
-/// Merge note-parsed todos for `file` into the on-disk store.
-///
-/// - Preserves manual entries.
-/// - Preserves NoteParsed entries for other files.
-/// - For NoteParsed entries from `file`: matches by fingerprint to preserve
-///   id + completed; otherwise generates a new Uuid.
 pub async fn merge_file(
     cache_dir: &Path,
     file: &NoteRelPath,
@@ -20,64 +14,44 @@ pub async fn merge_file(
 ) -> Result<Vec<Todo>> {
     let file = file.clone();
     modify_with_lock(cache_dir, move |list| {
-        // Parsed entries not yet matched to an existing todo. We drain matches
-        // out of this as we walk the list, so whatever remains is genuinely new.
-        let mut unmatched: Vec<ParsedTodo> = parsed;
-
-        // Walk the existing list in order, preserving the position of every todo
-        // so the UI doesn't reshuffle on re-scan. Entries from `file` are updated
-        // in place (matched by fingerprint) or dropped if their line is gone.
+        let mut unmatched = parsed;
         let mut next: Vec<Todo> = Vec::with_capacity(list.len() + unmatched.len());
         for todo in list.drain(..) {
-            let this_file_fp = match &todo.source {
-                TodoSource::NoteParsed { file: f, fingerprint, .. } if f == &file => {
-                    Some(*fingerprint)
-                }
-                _ => None,
-            };
-            let Some(fp) = this_file_fp else {
-                // Manual entry, or NoteParsed from another file: keep untouched.
+            let Some(fp) = fingerprint_from(&todo, &file) else {
                 next.push(todo);
                 continue;
             };
             if let Some(pos) = unmatched.iter().position(|p| p.fingerprint == fp) {
-                let p = unmatched.remove(pos);
-                next.push(Todo {
-                    id: todo.id,
-                    text: p.text,
-                    date: p.date,
-                    completed: p.completed,
-                    source: TodoSource::NoteParsed {
-                        file: p.file,
-                        line: p.line,
-                        fingerprint: p.fingerprint,
-                    },
-                });
+                next.push(note_todo(todo.id, unmatched.remove(pos)));
             }
-            // else: the line no longer exists in the note — drop it.
         }
-
-        // Genuinely new checkboxes are appended at the end.
-        for p in unmatched {
-            next.push(Todo {
-                id: Uuid::new_v4(),
-                text: p.text,
-                date: p.date,
-                completed: p.completed,
-                source: TodoSource::NoteParsed {
-                    file: p.file,
-                    line: p.line,
-                    fingerprint: p.fingerprint,
-                },
-            });
-        }
-
+        next.extend(unmatched.into_iter().map(|p| note_todo(Uuid::new_v4(), p)));
         *list = next;
     })
     .await
 }
 
-/// Drop all NoteParsed entries for `file` (used on file delete/rename-out).
+fn fingerprint_from(todo: &Todo, file: &NoteRelPath) -> Option<u64> {
+    match &todo.source {
+        TodoSource::NoteParsed { file: f, fingerprint, .. } if f == file => Some(*fingerprint),
+        _ => None,
+    }
+}
+
+fn note_todo(id: Uuid, p: ParsedTodo) -> Todo {
+    Todo {
+        id,
+        text: p.text,
+        date: p.date,
+        completed: p.completed,
+        source: TodoSource::NoteParsed {
+            file: p.file,
+            line: p.line,
+            fingerprint: p.fingerprint,
+        },
+    }
+}
+
 pub async fn drop_file(cache_dir: &Path, file: &NoteRelPath) -> Result<Vec<Todo>> {
     let file = file.clone();
     modify_with_lock(cache_dir, move |list| {
@@ -140,7 +114,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
 
-        // First pass.
         let first = merge_file(
             cache,
             &NoteRelPath::from_trusted("a.md".into()),
@@ -150,7 +123,6 @@ mod tests {
         .unwrap();
         let original_id = first[0].id;
 
-        // Daemon rescans, same fingerprint, line moved.
         let mut p = parsed("a.md", "ship it", 0xabc);
         p.line = 42;
         let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
@@ -169,13 +141,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
 
-        // First scan: note says checked.
         let mut p = parsed("a.md", "ship it", 0xabc);
         p.completed = true;
         merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
 
-        // Second scan: note now says unchecked. Should propagate.
-        let p = parsed("a.md", "ship it", 0xabc); // completed = false by default
+        let p = parsed("a.md", "ship it", 0xabc);
         let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
         assert_eq!(after.len(), 1);
         assert!(!after[0].completed, "note un-check should clear completion");
@@ -186,7 +156,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
 
-        // Two notes; list ends up [from a, from b].
         merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "from a", 1)])
             .await
             .unwrap();
@@ -194,8 +163,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Re-scan a.md (e.g. user ticked it off in the UI, daemon re-parses).
-        // This must NOT reorder the list — otherwise the TUI jumps.
         let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "from a", 1)])
             .await
             .unwrap();
@@ -241,7 +208,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Rescan a.md with empty parsed -> should remove a's entries only.
         let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![]).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].text, "from b");

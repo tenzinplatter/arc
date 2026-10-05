@@ -24,8 +24,6 @@ pub struct DBusNotifier;
 
 impl Notifier for DBusNotifier {
     fn notify(&self, title: &str, body: &str) {
-        // notify-rust returns a NotificationHandle on success;
-        // we don't keep it, just fire-and-forget.
         let _ = notify_rust::Notification::new()
             .summary(title)
             .body(body)
@@ -41,12 +39,18 @@ pub struct ScheduledTodo {
     pub fire_at: DateTime<Local>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    AwaitingOverdueBatch,
+    Steady,
+}
+
 pub struct Scheduler {
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn Notifier>,
     entries: HashMap<Uuid, ScheduledTodo>,
     fired_ids: HashSet<Uuid>,
-    overdue_fired: bool,
+    phase: Phase,
 }
 
 impl Scheduler {
@@ -56,12 +60,11 @@ impl Scheduler {
             notifier,
             entries: HashMap::new(),
             fired_ids: HashSet::new(),
-            overdue_fired: false,
+            phase: Phase::AwaitingOverdueBatch,
         }
     }
 
     pub fn upsert(&mut self, todo: ScheduledTodo) {
-        // Don't re-schedule a todo that already fired this run.
         if self.fired_ids.contains(&todo.id) {
             return;
         }
@@ -70,61 +73,44 @@ impl Scheduler {
 
     pub fn cancel(&mut self, id: Uuid) {
         self.entries.remove(&id);
-        // Also forget that it ever fired, so a fresh entry can fire again.
         self.fired_ids.remove(&id);
     }
 
-    /// Remove all scheduled entries. Preserves the `overdue_fired` and
-    /// `fired_ids` state so `clear` + rebuild does not re-fire what was
-    /// already notified.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
 
-    /// Fire any due entries.
     pub fn tick(&mut self) {
         let now = self.clock.now();
-
-        // First tick: batch overdue (date strictly before now) into one notif.
-        if !self.overdue_fired {
-            let overdue_ids: Vec<Uuid> = self
-                .entries
-                .iter()
-                .filter(|(_, t)| t.fire_at < now)
-                .map(|(id, _)| *id)
-                .collect();
-
-            if !overdue_ids.is_empty() {
-                let n = overdue_ids.len();
-                self.notifier.notify(
-                    "arc — overdue todos",
-                    &format!("{} overdue todos. Check the arc TUI.", n),
-                );
-                for id in overdue_ids {
-                    self.entries.remove(&id);
-                    self.fired_ids.insert(id);
+        match self.phase {
+            Phase::AwaitingOverdueBatch => {
+                let overdue = self.take_fired(|t| t.fire_at < now);
+                if !overdue.is_empty() {
+                    self.notifier.notify(
+                        "arc — overdue todos",
+                        &format!("{} overdue todos. Check the arc TUI.", overdue.len()),
+                    );
                 }
+                self.phase = Phase::Steady;
             }
-            self.overdue_fired = true;
-            return;
-        }
-
-        // Steady state: fire anything whose fire_at <= now and remove.
-        let due_ids: Vec<Uuid> = self
-            .entries
-            .iter()
-            .filter(|(_, t)| t.fire_at <= now)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in due_ids {
-            if let Some(t) = self.entries.remove(&id) {
-                self.notifier.notify(&t.title, &t.body);
-                self.fired_ids.insert(id);
+            Phase::Steady => {
+                for t in self.take_fired(|t| t.fire_at <= now) {
+                    self.notifier.notify(&t.title, &t.body);
+                }
             }
         }
     }
 
-    /// When the next fire would be — used by the runtime to decide how long to sleep.
+    fn take_fired(&mut self, is_due: impl Fn(&ScheduledTodo) -> bool) -> Vec<ScheduledTodo> {
+        let fired: Vec<ScheduledTodo> = self
+            .entries
+            .extract_if(|_, t| is_due(t))
+            .map(|(_, t)| t)
+            .collect();
+        self.fired_ids.extend(fired.iter().map(|t| t.id));
+        fired
+    }
+
     pub fn next_fire(&self) -> Option<DateTime<Local>> {
         self.entries.values().map(|t| t.fire_at).min()
     }
@@ -250,7 +236,6 @@ mod heap_tests {
         sched.upsert(ScheduledTodo {
             id, title: "t".into(), body: "b".into(), fire_at: at_9am(2026, 5, 31),
         });
-        // Reschedule to a later day.
         sched.upsert(ScheduledTodo {
             id, title: "t".into(), body: "b".into(), fire_at: at_9am(2026, 6, 30),
         });
@@ -296,7 +281,6 @@ mod heap_tests {
         sched.tick();
         assert_eq!(notifier.0.lock().unwrap().len(), 1, "batched overdue");
 
-        // Simulate rebuild_schedule clearing and re-inserting.
         sched.clear();
         sched.upsert(ScheduledTodo {
             id,

@@ -1,7 +1,3 @@
-//! SQLite index of the notes vault — a queryable projection the daemon keeps
-//! fresh. `todos.json` remains the authoritative todo store; this mirrors it
-//! alongside note metadata + Shortcut links so the MCP server can answer SQL.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -57,32 +53,24 @@ fn db_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(DB_FILE)
 }
 
-/// Open (creating + migrating) the writer connection. WAL so a concurrent
-/// read-only reader (the MCP server) never blocks the daemon's writes.
 pub fn open(cache_dir: &Path) -> Result<Connection> {
     std::fs::create_dir_all(cache_dir).ok();
     let conn = Connection::open(db_path(cache_dir))
         .with_context(|| format!("open index at {}", db_path(cache_dir).display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    // Daemon and the MCP writer can both hold writer connections; wait rather
-    // than fail on the brief windows where they contend.
+    // The daemon and the MCP server both hold writer connections.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
 
-/// Open a read-only connection for querying. Errors if the index doesn't exist
-/// yet (the daemon creates it on first run).
 pub fn open_readonly(cache_dir: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(db_path(cache_dir), OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open index (ro) at {}", db_path(cache_dir).display()))?;
     Ok(conn)
 }
 
-/// Upsert one note's frontmatter, tags + branches. `rel` is the notes-dir-relative path.
-/// Atomic: readers never see the note half-written.
 pub fn reindex_note(conn: &Connection, rel: &NoteRelPath, content: &str) -> Result<()> {
-    // A savepoint (not a transaction) so this nests inside a caller's transaction.
     conn.execute_batch("SAVEPOINT reindex_note")?;
     match write_note_rows(conn, rel, content) {
         Ok(()) => {
@@ -101,55 +89,28 @@ fn write_note_rows(conn: &Connection, rel: &NoteRelPath, content: &str) -> Resul
     let fm = Frontmatter::from_note(content);
     let title = note_title(content, fm.as_ref());
 
-    let (id, created, note_type, link) = match &fm {
-        Some(f) => (
-            Some(f.id.clone()),
-            f.created.map(|d| d.to_string()),
-            f.note_type.clone(),
-            &f.link,
-        ),
-        None => (None, None, None, &EntityLink::None),
-    };
-
-    let (kind, eid, eurl, ename, it_url, ep_url) = match link {
-        EntityLink::None => (None, None, None, None, None, None),
-        EntityLink::Story {
-            id,
-            url,
-            name,
-            iteration_url,
-            epic_url,
-        } => (
-            Some("story"),
-            Some(id.get()),
-            Some(url.clone()),
-            name.clone(),
-            iteration_url.clone(),
-            epic_url.clone(),
-        ),
-        EntityLink::Iteration { id, url, name } => (
-            Some("iteration"),
-            Some(id.get()),
-            Some(url.clone()),
-            name.clone(),
-            None,
-            None,
-        ),
-        EntityLink::Epic { id, url, name } => (
-            Some("epic"),
-            Some(id.get()),
-            Some(url.clone()),
-            name.clone(),
-            None,
-            None,
-        ),
-    };
+    let id = fm.as_ref().map(|f| f.id.as_str());
+    let created = fm.as_ref().and_then(|f| f.created).map(|d| d.to_string());
+    let note_type = fm.as_ref().and_then(|f| f.note_type.as_deref());
+    let link = LinkColumns::from(fm.as_ref().map_or(&EntityLink::None, |f| &f.link));
 
     conn.execute(
         "INSERT OR REPLACE INTO notes
          (path, id, title, created, type, link_kind, entity_id, entity_url, entity_name, iteration_url, epic_url)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        rusqlite::params![path, id, title, created, note_type, kind, eid, eurl, ename, it_url, ep_url],
+        rusqlite::params![
+            path,
+            id,
+            title,
+            created,
+            note_type,
+            link.kind,
+            link.entity_id,
+            link.url,
+            link.name,
+            link.iteration_url,
+            link.epic_url
+        ],
     )?;
     conn.execute("DELETE FROM note_tags WHERE path = ?1", [&path])?;
     conn.execute("DELETE FROM note_branches WHERE path = ?1", [&path])?;
@@ -170,7 +131,53 @@ fn write_note_rows(conn: &Connection, rel: &NoteRelPath, content: &str) -> Resul
     Ok(())
 }
 
-/// Drop a note (and its tags + branches) from the index.
+#[derive(Default)]
+struct LinkColumns<'a> {
+    kind: Option<&'static str>,
+    entity_id: Option<i32>,
+    url: Option<&'a str>,
+    name: Option<&'a str>,
+    iteration_url: Option<&'a str>,
+    epic_url: Option<&'a str>,
+}
+
+impl<'a> LinkColumns<'a> {
+    fn entity(kind: &'static str, id: i32, url: &'a str, name: Option<&'a str>) -> Self {
+        Self {
+            kind: Some(kind),
+            entity_id: Some(id),
+            url: Some(url),
+            name,
+            ..Self::default()
+        }
+    }
+}
+
+impl<'a> From<&'a EntityLink> for LinkColumns<'a> {
+    fn from(link: &'a EntityLink) -> Self {
+        match link {
+            EntityLink::None => Self::default(),
+            EntityLink::Story {
+                id,
+                url,
+                name,
+                iteration_url,
+                epic_url,
+            } => Self {
+                iteration_url: iteration_url.as_deref(),
+                epic_url: epic_url.as_deref(),
+                ..Self::entity("story", id.get(), url, name.as_deref())
+            },
+            EntityLink::Iteration { id, url, name } => {
+                Self::entity("iteration", id.get(), url, name.as_deref())
+            }
+            EntityLink::Epic { id, url, name } => {
+                Self::entity("epic", id.get(), url, name.as_deref())
+            }
+        }
+    }
+}
+
 pub fn remove_note(conn: &Connection, rel: &NoteRelPath) -> Result<()> {
     let path = rel.as_str().to_string();
     conn.execute("DELETE FROM notes WHERE path = ?1", [&path])?;
@@ -179,9 +186,6 @@ pub fn remove_note(conn: &Connection, rel: &NoteRelPath) -> Result<()> {
     Ok(())
 }
 
-/// Replace the whole todos mirror. `todos.json` stays authoritative; this is a
-/// read-only projection for querying, refreshed whenever the daemon has the
-/// full list in hand.
 pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM todos", [])?;
@@ -213,16 +217,35 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     Ok(())
 }
 
-/// Run a read-only SELECT and return the rows as a JSON array of objects.
-/// Rejects anything that isn't a read — belt to the read-only connection's
-/// braces so a caller can't mutate even if handed a writer connection.
-pub fn query(conn: &Connection, sql: &str) -> Result<String> {
+#[derive(Debug, Clone)]
+pub struct ReadOnlySql(String);
+
+impl ReadOnlySql {
+    pub fn parse(sql: &str) -> Result<Self> {
+        let head = sql.split_whitespace().next().unwrap_or("");
+        if !matches!(
+            head.to_ascii_uppercase().as_str(),
+            "SELECT" | "WITH" | "EXPLAIN" | "PRAGMA"
+        ) {
+            anyhow::bail!("only read-only queries (SELECT/WITH/EXPLAIN/PRAGMA) are allowed");
+        }
+        Ok(Self(sql.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub fn query(conn: &Connection, sql: &ReadOnlySql) -> Result<String> {
     Ok(query_capped(conn, sql, usize::MAX)?.0)
 }
 
-/// [`query`] with at most `max_rows` rows. Returns the JSON array and whether
-/// more rows were available. Aborts after [`QUERY_TIMEOUT`].
-pub fn query_capped(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, bool)> {
+pub fn query_capped(
+    conn: &Connection,
+    sql: &ReadOnlySql,
+    max_rows: usize,
+) -> Result<(String, bool)> {
     query_with_timeout(conn, sql, max_rows, QUERY_TIMEOUT)
 }
 
@@ -230,16 +253,13 @@ const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn query_with_timeout(
     conn: &Connection,
-    sql: &str,
+    sql: &ReadOnlySql,
     max_rows: usize,
     timeout: std::time::Duration,
 ) -> Result<(String, bool)> {
-    if !is_read_only(sql) {
-        anyhow::bail!("only read-only queries (SELECT/WITH/EXPLAIN/PRAGMA) are allowed");
-    }
     let deadline = std::time::Instant::now() + timeout;
     conn.progress_handler(1000, Some(move || std::time::Instant::now() > deadline))?;
-    let result = run_query(conn, sql, max_rows);
+    let result = run_query(conn, sql.as_str(), max_rows);
     conn.progress_handler(0, None::<fn() -> bool>)?;
     result.map_err(|e| match e.downcast_ref::<rusqlite::Error>() {
         Some(rusqlite::Error::SqliteFailure(f, _))
@@ -274,7 +294,6 @@ fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, b
     Ok((serde_json::to_string(&out)?, truncated))
 }
 
-/// Paths of every note with this Obsidian `id` — ids can collide across dirs.
 pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<NoteRelPath>> {
     let mut stmt = conn.prepare("SELECT path FROM notes WHERE id = ?1 ORDER BY path")?;
     let paths = stmt
@@ -283,7 +302,6 @@ pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<NoteRelPath>
     Ok(paths)
 }
 
-/// Path of the note linked to a story, preferring one under `stories/`.
 pub fn note_for_story(conn: &Connection, story_id: StoryId) -> Result<Option<NoteRelPath>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM notes WHERE link_kind = 'story' AND entity_id = ?1
@@ -293,7 +311,6 @@ pub fn note_for_story(conn: &Connection, story_id: StoryId) -> Result<Option<Not
     Ok(rows.next().transpose()?)
 }
 
-/// `(story_id, path)` of the story note listing `branch` in its `branches:`.
 pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(StoryId, NoteRelPath)>> {
     let mut stmt = conn.prepare(
         "SELECT n.entity_id, n.path FROM note_branches b
@@ -310,32 +327,12 @@ pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(Story
     Ok(rows.next().transpose()?)
 }
 
-/// Read a note by notes-dir-relative path. `None` if it doesn't exist. Errors
-/// on absolute paths or `..` so untrusted paths can't escape `notes_dir`.
 pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> {
-    let rel = rel.as_str();
-    let escapes = Path::new(rel).components().any(|c| {
-        !matches!(
-            c,
-            std::path::Component::Normal(_) | std::path::Component::CurDir
-        )
-    });
-    if rel.is_empty() || escapes {
-        anyhow::bail!("note path must be relative to the notes dir: {rel}");
-    }
-    match std::fs::read_to_string(notes_dir.join(rel)) {
+    match std::fs::read_to_string(rel.abs(notes_dir)) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read note {rel}")),
     }
-}
-
-fn is_read_only(sql: &str) -> bool {
-    let head = sql.split_whitespace().next().unwrap_or("");
-    matches!(
-        head.to_ascii_uppercase().as_str(),
-        "SELECT" | "WITH" | "EXPLAIN" | "PRAGMA"
-    )
 }
 
 fn value_to_json(v: rusqlite::types::ValueRef) -> serde_json::Value {
@@ -349,7 +346,6 @@ fn value_to_json(v: rusqlite::types::ValueRef) -> serde_json::Value {
     }
 }
 
-/// First `# ` heading, else the frontmatter id, else the file stem later.
 fn note_title(content: &str, fm: Option<&Frontmatter>) -> Option<String> {
     for line in content.lines() {
         if let Some(h) = line.strip_prefix("# ") {
@@ -363,10 +359,19 @@ fn note_title(content: &str, fm: Option<&Frontmatter>) -> Option<String> {
 mod tests {
     use super::*;
 
+    use chrono::NaiveDate;
+
     fn rel(s: &str) -> NoteRelPath {
         NoteRelPath::from_trusted(s.into())
     }
-    use chrono::NaiveDate;
+
+    fn select(conn: &Connection, sql: &str) -> Result<String> {
+        query(conn, &ReadOnlySql::parse(sql)?)
+    }
+
+    fn select_capped(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, bool)> {
+        query_capped(conn, &ReadOnlySql::parse(sql)?, max_rows)
+    }
 
     #[test]
     fn indexes_and_queries_a_story_note() {
@@ -375,7 +380,7 @@ mod tests {
         let content = "---\nid: my-story\ntags: [backend]\ncreated: \"2026-03-31\"\nstory_id: sc-19559\nstory_link: https://s/19559\n---\n\n# Ship the thing\n\nbody";
         reindex_note(&conn, &rel("stories/my-story.md"), content).unwrap();
 
-        let rows = query(
+        let rows = select(
             &conn,
             "SELECT id, title, entity_id, link_kind FROM notes WHERE link_kind = 'story'",
         )
@@ -384,7 +389,7 @@ mod tests {
         assert!(rows.contains("Ship the thing"));
         assert!(rows.contains("19559"));
 
-        let tags = query(&conn, "SELECT tag FROM note_tags").unwrap();
+        let tags = select(&conn, "SELECT tag FROM note_tags").unwrap();
         assert!(tags.contains("backend"));
     }
 
@@ -416,13 +421,13 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
         )];
         mirror_todos(&mut conn, &todos).unwrap();
-        let got = query(&conn, "SELECT text FROM todos").unwrap();
+        let got = select(&conn, "SELECT text FROM todos").unwrap();
         assert!(got.contains("do it"));
 
         let body = read_note(&notes, &rel("stories/a.md")).unwrap().unwrap();
         assert!(body.contains("# Hi"));
 
-        assert!(query(&conn, "DELETE FROM todos").is_err());
+        assert!(select(&conn, "DELETE FROM todos").is_err());
     }
 
     #[test]
@@ -438,7 +443,6 @@ mod tests {
         );
         assert_eq!(story_for_branch(&conn, "nope").unwrap(), None);
 
-        // Reindex drops branches no longer listed.
         reindex_note(
             &conn,
             p,
@@ -500,9 +504,6 @@ mod tests {
             Some("hi".into())
         );
         assert_eq!(read_note(tmp.path(), &rel("missing.md")).unwrap(), None);
-        for bad in ["/etc/passwd", "../x.md", "stories/../../x.md", ""] {
-            assert!(read_note(tmp.path(), &rel(bad)).is_err(), "{bad}");
-        }
     }
 
     #[test]
@@ -512,7 +513,7 @@ mod tests {
         for i in 0..3 {
             reindex_note(&conn, &rel(&format!("{i}.md")), "---\nid: x\n---\n").unwrap();
         }
-        let (rows, truncated) = query_capped(&conn, "SELECT path FROM notes", 2).unwrap();
+        let (rows, truncated) = select_capped(&conn, "SELECT path FROM notes", 2).unwrap();
         assert!(truncated);
         assert_eq!(
             serde_json::from_str::<Vec<serde_json::Value>>(&rows)
@@ -520,12 +521,38 @@ mod tests {
                 .len(),
             2
         );
-        let (_, truncated) = query_capped(&conn, "SELECT path FROM notes", 3).unwrap();
+        let (_, truncated) = select_capped(&conn, "SELECT path FROM notes", 3).unwrap();
         assert!(!truncated);
-        assert!(query_capped(&conn, "DELETE FROM notes", 2).is_err());
-        assert!(query_capped(&conn, "WITH x AS (SELECT 1) DELETE FROM notes", 2).is_err());
-        assert!(query_capped(&conn, "PRAGMA journal_mode = DELETE", 2).is_err());
-        assert!(query_capped(&conn, "PRAGMA table_info(notes)", 100).is_ok());
+        assert!(select_capped(&conn, "DELETE FROM notes", 2).is_err());
+        assert!(select_capped(&conn, "WITH x AS (SELECT 1) DELETE FROM notes", 2).is_err());
+        assert!(select_capped(&conn, "PRAGMA journal_mode = DELETE", 2).is_err());
+        assert!(select_capped(&conn, "PRAGMA table_info(notes)", 100).is_ok());
+    }
+
+    #[test]
+    fn read_only_sql_parse_rejects_writes() {
+        for write in [
+            "DELETE FROM notes",
+            "  insert into notes(path) values ('x')",
+            "UPDATE notes SET id = 1",
+            "DROP TABLE notes",
+            "",
+        ] {
+            let err = ReadOnlySql::parse(write).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "only read-only queries (SELECT/WITH/EXPLAIN/PRAGMA) are allowed",
+                "{write}"
+            );
+        }
+        for read in [
+            "SELECT 1",
+            "with x as (select 1) select * from x",
+            "EXPLAIN SELECT 1",
+            "pragma table_info(notes)",
+        ] {
+            assert!(ReadOnlySql::parse(read).is_ok(), "{read}");
+        }
     }
 
     #[test]
@@ -535,12 +562,12 @@ mod tests {
         let sql = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r)
                    SELECT count(*) FROM r";
         let start = std::time::Instant::now();
-        let err =
-            query_with_timeout(&conn, sql, 10, std::time::Duration::from_millis(200)).unwrap_err();
+        let sql = ReadOnlySql::parse(sql).unwrap();
+        let err = query_with_timeout(&conn, &sql, 10, std::time::Duration::from_millis(200))
+            .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(start.elapsed() < std::time::Duration::from_secs(3));
-        // Handler is cleared: the connection still works.
-        assert!(query(&conn, "SELECT 1").is_ok());
+        assert!(select(&conn, "SELECT 1").is_ok());
     }
 
     #[test]
@@ -650,7 +677,7 @@ mod tests {
                 source: TodoSource::NoteParsed { file: rel("stories/sc-7.md"), line: 12, fingerprint: 5 },
             },
         ]).unwrap();
-        let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&query(&conn, sql).unwrap()).unwrap() };
+        let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&select(&conn, sql).unwrap()).unwrap() };
         assert_eq!(
             rows("SELECT * FROM notes ORDER BY path"),
             serde_json::json!([

@@ -17,6 +17,8 @@ pub mod scheduler;
 pub mod store;
 pub mod watcher;
 
+const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub async fn run(config: Config) -> Result<()> {
     init_tracing();
     info!("arc daemon starting; notes_dir={}", config.notes_dir.display());
@@ -26,33 +28,23 @@ pub async fn run(config: Config) -> Result<()> {
         std::fs::create_dir_all(&config.notes_dir)?;
     }
 
-    // Queryable index (writer connection; lives for the daemon's lifetime).
     let mut index = arc_index::open(&config.cache_dir)?;
-
-    // Bootstrap: full scan.
     bootstrap_scan(&config.notes_dir, &config.cache_dir, &mut index).await?;
 
-    // Spawn the watcher.
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     let _watcher = watcher::spawn(config.notes_dir.clone(), tx)?;
 
-    // Scheduler.
-    let clock = Arc::new(SystemClock);
-    let notifier = Arc::new(DBusNotifier);
-    let mut sched = Scheduler::new(clock, notifier);
+    let mut sched = Scheduler::new(Arc::new(SystemClock), Arc::new(DBusNotifier));
     rebuild_schedule(&config.cache_dir, &mut sched).await?;
-    // First tick handles overdue batching.
     sched.tick();
 
-    // Main loop.
     loop {
         let sleep_for = match sched.next_fire() {
-            Some(at) => {
-                let now = Local::now();
-                let dur = (at - now).to_std().unwrap_or(std::time::Duration::ZERO);
-                dur.min(std::time::Duration::from_secs(60))
-            }
-            None => std::time::Duration::from_secs(60),
+            Some(at) => (at - Local::now())
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO)
+                .min(MAX_IDLE),
+            None => MAX_IDLE,
         };
 
         tokio::select! {
@@ -112,7 +104,6 @@ async fn bootstrap_scan(
     Ok(())
 }
 
-/// Refresh the read-only todo mirror from the authoritative `todos.json`.
 async fn mirror_todos(cache_dir: &Path, index: &mut arc_index::Connection) {
     let todos = arc_notes::todos::load_todos(cache_dir).await;
     if let Err(e) = arc_index::mirror_todos(index, &todos) {
@@ -144,50 +135,44 @@ fn list_markdown(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+fn read_current_content(event: &WatchEvent) -> std::io::Result<Option<String>> {
+    match event {
+        WatchEvent::Removed(_) => Ok(None),
+        WatchEvent::Changed(abs) => match std::fs::read_to_string(abs) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        },
+    }
+}
+
 async fn handle_event(
     config: &Config,
     sched: &mut Scheduler,
     index: &mut arc_index::Connection,
     event: WatchEvent,
 ) -> Result<()> {
-    let (abs, removed) = match event {
-        WatchEvent::Changed(p) => (p, false),
-        WatchEvent::Removed(p) => (p, true),
-    };
-    let Some(rel) = NoteRelPath::from_abs(&config.notes_dir, &abs) else {
+    let abs = event.path();
+    let Some(rel) = NoteRelPath::from_abs(&config.notes_dir, abs) else {
         warn!("skipping {} outside notes dir", abs.display());
         return Ok(());
     };
 
-    let treat_as_removed = removed
-        || matches!(
-            std::fs::symlink_metadata(&abs),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound
-        );
-
-    if treat_as_removed {
-        let _ = store::drop_file(&config.cache_dir, &rel).await?;
-        let _ = arc_index::remove_note(index, &rel);
-    } else {
-        let content = match std::fs::read_to_string(&abs) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Raced with delete/rename — treat as removal.
-                let _ = store::drop_file(&config.cache_dir, &rel).await?;
-                let _ = arc_index::remove_note(index, &rel);
-                mirror_todos(&config.cache_dir, index).await;
-                rebuild_schedule(&config.cache_dir, sched).await?;
-                return Ok(());
+    match read_current_content(&event) {
+        Ok(None) => {
+            store::drop_file(&config.cache_dir, &rel).await?;
+            let _ = arc_index::remove_note(index, &rel);
+        }
+        Ok(Some(content)) => {
+            let parsed = arc_notes::scanner::parse_note(&content, &rel);
+            store::merge_file(&config.cache_dir, &rel, parsed).await?;
+            if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
+                warn!("index {rel} failed: {e:#}");
             }
-            Err(e) => {
-                warn!("read {} failed: {e}", abs.display());
-                return Ok(());
-            }
-        };
-        let parsed = arc_notes::scanner::parse_note(&content, &rel);
-        let _ = store::merge_file(&config.cache_dir, &rel, parsed).await?;
-        if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
-            warn!("index {rel} failed: {e:#}");
+        }
+        Err(e) => {
+            warn!("read {} failed: {e}", abs.display());
+            return Ok(());
         }
     }
     mirror_todos(&config.cache_dir, index).await;
@@ -197,7 +182,6 @@ async fn handle_event(
 
 async fn rebuild_schedule(cache_dir: &Path, sched: &mut Scheduler) -> Result<()> {
     let todos = arc_notes::todos::load_todos(cache_dir).await;
-    // Cancel everything we know about, then re-insert.
     sched.clear();
     for t in todos {
         if t.completed {
@@ -218,7 +202,7 @@ async fn rebuild_schedule(cache_dir: &Path, sched: &mut Scheduler) -> Result<()>
         sched.upsert(ScheduledTodo {
             id: t.id,
             title,
-            body: t.text.clone(),
+            body: t.text,
             fire_at,
         });
     }

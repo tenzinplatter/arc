@@ -220,7 +220,7 @@ impl ArcMcp {
         let cache_dir = self.cache_dir.clone();
         let rows_truncated = tokio::task::spawn_blocking(move || -> Result<(String, bool)> {
             let conn = arc_index::open_readonly(&cache_dir)?;
-            arc_index::query_capped(&conn, &sql, QUERY_ROW_CAP)
+            arc_index::query_capped(&conn, &arc_index::ReadOnlySql::parse(&sql)?, QUERY_ROW_CAP)
         })
         .await
         .map_err(internal)?;
@@ -844,7 +844,8 @@ mod tests {
         let rel = resolve_note(&conn, None, Some("./stories//x.md")).unwrap();
         assert_eq!(rel, "stories/x.md");
         append_note(&conn, notes.path(), &rel, "more").unwrap();
-        let rows = arc_index::query(&conn, "SELECT path FROM notes").unwrap();
+        let sql = arc_index::ReadOnlySql::parse("SELECT path FROM notes").unwrap();
+        let rows = arc_index::query(&conn, &sql).unwrap();
         assert_eq!(rows, r#"[{"path":"stories/x.md"}]"#);
     }
 

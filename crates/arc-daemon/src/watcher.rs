@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
@@ -15,11 +15,41 @@ pub enum WatchEvent {
     Removed(PathBuf),
 }
 
-/// Spawn a blocking watcher thread that emits debounced `WatchEvent`s for
-/// `*.md` files under `notes_dir` (recursive) into `tx`.
-///
-/// Returns the `RecommendedWatcher` — the caller must keep it alive for the
-/// duration of the program; dropping it stops the watch.
+impl WatchEvent {
+    pub fn path(&self) -> &Path {
+        match self {
+            WatchEvent::Changed(p) | WatchEvent::Removed(p) => p,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WatchKind {
+    Changed,
+    Removed,
+}
+
+impl WatchKind {
+    fn of(kind: &EventKind) -> Self {
+        match kind {
+            EventKind::Remove(_) => WatchKind::Removed,
+            _ => WatchKind::Changed,
+        }
+    }
+
+    fn event(self, path: PathBuf) -> WatchEvent {
+        match self {
+            WatchKind::Changed => WatchEvent::Changed(path),
+            WatchKind::Removed => WatchEvent::Removed(path),
+        }
+    }
+}
+
+struct Pending {
+    last_seen: Instant,
+    kind: WatchKind,
+}
+
 pub fn spawn(
     notes_dir: PathBuf,
     tx: UnboundedSender<WatchEvent>,
@@ -33,49 +63,29 @@ pub fn spawn(
     Ok(watcher)
 }
 
-fn is_markdown(path: &std::path::Path) -> bool {
+fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("md"))
-        .unwrap_or(false)
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
 fn debounce_loop(
     rx: std_mpsc::Receiver<notify::Result<notify::Event>>,
     tx: UnboundedSender<WatchEvent>,
 ) {
-    let mut pending: HashMap<PathBuf, (Instant, bool /* removed */)> = HashMap::new();
+    let mut pending: HashMap<PathBuf, Pending> = HashMap::new();
     loop {
-        // Block briefly for the first event, then drain.
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Ok(ev)) => ingest(&ev, &mut pending),
-            Ok(Err(_)) => {}
-            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Err(_)) | Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        // Drain additional events without blocking.
         while let Ok(maybe_ev) = rx.try_recv() {
             if let Ok(ev) = maybe_ev {
                 ingest(&ev, &mut pending);
             }
         }
-        // Emit any entries past the debounce window.
-        let now = Instant::now();
-        let mut to_emit: Vec<(PathBuf, bool)> = Vec::new();
-        pending.retain(|path, (at, removed)| {
-            if now.duration_since(*at) >= DEBOUNCE_WINDOW {
-                to_emit.push((path.clone(), *removed));
-                false
-            } else {
-                true
-            }
-        });
-        for (path, removed) in to_emit {
-            let ev = if removed {
-                WatchEvent::Removed(path)
-            } else {
-                WatchEvent::Changed(path)
-            };
+        for ev in take_settled(&mut pending, Instant::now()) {
             if tx.send(ev).is_err() {
                 return;
             }
@@ -83,12 +93,27 @@ fn debounce_loop(
     }
 }
 
-fn ingest(ev: &notify::Event, pending: &mut HashMap<PathBuf, (Instant, bool)>) {
-    let removed = matches!(ev.kind, EventKind::Remove(_));
-    for path in &ev.paths {
-        if !is_markdown(path) {
-            continue;
+fn take_settled(pending: &mut HashMap<PathBuf, Pending>, now: Instant) -> Vec<WatchEvent> {
+    let mut settled = Vec::new();
+    pending.retain(|path, p| {
+        let is_settled = now.duration_since(p.last_seen) >= DEBOUNCE_WINDOW;
+        if is_settled {
+            settled.push(p.kind.event(path.clone()));
         }
-        pending.insert(path.clone(), (Instant::now(), removed));
+        !is_settled
+    });
+    settled
+}
+
+fn ingest(ev: &notify::Event, pending: &mut HashMap<PathBuf, Pending>) {
+    let kind = WatchKind::of(&ev.kind);
+    for path in ev.paths.iter().filter(|p| is_markdown(p)) {
+        pending.insert(
+            path.clone(),
+            Pending {
+                last_seen: Instant::now(),
+                kind,
+            },
+        );
     }
 }
