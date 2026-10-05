@@ -217,6 +217,7 @@ name = "arc-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-context",
  "arc-core",
  "arc-daemon",
  "arc-mcp",

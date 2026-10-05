@@ -9,6 +9,7 @@ arc-shortcut = { workspace = true }
 arc-notes = { workspace = true }
 arc-daemon = { workspace = true }
 arc-mcp = { workspace = true }
+arc-context = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

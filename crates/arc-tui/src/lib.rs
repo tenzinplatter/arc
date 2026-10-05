@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{env, fs, process::Command};
 
 use anyhow::Context;
 use ratatui::DefaultTerminal;
@@ -10,10 +10,11 @@ use crate::{
         cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
-    cli::{Commands, DaemonCommands},
+    cli::{Commands, ContextFormat, DaemonCommands},
     note::Note,
 };
-use arc_core::Config;
+use arc_context::LinkOutcome;
+use arc_core::{Config, StoryId};
 use arc_shortcut::fetch_story;
 
 pub use arc_shortcut::{api, cache};
@@ -135,6 +136,57 @@ pub async fn handle_command(
         },
 
         Commands::Mcp => arc_mcp::run_stdio(config).await,
+
+        Commands::Context { format } => {
+            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+            let dir = env::current_dir()?;
+            let Some(context) = arc_context::current_context(&dir, config, &mut cache).await?
+            else {
+                return Ok(());
+            };
+            match format {
+                ContextFormat::Text => print!("{context}"),
+                ContextFormat::Json => println!("{}", serde_json::to_string_pretty(&context)?),
+            }
+            Ok(())
+        }
+
+        Commands::Branch { id, suffix } => {
+            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+            let id = match id {
+                Some(id) => StoryId::from(id),
+                None => {
+                    arc_context::resolve_dir(&env::current_dir()?, config)?
+                        .context("the current branch doesn't resolve to a story; pass a story id")?
+                        .id
+                }
+            };
+            let branch =
+                arc_context::branch_for_story(config, &mut cache, id, suffix.as_deref()).await?;
+            println!("{branch}");
+            Ok(())
+        }
+
+        Commands::Link { id, rename: false } => {
+            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+            let dir = env::current_dir()?;
+            let (branch, note, outcome) =
+                arc_context::link_current_branch(&dir, config, &mut cache, id.into()).await?;
+            match outcome {
+                LinkOutcome::Added => println!("linked {branch} to sc-{id} in {note}"),
+                LinkOutcome::AlreadyLinked => println!("{branch} is already linked to sc-{id} in {note}"),
+            }
+            Ok(())
+        }
+
+        Commands::Link { id, rename: true } => {
+            let mut cache = cache.with_cache_dir(config.cache_dir.clone());
+            let dir = env::current_dir()?;
+            let (from, to) =
+                arc_context::rename_to_canonical(&dir, config, &mut cache, id.into()).await?;
+            println!("renamed {from} to {to}");
+            Ok(())
+        }
 
         Commands::Migrate => unreachable!("Migrate is handled in main.rs before config is loaded"),
     }
