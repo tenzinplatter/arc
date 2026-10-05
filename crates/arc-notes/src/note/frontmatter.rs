@@ -223,6 +223,88 @@ pub fn add_branch(content: &str, branch: &BranchName) -> anyhow::Result<String> 
     Ok(note.with_yaml(&new_yaml))
 }
 
+pub fn replace_branch(
+    content: &str,
+    from: &BranchName,
+    to: &BranchName,
+) -> anyhow::Result<String> {
+    let note = SplitNote::new(content).context("note has no frontmatter block")?;
+    let yaml = note.yaml();
+    let before = parse_mapping(yaml)?;
+    let branches = before
+        .get(branches_key())
+        .map(lenient_strings)
+        .unwrap_or_default();
+    if !branches.iter().any(|b| b == from.as_str()) {
+        return Ok(content.to_string());
+    }
+
+    let region = branches_region(yaml)?;
+    let item = yaml_scalar(to.as_str());
+    let edited = scalar_forms(from.as_str())
+        .iter()
+        .fold(yaml[region.clone()].to_string(), |text, form| {
+            replace_items(&text, form, &item)
+        });
+    let new_yaml = format!("{}{edited}{}", &yaml[..region.start], &yaml[region.end..]);
+
+    let want_branches: Vec<String> = branches
+        .into_iter()
+        .map(|b| match b == from.as_str() {
+            true => to.as_str().to_string(),
+            false => b,
+        })
+        .collect();
+    ensure_only_branches_changed(before, &new_yaml, &want_branches)?;
+    Ok(note.with_yaml(&new_yaml))
+}
+
+fn branches_region(yaml: &str) -> anyhow::Result<Range<usize>> {
+    let lines: Vec<(usize, &str)> = lines_with_offsets(yaml).collect();
+    let keys: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, l))| l.starts_with("branches:"))
+        .collect();
+    let [(idx, &(start, line))] = keys[..] else {
+        bail!("can't locate a single top-level `branches:` line");
+    };
+    let end = lines[idx + 1..]
+        .iter()
+        .take_while(|(_, l)| l.trim().is_empty() || l.starts_with([' ', '\t', '-']))
+        .last()
+        .map_or(start + line.len(), |(off, l)| off + l.len());
+    Ok(start..end)
+}
+
+fn scalar_forms(s: &str) -> [String; 3] {
+    [
+        s.to_string(),
+        format!("'{}'", s.replace('\'', "''")),
+        double_quoted(s),
+    ]
+}
+
+fn replace_items(text: &str, form: &str, item: &str) -> String {
+    let opens = |c: char| matches!(c, ' ' | '\t' | '[' | ',');
+    let closes = |c: char| matches!(c, ' ' | '\t' | ']' | ',' | '\r' | '\n');
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (at, _) in text.match_indices(form) {
+        let end = at + form.len();
+        let bounded = at >= copied
+            && text[..at].chars().next_back().is_some_and(opens)
+            && text[end..].chars().next().is_none_or(closes);
+        if bounded {
+            out.push_str(&text[copied..at]);
+            out.push_str(item);
+            copied = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 fn ensure_only_branches_changed(
     before: Mapping,
     new_yaml: &str,
@@ -231,7 +313,7 @@ fn ensure_only_branches_changed(
     let after = parse_mapping(new_yaml).context("edited frontmatter no longer parses")?;
     let got = after.get(branches_key()).map(lenient_strings).unwrap_or_default();
     if got != want_branches || without_branches(before) != without_branches(after) {
-        bail!("refusing to edit frontmatter: adding the branch would disturb other values");
+        bail!("refusing to edit frontmatter: editing `branches` would disturb other values");
     }
     Ok(())
 }
@@ -324,6 +406,10 @@ fn yaml_scalar(s: &str) -> String {
     if plain {
         return s.to_string();
     }
+    double_quoted(s)
+}
+
+fn double_quoted(s: &str) -> String {
     let escaped: String = s
         .chars()
         .map(|c| match c {
@@ -731,6 +817,53 @@ mod tests {
         ] {
             assert!(add_branch(content, &br("z")).is_err(), "{content:?}");
         }
+    }
+
+    #[test]
+    fn replace_branch_swaps_listed_names_in_place() {
+        let rename = |content: &str| replace_branch(content, &br("old"), &br("me/sc-7/new"));
+        assert_eq!(
+            rename("---\nid: s\nbranches:\n  - a # first\n  - old\n  - oldish\ntags: [t]\n---\nbody old\n").unwrap(),
+            "---\nid: s\nbranches:\n  - a # first\n  - me/sc-7/new\n  - oldish\ntags: [t]\n---\nbody old\n"
+        );
+        assert_eq!(
+            rename("---\nbranches: [old, 'old2', x]\n---\n").unwrap(),
+            "---\nbranches: [me/sc-7/new, 'old2', x]\n---\n"
+        );
+        assert_eq!(
+            rename("---\nbranches: ['old']\nold: old\n---\n").unwrap(),
+            "---\nbranches: [me/sc-7/new]\nold: old\n---\n"
+        );
+        assert_eq!(
+            rename("---\nbranches: old\n---\n").unwrap(),
+            "---\nbranches: me/sc-7/new\n---\n"
+        );
+        assert_eq!(
+            rename("\u{feff}---\r\nbranches:\r\n- \"old\"\r\n---\r\n").unwrap(),
+            "\u{feff}---\r\nbranches:\r\n- me/sc-7/new\r\n---\r\n"
+        );
+        let quoted = replace_branch("---\nbranches: [old]\n---\n", &br("old"), &br("true")).unwrap();
+        assert_eq!(quoted, "---\nbranches: [\"true\"]\n---\n");
+        assert_eq!(
+            Frontmatter::from_note(&quoted).unwrap().branches,
+            vec!["true"]
+        );
+    }
+
+    #[test]
+    fn replace_branch_leaves_unlisted_and_refuses_unclear_layouts() {
+        let content = "---\nid: old\nbranches: [a]\n---\nold\n";
+        assert_eq!(replace_branch(content, &br("old"), &br("new")).unwrap(), content);
+        for content in [
+            "---\nbranches:\n  - a\n# interrupting comment\n  - old\n---\n",
+            "---\nbranches: [old]\nx: [unclosed\n---\n",
+        ] {
+            assert!(
+                replace_branch(content, &br("old"), &br("new")).is_err(),
+                "{content:?}"
+            );
+        }
+        assert!(replace_branch("# no fence\n", &br("old"), &br("new")).is_err());
     }
 
     #[test]
