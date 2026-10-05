@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::OpenFlags;
 pub use rusqlite::Connection;
+use rusqlite::OpenFlags;
 
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
 use arc_notes::todos::{Todo, TodoSource};
@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS note_tags (
     path TEXT NOT NULL,
     tag  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS note_branches (
+    path   TEXT NOT NULL,
+    branch TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS todos (
     id        TEXT PRIMARY KEY,
     text      TEXT,
@@ -42,6 +46,8 @@ CREATE TABLE IF NOT EXISTS todos (
     position  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_note_tags_path ON note_tags(path);
+CREATE INDEX IF NOT EXISTS idx_note_branches_branch ON note_branches(branch);
+CREATE INDEX IF NOT EXISTS idx_note_branches_path ON note_branches(path);
 CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(link_kind, entity_id);
 ";
 
@@ -71,8 +77,24 @@ pub fn open_readonly(cache_dir: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Upsert one note's frontmatter + tags. `rel` is the notes-dir-relative path.
+/// Upsert one note's frontmatter, tags + branches. `rel` is the notes-dir-relative path.
+/// Atomic: readers never see the note half-written.
 pub fn reindex_note(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
+    // A savepoint (not a transaction) so this nests inside a caller's transaction.
+    conn.execute_batch("SAVEPOINT reindex_note")?;
+    match write_note_rows(conn, rel, content) {
+        Ok(()) => {
+            conn.execute_batch("RELEASE reindex_note")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO reindex_note; RELEASE reindex_note");
+            Err(e)
+        }
+    }
+}
+
+fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
     let path = rel.to_string_lossy().to_string();
     let fm = Frontmatter::from_note(content);
     let title = note_title(content, fm.as_ref());
@@ -128,6 +150,7 @@ pub fn reindex_note(conn: &Connection, rel: &Path, content: &str) -> Result<()> 
         rusqlite::params![path, id, title, created, note_type, kind, eid, eurl, ename, it_url, ep_url],
     )?;
     conn.execute("DELETE FROM note_tags WHERE path = ?1", [&path])?;
+    conn.execute("DELETE FROM note_branches WHERE path = ?1", [&path])?;
     if let Some(f) = &fm {
         for tag in &f.tags {
             conn.execute(
@@ -135,15 +158,22 @@ pub fn reindex_note(conn: &Connection, rel: &Path, content: &str) -> Result<()> 
                 rusqlite::params![path, tag],
             )?;
         }
+        for branch in &f.branches {
+            conn.execute(
+                "INSERT INTO note_branches (path, branch) VALUES (?1, ?2)",
+                rusqlite::params![path, branch],
+            )?;
+        }
     }
     Ok(())
 }
 
-/// Drop a note (and its tags) from the index.
+/// Drop a note (and its tags + branches) from the index.
 pub fn remove_note(conn: &Connection, rel: &Path) -> Result<()> {
     let path = rel.to_string_lossy().to_string();
     conn.execute("DELETE FROM notes WHERE path = ?1", [&path])?;
     conn.execute("DELETE FROM note_tags WHERE path = ?1", [&path])?;
+    conn.execute("DELETE FROM note_branches WHERE path = ?1", [&path])?;
     Ok(())
 }
 
@@ -156,9 +186,11 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     for (pos, t) in todos.iter().enumerate() {
         let (source, file, line) = match &t.source {
             TodoSource::Manual => ("manual", None, None),
-            TodoSource::NoteParsed { file, line, .. } => {
-                ("note", Some(file.to_string_lossy().to_string()), Some(*line))
-            }
+            TodoSource::NoteParsed { file, line, .. } => (
+                "note",
+                Some(file.to_string_lossy().to_string()),
+                Some(*line),
+            ),
         };
         tx.execute(
             "INSERT INTO todos (id, text, date, completed, source, file, line, position)
@@ -183,42 +215,111 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
 /// Rejects anything that isn't a read — belt to the read-only connection's
 /// braces so a caller can't mutate even if handed a writer connection.
 pub fn query(conn: &Connection, sql: &str) -> Result<String> {
+    Ok(query_capped(conn, sql, usize::MAX)?.0)
+}
+
+/// [`query`] with at most `max_rows` rows. Returns the JSON array and whether
+/// more rows were available. Aborts after [`QUERY_TIMEOUT`].
+pub fn query_capped(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, bool)> {
+    query_with_timeout(conn, sql, max_rows, QUERY_TIMEOUT)
+}
+
+const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn query_with_timeout(
+    conn: &Connection,
+    sql: &str,
+    max_rows: usize,
+    timeout: std::time::Duration,
+) -> Result<(String, bool)> {
     if !is_read_only(sql) {
         anyhow::bail!("only read-only queries (SELECT/WITH/EXPLAIN/PRAGMA) are allowed");
     }
+    let deadline = std::time::Instant::now() + timeout;
+    conn.progress_handler(1000, Some(move || std::time::Instant::now() > deadline))?;
+    let result = run_query(conn, sql, max_rows);
+    conn.progress_handler(0, None::<fn() -> bool>)?;
+    result.map_err(|e| match e.downcast_ref::<rusqlite::Error>() {
+        Some(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::OperationInterrupted =>
+        {
+            anyhow::anyhow!("query timed out after {}s", timeout.as_secs_f32())
+        }
+        _ => e,
+    })
+}
+
+fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, bool)> {
     let mut stmt = conn.prepare(sql)?;
+    if !stmt.readonly() {
+        anyhow::bail!("only read-only queries are allowed");
+    }
     let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut rows = stmt.query([])?;
     let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut truncated = false;
     while let Some(row) = rows.next()? {
+        if out.len() >= max_rows {
+            truncated = true;
+            break;
+        }
         let mut obj = serde_json::Map::new();
         for (i, name) in cols.iter().enumerate() {
             obj.insert(name.clone(), value_to_json(row.get_ref(i)?));
         }
         out.push(serde_json::Value::Object(obj));
     }
-    Ok(serde_json::to_string(&out)?)
+    Ok((serde_json::to_string(&out)?, truncated))
 }
 
-/// Notes-dir-relative path of a note by its Obsidian `id`.
-pub fn note_path(conn: &Connection, id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT path FROM notes WHERE id = ?1 LIMIT 1", [id], |r| {
-            r.get(0)
-        })
-        .ok())
+/// Paths of every note with this Obsidian `id` — ids can collide across dirs.
+pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM notes WHERE id = ?1 ORDER BY path")?;
+    let paths = stmt
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(paths)
 }
 
-/// Full markdown body of a note by its Obsidian `id` (frontmatter id / slug).
-pub fn get_note(conn: &Connection, notes_dir: &Path, id: &str) -> Result<Option<String>> {
-    let rel: Option<String> = conn
-        .query_row("SELECT path FROM notes WHERE id = ?1 LIMIT 1", [id], |r| {
-            r.get(0)
-        })
-        .ok();
-    let Some(rel) = rel else { return Ok(None) };
-    let abs = notes_dir.join(rel);
-    Ok(std::fs::read_to_string(abs).ok())
+/// Path of the note linked to a story, preferring one under `stories/`.
+pub fn note_for_story(conn: &Connection, story_id: i32) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM notes WHERE link_kind = 'story' AND entity_id = ?1
+         ORDER BY path NOT LIKE 'stories/%', path LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([story_id], |r| r.get(0))?;
+    Ok(rows.next().transpose()?)
+}
+
+/// `(story_id, path)` of the story note listing `branch` in its `branches:`.
+pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(i32, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.entity_id, n.path FROM note_branches b
+         JOIN notes n ON n.path = b.path
+         WHERE b.branch = ?1 AND n.link_kind = 'story'
+         ORDER BY n.path NOT LIKE 'stories/%', n.path LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([branch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.next().transpose()?)
+}
+
+/// Read a note by notes-dir-relative path. `None` if it doesn't exist. Errors
+/// on absolute paths or `..` so untrusted paths can't escape `notes_dir`.
+pub fn read_note(notes_dir: &Path, rel: &str) -> Result<Option<String>> {
+    let escapes = Path::new(rel).components().any(|c| {
+        !matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if rel.is_empty() || escapes {
+        anyhow::bail!("note path must be relative to the notes dir: {rel}");
+    }
+    match std::fs::read_to_string(notes_dir.join(rel)) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read note {rel}")),
+    }
 }
 
 fn is_read_only(sql: &str) -> bool {
@@ -306,9 +407,140 @@ mod tests {
         let got = query(&conn, "SELECT text FROM todos").unwrap();
         assert!(got.contains("do it"));
 
-        let body = get_note(&conn, &notes, "a").unwrap().unwrap();
+        let body = read_note(&notes, "stories/a.md").unwrap().unwrap();
         assert!(body.contains("# Hi"));
 
         assert!(query(&conn, "DELETE FROM todos").is_err());
+    }
+
+    #[test]
+    fn indexes_branches_and_clears_on_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        let p = Path::new("stories/s.md");
+        let content = "---\nid: s\nstory_id: sc-42\nbranches: [me/sc-42/s, stacked]\n---\n";
+        reindex_note(&conn, p, content).unwrap();
+        assert_eq!(
+            story_for_branch(&conn, "stacked").unwrap(),
+            Some((42, "stories/s.md".into()))
+        );
+        assert_eq!(story_for_branch(&conn, "nope").unwrap(), None);
+
+        // Reindex drops branches no longer listed.
+        reindex_note(
+            &conn,
+            p,
+            "---\nid: s\nstory_id: sc-42\nbranches: [stacked]\n---\n",
+        )
+        .unwrap();
+        assert_eq!(story_for_branch(&conn, "me/sc-42/s").unwrap(), None);
+
+        remove_note(&conn, p).unwrap();
+        assert_eq!(story_for_branch(&conn, "stacked").unwrap(), None);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_branches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn branches_on_non_story_notes_dont_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        reindex_note(&conn, Path::new("x.md"), "---\nid: x\nbranches: [b]\n---\n").unwrap();
+        assert_eq!(story_for_branch(&conn, "b").unwrap(), None);
+    }
+
+    #[test]
+    fn note_for_story_prefers_stories_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        let fm = "---\nid: s\nstory_id: sc-7\n---\n";
+        reindex_note(&conn, Path::new("archive/s.md"), fm).unwrap();
+        reindex_note(&conn, Path::new("stories/s.md"), fm).unwrap();
+        assert_eq!(
+            note_for_story(&conn, 7).unwrap(),
+            Some("stories/s.md".into())
+        );
+        assert_eq!(note_for_story(&conn, 8).unwrap(), None);
+    }
+
+    #[test]
+    fn note_paths_for_colliding_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        reindex_note(&conn, Path::new("stories/foo.md"), "---\nid: foo\n---\n").unwrap();
+        reindex_note(&conn, Path::new("foo.md"), "---\nid: foo\n---\n").unwrap();
+        assert_eq!(
+            note_paths_for_id(&conn, "foo").unwrap(),
+            vec!["foo.md".to_string(), "stories/foo.md".to_string()]
+        );
+        assert!(note_paths_for_id(&conn, "bar").unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_note_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("stories")).unwrap();
+        std::fs::write(tmp.path().join("stories/a.md"), "hi").unwrap();
+        assert_eq!(
+            read_note(tmp.path(), "stories/a.md").unwrap(),
+            Some("hi".into())
+        );
+        assert_eq!(read_note(tmp.path(), "missing.md").unwrap(), None);
+        for bad in ["/etc/passwd", "../x.md", "stories/../../x.md", ""] {
+            assert!(read_note(tmp.path(), bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn query_capped_truncates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        for i in 0..3 {
+            reindex_note(&conn, Path::new(&format!("{i}.md")), "---\nid: x\n---\n").unwrap();
+        }
+        let (rows, truncated) = query_capped(&conn, "SELECT path FROM notes", 2).unwrap();
+        assert!(truncated);
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&rows)
+                .unwrap()
+                .len(),
+            2
+        );
+        let (_, truncated) = query_capped(&conn, "SELECT path FROM notes", 3).unwrap();
+        assert!(!truncated);
+        assert!(query_capped(&conn, "DELETE FROM notes", 2).is_err());
+        assert!(query_capped(&conn, "WITH x AS (SELECT 1) DELETE FROM notes", 2).is_err());
+        assert!(query_capped(&conn, "PRAGMA journal_mode = DELETE", 2).is_err());
+        assert!(query_capped(&conn, "PRAGMA table_info(notes)", 100).is_ok());
+    }
+
+    #[test]
+    fn runaway_query_times_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        let sql = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r)
+                   SELECT count(*) FROM r";
+        let start = std::time::Instant::now();
+        let err =
+            query_with_timeout(&conn, sql, 10, std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        // Handler is cleared: the connection still works.
+        assert!(query(&conn, "SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn reindex_nests_in_callers_transaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = open(tmp.path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        reindex_note(&tx, Path::new("a.md"), "---\nid: a\nbranches: [b]\n---\n").unwrap();
+        tx.rollback().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_branches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

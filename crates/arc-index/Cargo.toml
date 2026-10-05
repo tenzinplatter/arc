@@ -8,7 +8,7 @@ arc-core = { workspace = true }
 arc-notes = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks"] }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 
