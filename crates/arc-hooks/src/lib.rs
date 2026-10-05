@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset};
 
 pub mod command;
 pub mod input;
+pub mod install;
 pub mod marker;
 pub mod output;
 pub mod post_bash;
