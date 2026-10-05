@@ -87,8 +87,9 @@ pub enum Commands {
 
     /// Append a session handoff entry to the story note's `## Sessions` section.
     ///
-    /// The entry is headed with the local time and current git branch. Creates the section, and
-    /// the story note, if missing. Multi-line values are indented under their field.
+    /// The entry is headed with the local time, its UTC offset and the current git branch (when
+    /// that branch belongs to the story). Creates the section, and the story note, if missing.
+    /// Multi-line values are indented under their field.
     #[command()]
     Log {
         /// Shortcut story id (`123` or `sc-123`). Defaults to the story resolved from the current git branch.

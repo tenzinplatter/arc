@@ -5,6 +5,7 @@ use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::{BranchName, NoteRelPath};
 use arc_shortcut::Cache;
+use arc_shortcut::api::story::Story;
 
 pub mod branch;
 pub mod context;
@@ -34,28 +35,42 @@ pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<Resolve
     resolve(&git::head(dir)?, &config.cache_dir)
 }
 
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(work).await?
+}
+
 pub async fn current_context(
     dir: &Path,
     config: &Config,
     cache: &mut Cache,
 ) -> anyhow::Result<Option<StoryContext>> {
-    let Some(resolved) = resolve_dir(dir, config)? else {
+    let (owned_dir, owned_config) = (dir.to_path_buf(), config.clone());
+    let Some(resolved) = blocking(move || resolve_dir(&owned_dir, &owned_config)).await? else {
         return Ok(None);
     };
     let story = lookup_story_backing_off(cache, &config.api_token, &config.cache_dir, resolved.id)
         .await
         .ok();
     let todos = arc_notes::todos::load_todos(&config.cache_dir).await;
-    let conn = arc_index::open_for_reading(&config.cache_dir)?;
-    build_context(
+    let (cache_dir, notes_dir, lookup) = (
+        config.cache_dir.clone(),
+        config.notes_dir.clone(),
+        resolved.clone(),
+    );
+    let note = blocking(move || {
+        let conn = arc_index::open_for_reading(&cache_dir)?;
+        context::find_note(&lookup, &conn, &notes_dir)
+    })
+    .await?;
+    Ok(Some(context::assemble(
         resolved,
         story.as_ref(),
         cache,
-        &conn,
-        &config.notes_dir,
+        note,
         &todos,
-    )
-    .map(Some)
+    )))
 }
 
 pub async fn branch_for_story(
@@ -120,17 +135,23 @@ pub async fn link_current_branch(
 #[derive(Debug)]
 pub struct LoggedSession {
     pub story: StoryId,
+    pub head: GitHead,
     pub note: StoryNote,
     pub entry: SessionEntry,
 }
 
-pub async fn log_session(
-    dir: &Path,
-    config: &Config,
-    cache: &mut Cache,
-    story: Option<StoryId>,
-    handoff: Handoff,
-) -> anyhow::Result<LoggedSession> {
+struct SessionTarget {
+    story: StoryId,
+    head: GitHead,
+    branch: Option<BranchName>,
+}
+
+enum Located {
+    Noted(SessionTarget, NoteRelPath),
+    Unnoted(SessionTarget),
+}
+
+fn locate_session(dir: &Path, config: &Config, story: Option<StoryId>) -> anyhow::Result<Located> {
     let head = git::head(dir)?;
     let (id, resolved) = match story {
         Some(id) => (
@@ -151,30 +172,68 @@ pub async fn log_session(
         Some(resolved) => context::find_note(resolved, &conn, &config.notes_dir)?,
         None => arc_index::story_note(&conn, &config.notes_dir, id)?,
     };
-    let note = match existing {
-        Some((rel, _)) => StoryNote::Existing(rel),
-        None => {
+    let target = SessionTarget {
+        story: id,
+        head,
+        branch: resolved.map(|r| r.branch),
+    };
+    Ok(match existing {
+        Some((rel, _)) => Located::Noted(target, rel),
+        None => Located::Unnoted(target),
+    })
+}
+
+fn create_note_for(config: &Config, story: &Story, links: NoteLinks) -> anyhow::Result<StoryNote> {
+    let conn = arc_index::open(&config.cache_dir)?;
+    create_story_note(
+        &Vault::new(&conn, &config.notes_dir, &config.cache_dir),
+        story,
+        links,
+        "",
+    )
+}
+
+fn write_entry(config: &Config, rel: &NoteRelPath, entry: &SessionEntry) -> anyhow::Result<()> {
+    let conn = arc_index::open(&config.cache_dir)?;
+    write_session(
+        &Vault::new(&conn, &config.notes_dir, &config.cache_dir),
+        rel,
+        entry,
+    )
+}
+
+pub async fn log_session(
+    dir: &Path,
+    config: &Config,
+    cache: &mut Cache,
+    story: Option<StoryId>,
+    handoff: Handoff,
+) -> anyhow::Result<LoggedSession> {
+    let (owned_dir, owned_config) = (dir.to_path_buf(), config.clone());
+    let located = blocking(move || locate_session(&owned_dir, &owned_config, story)).await?;
+    let (target, note) = match located {
+        Located::Noted(target, rel) => (target, StoryNote::Existing(rel)),
+        Located::Unnoted(target) => {
+            let id = target.story;
             let story = lookup_story(cache, &config.api_token, id)
                 .await
                 .with_context(|| format!("couldn't load story {id} to create its note"))?;
             let links = NoteLinks::for_story(cache, &story);
-            create_story_note(
-                &Vault::new(&conn, &config.notes_dir, &config.cache_dir),
-                &story,
-                links,
-                "",
-            )?
+            let owned_config = config.clone();
+            let note = blocking(move || create_note_for(&owned_config, &story, links)).await?;
+            (target, note)
         }
     };
-    let vault = Vault::new(&conn, &config.notes_dir, &config.cache_dir);
     let entry = SessionEntry {
         at: SessionTime::now(),
-        branch: head.branch().cloned(),
+        branch: target.branch,
         handoff,
     };
-    write_session(&vault, note.rel(), &entry)?;
+    let (owned_config, rel) = (config.clone(), note.rel().clone());
+    let entry = blocking(move || write_entry(&owned_config, &rel, &entry).map(|()| entry)).await?;
     Ok(LoggedSession {
-        story: id,
+        story: target.story,
+        head: target.head,
         note,
         entry,
     })
@@ -798,7 +857,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
-        assert_eq!(logged.entry.branch, Some(br("linked")));
+        assert_eq!(logged.entry.branch, None);
+        assert_eq!(logged.head, GitHead::Branch(br("linked")));
 
         write_note(
             &env,
@@ -818,6 +878,35 @@ mod tests {
             )
         );
 
+        let logged = log_session(
+            &env.repo,
+            &env.config,
+            &mut cache,
+            Some(7.into()),
+            handoff("linked"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(logged.note, StoryNote::Existing(rel("work.md")));
+        assert_eq!(logged.entry.branch, Some(br("linked")));
+
+        run_git(
+            &env.repo,
+            &["symbolic-ref", "HEAD", "refs/heads/me/sc-12/x"],
+        );
+        let logged = log_session(
+            &env.repo,
+            &env.config,
+            &mut cache,
+            Some(7.into()),
+            handoff("elsewhere"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(logged.entry.branch, None);
+        assert_eq!(logged.head, GitHead::Branch(br("me/sc-12/x")));
+        assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
+
         let outside = tempfile::tempdir().unwrap();
         let logged = log_session(
             outside.path(),
@@ -829,6 +918,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(logged.entry.branch, None);
+        assert_eq!(logged.head, GitHead::NotARepo);
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
     }
 

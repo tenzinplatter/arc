@@ -102,6 +102,16 @@ pub fn build_context(
     todos: &[Todo],
 ) -> anyhow::Result<StoryContext> {
     let note = find_note(&resolved, conn, notes_dir)?;
+    Ok(assemble(resolved, story, cache, note, todos))
+}
+
+pub(crate) fn assemble(
+    resolved: ResolvedStory,
+    story: Option<&Story>,
+    cache: &Cache,
+    note: Option<(NoteRelPath, String)>,
+    todos: &[Todo],
+) -> StoryContext {
     let canonical = cache.user().zip(story).and_then(|(user, story)| {
         canonical_branch(&user.mention_name, resolved.id, &story.name, None).ok()
     });
@@ -111,7 +121,7 @@ pub fn build_context(
         story_type: s.story_type.clone(),
         url: s.app_url.clone(),
     });
-    Ok(StoryContext {
+    StoryContext {
         story: ContextStory {
             id: resolved.id,
             details,
@@ -128,7 +138,7 @@ pub fn build_context(
             .map(|(rel, _)| open_todos_in(rel, todos))
             .unwrap_or_default(),
         note: note.map(|(rel, _)| rel),
-    })
+    }
 }
 
 impl fmt::Display for ResolvedBy {
