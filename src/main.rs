@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
             result
         }
         Some(Commands::Migrate) => migrate::migrate(),
+        Some(Commands::Hook(command)) => arc_tui::hook(command).await,
         Some(Commands::Context { format }) => {
             arc_tui::print_context(format).await;
             Ok(())

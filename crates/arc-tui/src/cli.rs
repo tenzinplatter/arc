@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use arc_context::EntryText;
 use arc_core::StoryId;
+use arc_hooks::install::Mode;
 use clap::builder::{BoolValueParser, TypedValueParser};
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "arc")]
@@ -108,6 +111,53 @@ pub enum Commands {
         #[arg(long)]
         questions: Option<EntryText>,
     },
+
+    /// Claude Code hooks: story context at session start, stacked branch links and session handoffs.
+    ///
+    /// The event subcommands read the hook's JSON on stdin and print nothing when the hook's `cwd`
+    /// doesn't resolve to a story or anything goes wrong.
+    #[command(subcommand)]
+    Hook(HookCommands),
+}
+
+#[derive(Subcommand)]
+pub enum HookCommands {
+    /// SessionStart: print the story context and arc workflow instructions, and record the session.
+    SessionStart,
+    /// PostToolUse (Bash): link branches created from a story branch to its story, or nudge to link them.
+    PostBash,
+    /// Stop: once per session, ask for a `log_session` handoff when there is unlogged work.
+    Stop,
+    /// SessionEnd: append an automatic `## Sessions` breadcrumb when work ended without a handoff.
+    SessionEnd,
+    /// Add the arc hooks to Claude Code's user settings and register the arc MCP server.
+    Install(InstallArgs),
+    /// Remove the arc hooks from Claude Code's user settings and unregister the arc MCP server.
+    Uninstall(InstallArgs),
+}
+
+#[derive(Args)]
+pub struct InstallArgs {
+    /// Print the resulting settings and the `claude mcp` command without writing or running anything.
+    #[arg(
+        long = "dry-run",
+        action = ArgAction::SetTrue,
+        value_parser = BoolValueParser::new().map(install_mode),
+    )]
+    pub mode: Mode,
+    /// Claude Code settings file to edit. Defaults to `~/.claude/settings.json`.
+    #[arg(long)]
+    pub settings: Option<PathBuf>,
+    /// `claude` CLI used to (un)register the MCP server. Defaults to `claude` on PATH.
+    #[arg(long)]
+    pub claude: Option<PathBuf>,
+}
+
+fn install_mode(dry_run: bool) -> Mode {
+    match dry_run {
+        true => Mode::DryRun,
+        false => Mode::Apply,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +226,27 @@ mod tests {
         ));
         assert!(parse(&["log", "--done", " ", "--state", "b", "--next", "c"]).is_err());
         assert!(parse(&["log", "--done", "a", "--state", "b"]).is_err());
+    }
+
+    #[test]
+    fn hook_subcommands_parse() {
+        assert!(matches!(
+            parse(&["hook", "post-bash"]).unwrap(),
+            Commands::Hook(HookCommands::PostBash)
+        ));
+        assert!(matches!(
+            parse(&["hook", "install", "--dry-run", "--settings", "/tmp/s.json"]).unwrap(),
+            Commands::Hook(HookCommands::Install(InstallArgs {
+                mode: Mode::DryRun,
+                settings: Some(_),
+                claude: None
+            }))
+        ));
+        assert!(matches!(
+            parse(&["hook", "uninstall"]).unwrap(),
+            Commands::Hook(HookCommands::Uninstall(InstallArgs { mode: Mode::Apply, .. }))
+        ));
+        assert!(parse(&["hook", "nope"]).is_err());
     }
 
     #[test]

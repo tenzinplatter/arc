@@ -14,11 +14,13 @@ use crate::{
         cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
-    cli::{Commands, ContextFormat, DaemonCommands, LinkMode},
+    cli::{Commands, ContextFormat, DaemonCommands, HookCommands, InstallArgs, LinkMode},
     note::Note,
 };
 use arc_context::{Handoff, LinkOutcome, NoteRename, StoryNote};
 use arc_core::{Config, dbg_file};
+use arc_hooks::Hook;
+use arc_hooks::install::{Claude, Installer};
 use arc_shortcut::fetch_story;
 
 pub use arc_shortcut::{api, cache};
@@ -89,6 +91,44 @@ pub async fn print_context(format: ContextFormat) {
     .map_err(anyhow::Error::from)
     .and_then(|rendered| rendered);
     emit_context(rendered);
+}
+
+const CLAUDE_SETTINGS: &str = ".claude/settings.json";
+
+fn installer(args: InstallArgs) -> anyhow::Result<Installer> {
+    let arc = env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .context("can't locate the running arc executable")?;
+    let settings = match args.settings {
+        Some(settings) => settings,
+        None => env::home_dir()
+            .context("can't find your home directory; pass --settings")?
+            .join(CLAUDE_SETTINGS),
+    };
+    Ok(Installer {
+        settings,
+        arc,
+        claude: Claude::locate(args.claude),
+    })
+}
+
+pub async fn hook(command: HookCommands) -> anyhow::Result<()> {
+    let event = match command {
+        HookCommands::SessionStart => Hook::SessionStart,
+        HookCommands::PostBash => Hook::PostBash,
+        HookCommands::Stop => Hook::Stop,
+        HookCommands::SessionEnd => Hook::SessionEnd,
+        HookCommands::Install(args) => {
+            let mode = args.mode;
+            return installer(args)?.install(mode, &mut io::stdout());
+        }
+        HookCommands::Uninstall(args) => {
+            let mode = args.mode;
+            return installer(args)?.uninstall(mode, &mut io::stdout());
+        }
+    };
+    arc_hooks::run(event).await;
+    Ok(())
 }
 
 pub async fn handle_command(
@@ -261,5 +301,6 @@ pub async fn handle_command(
         }
 
         Commands::Migrate => unreachable!("Migrate is handled in main.rs before config is loaded"),
+        Commands::Hook(_) => unreachable!("Hook is handled in main.rs before config is loaded"),
     }
 }

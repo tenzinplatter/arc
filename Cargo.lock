@@ -91,7 +91,9 @@ dependencies = [
  "arc-tui",
  "clap",
  "ratatui",
+ "serde_json",
  "shellexpand",
+ "tempfile",
  "tokio",
 ]
 
@@ -238,6 +240,7 @@ dependencies = [
  "arc-context",
  "arc-core",
  "arc-daemon",
+ "arc-hooks",
  "arc-mcp",
  "arc-notes",
  "arc-shortcut",
