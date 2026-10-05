@@ -7,6 +7,7 @@ use arc_core::{Config, dbg_file};
 use arc_shortcut::Cache;
 use chrono::{DateTime, FixedOffset};
 
+pub mod activity;
 pub mod command;
 pub mod input;
 pub mod install;

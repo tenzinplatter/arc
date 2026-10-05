@@ -67,6 +67,13 @@ impl<'a> Vault<'a> {
         }
     }
 
+    pub fn within(self, patience: std::time::Duration) -> Self {
+        Self {
+            locks: self.locks.within(patience),
+            ..self
+        }
+    }
+
     pub fn conn(&self) -> &'a Connection {
         self.conn
     }

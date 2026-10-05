@@ -1,11 +1,11 @@
-use arc_context::{SessionTime, activity_since, latest_session_at, resolve_dir, story_note_for};
+use arc_context::{SessionTime, activity_since, latest_handoff_at, resolve_dir, story_note_for};
 use chrono::{DateTime, FixedOffset};
 
 use crate::HookEnv;
+use crate::activity;
 use crate::input::StopInput;
 use crate::marker::{MarkerState, Markers};
 use crate::output::BlockOutput;
-use crate::repo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionFacts {
@@ -16,7 +16,7 @@ pub struct SessionFacts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StopFacts {
     pub session: Option<SessionFacts>,
-    pub last_entry: Option<SessionTime>,
+    pub last_handoff: Option<SessionTime>,
     pub activity: Option<DateTime<FixedOffset>>,
 }
 
@@ -35,7 +35,9 @@ pub fn decide(facts: StopFacts) -> StopDecision {
         return StopDecision::Silent;
     };
     let start = SessionTime::new(started_at);
-    let baseline = facts.last_entry.map_or(start, |entry| entry.max(start));
+    let baseline = facts
+        .last_handoff
+        .map_or(start, |handoff| handoff.max(start));
     match facts.activity {
         Some(activity) if activity_since(baseline, activity) => StopDecision::AskForHandoff,
         Some(_) | None => StopDecision::Silent,
@@ -61,15 +63,19 @@ pub fn run(input: StopInput, env: &HookEnv) -> anyhow::Result<Option<String>> {
     let Some(resolved) = resolve_dir(dir, &env.config)? else {
         return Ok(None);
     };
-    let last_entry =
-        story_note_for(&resolved, &env.config)?.and_then(|(_, body)| latest_session_at(&body));
+    let last_handoff =
+        story_note_for(&resolved, &env.config)?.and_then(|(_, body)| latest_handoff_at(&body));
+    let work = match &marker.baseline {
+        Some(baseline) => activity::work_since(dir, baseline, env.now)?,
+        None => None,
+    };
     let facts = StopFacts {
         session: Some(SessionFacts {
             state: marker.state,
             started_at: marker.started_at,
         }),
-        last_entry,
-        activity: repo::activity(dir, env.now)?.latest(),
+        last_handoff,
+        activity: work.and_then(|w| w.latest()),
     };
     match decide(facts) {
         StopDecision::Silent => Ok(None),
@@ -120,7 +126,13 @@ mod tests {
                 Some("2026-10-05T10:00:00+10:00"),
                 Silent,
             ),
-            ("no activity at all", session(Fresh), None, None, Silent),
+            (
+                "no session activity, or a marker without a baseline",
+                session(Fresh),
+                None,
+                None,
+                Silent,
+            ),
             (
                 "commit before the session",
                 session(Fresh),
@@ -192,10 +204,10 @@ mod tests {
                 AskForHandoff,
             ),
         ];
-        for (name, session, last_entry, activity, expected) in cases {
+        for (name, session, last_handoff, activity, expected) in cases {
             let facts = StopFacts {
                 session,
-                last_entry,
+                last_handoff,
                 activity: activity.map(t),
             };
             assert_eq!(decide(facts), expected, "{name}");

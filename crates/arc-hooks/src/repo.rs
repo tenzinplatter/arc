@@ -1,10 +1,8 @@
 use std::cmp::Ordering;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::time::SystemTime;
 
 use anyhow::Context;
-use arc_context::OneLine;
 use arc_notes::BranchName;
 use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
 
@@ -15,7 +13,7 @@ const CREATED_PREFIX: &str = "branch: Created from ";
 const HEAD_REFLOG_SCAN: usize = 200;
 pub const FRESH_BRANCH_WINDOW: TimeDelta = TimeDelta::minutes(10);
 
-fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
     let out = Command::new("git")
         .arg("--no-optional-locks")
         .arg("-C")
@@ -31,7 +29,7 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
     ))
 }
 
-fn lines(output: Option<String>) -> Vec<String> {
+pub(crate) fn lines(output: Option<String>) -> Vec<String> {
     output
         .map(|out| out.lines().map(str::to_owned).collect())
         .unwrap_or_default()
@@ -198,120 +196,6 @@ pub fn head_when_created(
     Ok(head_at(&entries, complete, new, at))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dirty {
-    pub newest_change: DateTime<FixedOffset>,
-    pub summary: OneLine,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepoActivity {
-    pub last_commit: Option<DateTime<FixedOffset>>,
-    pub dirty: Option<Dirty>,
-}
-
-impl RepoActivity {
-    pub fn latest(&self) -> Option<DateTime<FixedOffset>> {
-        let dirty = self.dirty.as_ref().map(|d| d.newest_change);
-        self.last_commit.into_iter().chain(dirty).max()
-    }
-}
-
-struct StatusEntry {
-    path: String,
-    untracked: bool,
-}
-
-fn status_entries(porcelain: &str) -> Vec<StatusEntry> {
-    let mut fields = porcelain.split('\0').filter(|f| !f.is_empty());
-    let mut entries = Vec::new();
-    while let Some(field) = fields.next() {
-        let Some((code, path)) = field.split_at_checked(3) else {
-            continue;
-        };
-        if code.contains(['R', 'C']) {
-            fields.next();
-        }
-        entries.push(StatusEntry {
-            path: path.to_owned(),
-            untracked: code.starts_with("??"),
-        });
-    }
-    entries
-}
-
-fn modified_at(path: &Path, now: DateTime<FixedOffset>) -> DateTime<FixedOffset> {
-    std::fs::symlink_metadata(path)
-        .and_then(|m| m.modified())
-        .map(|at: SystemTime| DateTime::<chrono::Utc>::from(at).with_timezone(&now.timezone()))
-        .unwrap_or(now)
-}
-
-fn summary(shortstat: &str, untracked: usize) -> Option<OneLine> {
-    let untracked = match untracked {
-        0 => None,
-        1 => Some("1 untracked file".to_owned()),
-        n => Some(format!("{n} untracked files")),
-    };
-    let parts: Vec<String> = [OneLine::parse(shortstat).map(|s| s.to_string()), untracked]
-        .into_iter()
-        .flatten()
-        .collect();
-    OneLine::parse(&parts.join("; "))
-}
-
-fn dirty(dir: &Path, now: DateTime<FixedOffset>) -> anyhow::Result<Option<Dirty>> {
-    let Some(porcelain) = git(dir, &["status", "--porcelain", "-z"])? else {
-        return Ok(None);
-    };
-    let entries = status_entries(&porcelain);
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    let root = PathBuf::from(
-        git(dir, &["rev-parse", "--show-toplevel"])?
-            .context("no work tree")?
-            .trim_end(),
-    );
-    let newest_change = entries
-        .iter()
-        .map(|e| modified_at(&root.join(&e.path), now))
-        .max()
-        .unwrap_or(now);
-    let shortstat = match git(dir, &["diff", "HEAD", "--shortstat"])? {
-        Some(stat) => stat,
-        None => git(dir, &["diff", "--cached", "--shortstat"])?.unwrap_or_default(),
-    };
-    let untracked = entries.iter().filter(|e| e.untracked).count();
-    Ok(summary(&shortstat, untracked).map(|summary| Dirty {
-        newest_change,
-        summary,
-    }))
-}
-
-pub fn activity(dir: &Path, now: DateTime<FixedOffset>) -> anyhow::Result<RepoActivity> {
-    let last_commit = git(dir, &["log", "-1", "--format=%cI", "HEAD"])?
-        .map(|out| DateTime::parse_from_rfc3339(out.trim()))
-        .transpose()
-        .unwrap_or(None);
-    Ok(RepoActivity {
-        last_commit,
-        dirty: dirty(dir, now)?,
-    })
-}
-
-pub fn commit_subjects_since(
-    dir: &Path,
-    since: DateTime<FixedOffset>,
-) -> anyhow::Result<Vec<OneLine>> {
-    let since = format!("--since={}", since.to_rfc3339());
-    let log = git(dir, &["log", &since, "--format=%s", "HEAD"])?;
-    Ok(lines(log)
-        .iter()
-        .filter_map(|s| OneLine::parse(s))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,29 +300,5 @@ mod tests {
             head(&[entry(50, "checkout: moving from main to me/new")]),
             HeadAt::Unknown
         );
-    }
-
-    #[test]
-    fn status_entries_skip_rename_sources() {
-        let entries = status_entries(" M a.rs\0R  new.rs\0old.rs\0?? dir/\0");
-        let paths: Vec<_> = entries
-            .iter()
-            .map(|e| (e.path.as_str(), e.untracked))
-            .collect();
-        assert_eq!(
-            paths,
-            vec![("a.rs", false), ("new.rs", false), ("dir/", true)]
-        );
-    }
-
-    #[test]
-    fn summaries_combine_diff_and_untracked() {
-        let s = |stat: &str, n| summary(stat, n).map(|s| s.to_string());
-        assert_eq!(
-            s(" 2 files changed, 5 insertions(+)\n", 1).as_deref(),
-            Some("2 files changed, 5 insertions(+); 1 untracked file")
-        );
-        assert_eq!(s("", 3).as_deref(), Some("3 untracked files"));
-        assert_eq!(s("", 0), None);
     }
 }

@@ -11,6 +11,7 @@ use chrono::{DateTime, FixedOffset, TimeDelta};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::activity;
 use crate::input::SessionId;
 use crate::marker::{MarkerState, Markers, SessionMarker};
 
@@ -88,6 +89,7 @@ fn env_on(branch: &str) -> Option<Env> {
         &repo,
         &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
     );
+    git(&repo, &["config", "user.email", "t@t"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
     let config = config(tmp.path());
     std::fs::create_dir_all(config.notes_dir.join("stories")).unwrap();
@@ -167,11 +169,10 @@ impl Env {
         self.markers()
             .save(&SessionMarker {
                 session_id: id(),
-                story_id: Some(7.into()),
                 cwd: self.repo.clone(),
-                branch: None,
                 started_at,
                 state,
+                baseline: activity::snapshot(&self.repo, arc_core::time::now()).unwrap(),
             })
             .unwrap();
     }
@@ -421,6 +422,10 @@ async fn post_bash_respects_other_stories_and_missing_notes() {
     assert_eq!(branches(&env.note("stories/story-seven.md")), ["me/cached"]);
 }
 
+fn stamp(at: DateTime<FixedOffset>) -> String {
+    at.format("%Y-%m-%d %H:%M %:z").to_string()
+}
+
 #[tokio::test]
 async fn stop_asks_for_a_handoff_once_after_new_work() {
     let Some(env) = env_on("tenzin/sc-7/x") else {
@@ -429,10 +434,13 @@ async fn stop_asks_for_a_handoff_once_after_new_work() {
     let now = arc_core::time::now();
     assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
 
-    env.mark(now + TimeDelta::hours(1), MarkerState::Fresh);
+    env.mark(now - TimeDelta::hours(1), MarkerState::Fresh);
     assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
 
-    env.mark(now - TimeDelta::hours(1), MarkerState::Fresh);
+    git(
+        &env.repo,
+        &["commit", "-q", "--allow-empty", "-m", "feat: work"],
+    );
     let blocked: Value =
         serde_json::from_str(&env.hook(Hook::Stop, env.event("Stop")).await.unwrap()).unwrap();
     assert_eq!(blocked["decision"], "block");
@@ -449,57 +457,81 @@ async fn stop_asks_for_a_handoff_once_after_new_work() {
     assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
 
     env.mark(now - TimeDelta::hours(1), MarkerState::Fresh);
-    let later = (now + TimeDelta::minutes(2)).format("%Y-%m-%d %H:%M %:z");
+    let later = stamp(now + TimeDelta::minutes(2));
     env.write_note(
         "stories/story-seven.md",
         &format!("{SEVEN}\n## Sessions\n\n### {later} · tenzin/sc-7/x\n**Done:** a\n"),
     );
-    assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
-
     std::fs::write(env.repo.join("new.txt"), "x").unwrap();
     assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
+
+    env.write_note(
+        "stories/story-seven.md",
+        &format!("{SEVEN}\n## Sessions\n\n### {later} · tenzin/sc-7/x · [auto]\n**Uncommitted:** 1 file\n"),
+    );
+    assert!(env.hook(Hook::Stop, env.event("Stop")).await.is_some());
 }
 
 #[tokio::test]
-async fn stop_counts_dirty_files_edited_after_start() {
+async fn stop_ignores_pre_session_state_and_teammates() {
     let Some(env) = env_on("tenzin/sc-7/x") else {
         return;
     };
     std::fs::write(env.repo.join("old.txt"), "x").unwrap();
-    let old = std::fs::File::options()
-        .write(true)
-        .open(env.repo.join("old.txt"))
-        .unwrap();
-    old.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
-        .unwrap();
-    let out = Command::new("git")
-        .args([
-            "-C",
-            env.repo.to_str().unwrap(),
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "--amend",
-            "--allow-empty",
-            "-m",
-            "old",
-        ])
-        .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    std::fs::write(env.repo.join("tracked.txt"), "x").unwrap();
+    git(&env.repo, &["add", "tracked.txt"]);
+    git(&env.repo, &["commit", "-q", "-m", "add tracked"]);
+    std::fs::remove_file(env.repo.join("tracked.txt")).unwrap();
     env.mark(
         arc_core::time::now() - TimeDelta::hours(1),
         MarkerState::Fresh,
     );
     assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
+
+    git(
+        &env.repo,
+        &[
+            "-c",
+            "user.email=mate@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "feat: theirs",
+        ],
+    );
+    std::fs::create_dir_all(env.repo.join("ignored")).unwrap();
+    assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
+
     std::fs::write(env.repo.join("fresh.txt"), "x").unwrap();
     assert!(env.hook(Hook::Stop, env.event("Stop")).await.is_some());
+}
+
+#[tokio::test]
+async fn stop_and_session_end_stay_silent_for_legacy_markers() {
+    let Some(env) = env_on("tenzin/sc-7/x") else {
+        return;
+    };
+    env.write_note("stories/story-seven.md", SEVEN);
+    let legacy = format!(
+        r#"{{"session_id": "s1", "story_id": 7, "cwd": {:?}, "branch": null, "started_at": "{}", "state": "fresh"}}"#,
+        env.repo,
+        (arc_core::time::now() - TimeDelta::hours(1)).to_rfc3339()
+    );
+    std::fs::create_dir_all(env.config.cache_dir.join("sessions")).unwrap();
+    std::fs::write(env.config.cache_dir.join("sessions/s1.json"), legacy).unwrap();
+    git(
+        &env.repo,
+        &["commit", "-q", "--allow-empty", "-m", "feat: work"],
+    );
+    std::fs::write(env.repo.join("wip.txt"), "x").unwrap();
+    assert_eq!(env.hook(Hook::Stop, env.event("Stop")).await, None);
+    assert_eq!(
+        env.hook(Hook::SessionEnd, env.event("SessionEnd")).await,
+        None
+    );
+    assert_eq!(env.note("stories/story-seven.md"), SEVEN);
+    assert_eq!(env.markers().load(&id()).unwrap(), None);
 }
 
 #[tokio::test]
@@ -536,7 +568,6 @@ async fn session_end_leaves_a_breadcrumb_without_a_handoff() {
             "**Commits:**",
             "- fix: second",
             "- feat: first",
-            "- init",
             "**Uncommitted:** 1 untracked file"
         ]
     );
@@ -552,13 +583,15 @@ async fn session_end_leaves_a_breadcrumb_without_a_handoff() {
 }
 
 #[tokio::test]
-async fn session_end_is_quiet_after_a_handoff_or_without_work() {
+async fn session_end_records_only_work_after_the_last_handoff() {
     let Some(env) = env_on("tenzin/sc-7/x") else {
         return;
     };
     let now = arc_core::time::now();
-    let stamp = now.format("%Y-%m-%d %H:%M %:z");
-    let logged = format!("{SEVEN}\n## Sessions\n\n### {stamp} · tenzin/sc-7/x\n**Done:** a\n");
+    let logged = format!(
+        "{SEVEN}\n## Sessions\n\n### {} · tenzin/sc-7/x\n**Done:** a\n",
+        stamp(now + TimeDelta::minutes(2))
+    );
     env.write_note("stories/story-seven.md", &logged);
     env.mark(now - TimeDelta::hours(1), MarkerState::Fresh);
     git(
@@ -568,6 +601,31 @@ async fn session_end_is_quiet_after_a_handoff_or_without_work() {
     env.hook(Hook::SessionEnd, env.event("SessionEnd")).await;
     assert_eq!(env.note("stories/story-seven.md"), logged);
     assert_eq!(env.markers().load(&id()).unwrap(), None);
+
+    env.mark(now - TimeDelta::hours(1), MarkerState::Nudged);
+    git(
+        &env.repo,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "feat: before handoff",
+        ],
+    );
+    git_at(
+        &env.repo,
+        (now + TimeDelta::minutes(5)).timestamp(),
+        &["commit", "-q", "--allow-empty", "-m", "feat: after handoff"],
+    );
+    env.hook(Hook::SessionEnd, env.event("SessionEnd")).await;
+    let note = env.note("stories/story-seven.md");
+    let sessions = arc_context::latest_sessions(&note, 5);
+    assert_eq!(sessions.len(), 2, "{note}");
+    assert_eq!(
+        sessions[1].lines().skip(1).collect::<Vec<_>>(),
+        ["**Commits:**", "- feat: after handoff"]
+    );
 
     env.write_note("stories/story-seven.md", SEVEN);
     env.mark(now + TimeDelta::hours(1), MarkerState::Fresh);
@@ -584,7 +642,10 @@ async fn session_start_briefs_story_sessions_and_marks_every_session() {
         None
     );
     let marker = env.markers().load(&id()).unwrap().unwrap();
-    assert_eq!((marker.story_id, marker.state), (None, MarkerState::Fresh));
+    assert_eq!(marker.state, MarkerState::Fresh);
+    let baseline = marker.baseline.unwrap();
+    assert_eq!(baseline.root, env.repo.canonicalize().unwrap());
+    assert!(baseline.head.is_some() && baseline.dirty.is_empty());
 
     git(
         &env.repo,
@@ -609,8 +670,14 @@ async fn session_start_briefs_story_sessions_and_marks_every_session() {
         briefing.contains("(canonical: tenzin/sc-7/story-seven)"),
         "{briefing}"
     );
-    let marker = env.markers().load(&id()).unwrap().unwrap();
-    assert_eq!(marker.story_id, Some(7.into()));
+    assert!(
+        env.markers()
+            .load(&id())
+            .unwrap()
+            .unwrap()
+            .baseline
+            .is_some()
+    );
 }
 
 #[tokio::test]

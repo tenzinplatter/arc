@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arc_core::StoryId;
@@ -12,6 +13,7 @@ use crate::path::NoteRelPath;
 const LOCKS_DIR: &str = "locks";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
+const LOCK_RETRY: Duration = Duration::from_millis(25);
 #[cfg(unix)]
 const NEW_FILE_MODE: u32 = 0o666;
 
@@ -21,8 +23,17 @@ fn fnv1a(key: &str) -> u64 {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockWait {
+    Block,
+    Within(Duration),
+}
+
 #[derive(Clone, Debug)]
-pub struct NoteLocks(PathBuf);
+pub struct NoteLocks {
+    dir: PathBuf,
+    wait: LockWait,
+}
 
 #[derive(Debug)]
 pub struct NoteLock(File);
@@ -35,7 +46,17 @@ impl Drop for NoteLock {
 
 impl NoteLocks {
     pub fn in_cache(cache_dir: &Path) -> Self {
-        Self(cache_dir.join(LOCKS_DIR))
+        Self {
+            dir: cache_dir.join(LOCKS_DIR),
+            wait: LockWait::Block,
+        }
+    }
+
+    pub fn within(self, patience: Duration) -> Self {
+        Self {
+            wait: LockWait::Within(patience),
+            ..self
+        }
     }
 
     pub fn note(&self, rel: &NoteRelPath) -> anyhow::Result<NoteLock> {
@@ -47,9 +68,9 @@ impl NoteLocks {
     }
 
     fn hold(&self, key: &str) -> anyhow::Result<NoteLock> {
-        fs::create_dir_all(&self.0)
-            .with_context(|| format!("create lock dir {}", self.0.display()))?;
-        let path = self.0.join(format!("{:016x}.lock", fnv1a(key)));
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("create lock dir {}", self.dir.display()))?;
+        let path = self.dir.join(format!("{:016x}.lock", fnv1a(key)));
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -57,8 +78,25 @@ impl NoteLocks {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("open lock {}", path.display()))?;
-        FileExt::lock_exclusive(&file).with_context(|| format!("lock {}", path.display()))?;
+        acquire(&file, self.wait).with_context(|| format!("lock {}", path.display()))?;
         Ok(NoteLock(file))
+    }
+}
+
+fn acquire(file: &File, wait: LockWait) -> io::Result<()> {
+    let patience = match wait {
+        LockWait::Block => return FileExt::lock_exclusive(file),
+        LockWait::Within(patience) => patience,
+    };
+    let deadline = Instant::now() + patience;
+    loop {
+        match FileExt::try_lock_exclusive(file) {
+            Ok(()) => return Ok(()),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(
+                LOCK_RETRY.min(deadline.saturating_duration_since(Instant::now())),
+            ),
+        }
     }
 }
 
@@ -120,6 +158,21 @@ mod tests {
         );
         assert_eq!(fnv1a("note:stories/a.md"), fnv1a("note:stories/a.md"));
         assert_eq!(fnv1a(""), FNV_OFFSET);
+    }
+
+    #[test]
+    fn impatient_locks_give_up_while_another_holder_keeps_it() {
+        let cache = tempfile::tempdir().unwrap();
+        let held = NoteLocks::in_cache(cache.path())
+            .note(&rel("a.md"))
+            .unwrap();
+        let impatient = NoteLocks::in_cache(cache.path()).within(Duration::from_millis(60));
+        let started = Instant::now();
+        assert!(impatient.note(&rel("a.md")).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(impatient.note(&rel("b.md")).is_ok());
+        drop(held);
+        assert!(impatient.note(&rel("a.md")).is_ok());
     }
 
     #[test]

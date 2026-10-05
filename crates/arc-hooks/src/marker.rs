@@ -3,11 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use arc_core::StoryId;
-use arc_notes::BranchName;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
+use crate::activity::Snapshot;
 use crate::input::SessionId;
 
 const SESSIONS_DIR: &str = "sessions";
@@ -23,11 +22,11 @@ pub enum MarkerState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMarker {
     pub session_id: SessionId,
-    pub story_id: Option<StoryId>,
     pub cwd: PathBuf,
-    pub branch: Option<BranchName>,
     pub started_at: DateTime<FixedOffset>,
     pub state: MarkerState,
+    #[serde(default)]
+    pub baseline: Option<Snapshot>,
 }
 
 pub struct Markers(PathBuf);
@@ -92,15 +91,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::activity::{Change, DirtyEntry, Sha, StatusCode};
 
     fn marker(id: &str) -> SessionMarker {
         SessionMarker {
             session_id: SessionId::parse(id).unwrap(),
-            story_id: Some(7.into()),
             cwd: "/work/repo".into(),
-            branch: Some(BranchName::parse("me/sc-7/x").unwrap()),
             started_at: DateTime::parse_from_rfc3339("2026-10-05T14:32:10+10:00").unwrap(),
             state: MarkerState::Fresh,
+            baseline: Some(Snapshot {
+                root: "/work/repo".into(),
+                head: Some(Sha::parse(&"ab".repeat(20)).unwrap()),
+                dirty: vec![DirtyEntry {
+                    status: StatusCode::parse(" M").unwrap(),
+                    path: "a.rs".into(),
+                    change: Change::Modified(
+                        DateTime::parse_from_rfc3339("2026-10-05T14:00:00+10:00").unwrap(),
+                    ),
+                }],
+            }),
         }
     }
 
@@ -120,16 +129,36 @@ mod tests {
             on_disk,
             json!({
                 "session_id": "abc",
-                "story_id": 7,
                 "cwd": "/work/repo",
-                "branch": "me/sc-7/x",
                 "started_at": "2026-10-05T14:32:10+10:00",
-                "state": "fresh"
+                "state": "fresh",
+                "baseline": {
+                    "root": "/work/repo",
+                    "head": "ab".repeat(20),
+                    "dirty": [{"status": " M", "path": "a.rs", "change": {"modified": "2026-10-05T14:00:00+10:00"}}]
+                }
             })
         );
         markers.remove(&m.session_id).unwrap();
         markers.remove(&m.session_id).unwrap();
         assert_eq!(markers.load(&m.session_id).unwrap(), None);
+    }
+
+    #[test]
+    fn markers_from_before_baselines_still_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = Markers::in_cache(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+        std::fs::write(
+            tmp.path().join("sessions/old.json"),
+            r#"{"session_id": "old", "story_id": 7, "cwd": "/work/repo", "branch": "me/sc-7/x", "started_at": "2026-10-05T14:32:10+10:00", "state": "nudged"}"#,
+        )
+        .unwrap();
+        let old = markers
+            .load(&SessionId::parse("old").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!((old.state, old.baseline), (MarkerState::Nudged, None));
     }
 
     #[test]

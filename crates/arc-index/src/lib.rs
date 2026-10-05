@@ -56,11 +56,15 @@ fn db_path(cache_dir: &Path) -> PathBuf {
 }
 
 pub fn open(cache_dir: &Path) -> Result<Connection> {
+    open_waiting(cache_dir, WRITER_CONTENTION_TIMEOUT)
+}
+
+pub fn open_waiting(cache_dir: &Path, busy: std::time::Duration) -> Result<Connection> {
     std::fs::create_dir_all(cache_dir).ok();
     let conn = Connection::open(db_path(cache_dir))
         .with_context(|| format!("open index at {}", db_path(cache_dir).display()))?;
+    conn.busy_timeout(busy)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.busy_timeout(WRITER_CONTENTION_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }

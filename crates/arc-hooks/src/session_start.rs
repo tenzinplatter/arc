@@ -2,11 +2,12 @@ use std::fmt;
 use std::path::Path;
 use std::time::SystemTime;
 
-use arc_context::{ResolvedStory, StoryContext, current_context, resolve_dir};
+use arc_context::{StoryContext, current_context, resolve_dir};
 use arc_core::dbg_file;
 use arc_shortcut::Cache;
 
 use crate::HookEnv;
+use crate::activity::{self, Snapshot};
 use crate::input::SessionStartInput;
 use crate::marker::{MarkerState, Markers, SessionMarker};
 
@@ -42,26 +43,21 @@ impl fmt::Display for Briefing<'_> {
 
 fn marker_for(
     input: &SessionStartInput,
-    resolved: Option<&ResolvedStory>,
     existing: Option<SessionMarker>,
+    snapshot: Option<Snapshot>,
     env: &HookEnv,
 ) -> SessionMarker {
     let kept = existing.filter(|_| input.source.continues_session());
     SessionMarker {
         session_id: input.session_id.clone(),
-        story_id: resolved.map(|r| r.id),
         cwd: input.cwd.path().to_path_buf(),
-        branch: resolved.map(|r| r.branch.clone()),
         started_at: kept.as_ref().map_or(env.now, |m| m.started_at),
-        state: kept.map_or(MarkerState::Fresh, |m| m.state),
+        state: kept.as_ref().map_or(MarkerState::Fresh, |m| m.state),
+        baseline: kept.and_then(|m| m.baseline).or(snapshot),
     }
 }
 
-fn mark(
-    input: &SessionStartInput,
-    resolved: Option<&ResolvedStory>,
-    env: &HookEnv,
-) -> anyhow::Result<()> {
+fn mark(input: &SessionStartInput, env: &HookEnv) -> anyhow::Result<()> {
     let markers = Markers::in_cache(&env.config.cache_dir);
     if let Err(e) = markers.prune(SystemTime::now()) {
         dbg_file!("arc hook session-start: pruning markers: {e:#}");
@@ -70,7 +66,11 @@ fn mark(
         dbg_file!("arc hook session-start: {e:#}");
         None
     });
-    markers.save(&marker_for(input, resolved, existing, env))
+    let snapshot = activity::snapshot(input.cwd.path(), env.now).unwrap_or_else(|e| {
+        dbg_file!("arc hook session-start: snapshotting the repo: {e:#}");
+        None
+    });
+    markers.save(&marker_for(input, existing, snapshot, env))
 }
 
 pub async fn run(
@@ -79,12 +79,10 @@ pub async fn run(
     mut cache: Cache,
 ) -> anyhow::Result<Option<String>> {
     let dir = input.cwd.path();
-    let resolved = resolve_dir(dir, &env.config);
-    let story = resolved.as_ref().ok().and_then(Option::as_ref);
-    if let Err(e) = mark(&input, story, env) {
+    if let Err(e) = mark(&input, env) {
         dbg_file!("arc hook session-start: writing the session marker: {e:#}");
     }
-    if resolved?.is_none() {
+    if resolve_dir(dir, &env.config)?.is_none() {
         return Ok(None);
     }
     let Some(context) = current_context(dir, &env.config, &mut cache).await? else {
@@ -101,7 +99,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use arc_context::{ContextStory, ResolvedBy, Via};
+    use arc_context::{ContextStory, ResolvedBy};
     use arc_notes::BranchName;
     use chrono::DateTime;
 
@@ -152,6 +150,14 @@ mod tests {
         }
     }
 
+    fn snapshot(root: &str) -> Option<Snapshot> {
+        Some(Snapshot {
+            root: root.into(),
+            head: None,
+            dirty: vec![],
+        })
+    }
+
     #[test]
     fn markers_keep_their_start_across_resume_and_compact() {
         let input = |source| SessionStartInput {
@@ -159,20 +165,15 @@ mod tests {
             cwd: Cwd::parse("/work/repo".into()).unwrap(),
             source,
         };
-        let resolved = ResolvedStory {
-            id: 7.into(),
-            branch: br("me/sc-7/x"),
-            via: Via::BranchId,
-        };
         let first = marker_for(
             &input(StartSource::Startup),
-            Some(&resolved),
             None,
+            snapshot("/first"),
             &env("2026-10-05T09:00:00+10:00"),
         );
         assert_eq!(
-            (first.story_id, first.state),
-            (Some(7.into()), MarkerState::Fresh)
+            (first.state, first.baseline.clone()),
+            (MarkerState::Fresh, snapshot("/first"))
         );
         let nudged = SessionMarker {
             state: MarkerState::Nudged,
@@ -180,22 +181,33 @@ mod tests {
         };
         let later = env("2026-10-05T11:00:00+10:00");
         for source in [StartSource::Resume, StartSource::Compact] {
-            let kept = marker_for(&input(source), None, Some(nudged.clone()), &later);
-            assert_eq!(
-                (kept.started_at, kept.state, kept.story_id),
-                (first.started_at, MarkerState::Nudged, None)
+            let kept = marker_for(
+                &input(source),
+                Some(nudged.clone()),
+                snapshot("/later"),
+                &later,
             );
+            assert_eq!(
+                (kept.started_at, kept.state, kept.baseline),
+                (first.started_at, MarkerState::Nudged, snapshot("/first"))
+            );
+            let legacy = SessionMarker {
+                baseline: None,
+                ..nudged.clone()
+            };
+            let upgraded = marker_for(&input(source), Some(legacy), snapshot("/later"), &later);
+            assert_eq!(upgraded.baseline, snapshot("/later"));
         }
         for source in [StartSource::Startup, StartSource::Clear, StartSource::Fork] {
             let fresh = marker_for(
                 &input(source),
-                Some(&resolved),
                 Some(nudged.clone()),
+                snapshot("/later"),
                 &later,
             );
             assert_eq!(
-                (fresh.started_at, fresh.state),
-                (later.now, MarkerState::Fresh)
+                (fresh.started_at, fresh.state, fresh.baseline),
+                (later.now, MarkerState::Fresh, snapshot("/later"))
             );
         }
     }
