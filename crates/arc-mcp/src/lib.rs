@@ -17,13 +17,14 @@ use slugify::slugify;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
+use arc_context::NoteLinks;
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
-use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
-use arc_notes::{NoteDir, NoteRelPath};
+use arc_notes::note::frontmatter::Frontmatter;
+use arc_notes::NoteRelPath;
 use arc_notes::todos::{Todo, TodoSource};
 use arc_shortcut::api::branch::Branch;
-use arc_shortcut::api::story::{Story, iteration_of};
+use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
 
 const QUERY_ROW_CAP: usize = 200;
@@ -187,7 +188,7 @@ impl ArcMcp {
         let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
         let found = tokio::task::spawn_blocking(move || -> Result<Option<(NoteRelPath, String)>> {
             let conn = arc_index::open_readonly(&cache_dir)?;
-            story_note(&conn, &notes_dir, story_id)
+            arc_index::story_note(&conn, &notes_dir, story_id)
         })
         .await
         .map_err(internal)?;
@@ -299,22 +300,12 @@ impl ArcMcp {
         let Some(story) = cache.find_story(story_id).cloned() else {
             return Ok(fail(format!("story {story_id} isn't cached and couldn't be fetched")));
         };
-        let iteration_url = cache
-            .iteration_for(&story)
-            .or_else(|| iteration_of(&story, &cache.iterations))
-            .map(|it| it.app_url.clone());
-        let epic_url = story.epic_id.and_then(|id| {
-            cache
-                .epics
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.app_url.clone())
-        });
+        let links = NoteLinks::for_story(&cache, &story);
 
         let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
         let created = tokio::task::spawn_blocking(move || {
             let conn = arc_index::open(&cache_dir)?;
-            create_story_note(&conn, &notes_dir, &story, iteration_url, epic_url, &body)
+            arc_context::create_story_note(&conn, &notes_dir, &story, links, &body)
         })
         .await
         .map_err(internal)?;
@@ -497,44 +488,6 @@ fn story_detail(cache: &Cache, s: &Story, note: Option<String>) -> Value {
     })
 }
 
-fn story_note(
-    conn: &Connection,
-    notes_dir: &Path,
-    story_id: StoryId,
-) -> Result<Option<(NoteRelPath, String)>> {
-    if let Some(rel) = arc_index::note_for_story(conn, story_id)?
-        && let Some(body) = arc_index::read_note(notes_dir, &rel)?
-    {
-        return Ok(Some((rel, body)));
-    }
-    scan_story_note(notes_dir, story_id)
-}
-
-fn scan_story_note(notes_dir: &Path, story_id: StoryId) -> Result<Option<(NoteRelPath, String)>> {
-    let mut names: Vec<String> = match std::fs::read_dir(notes_dir.join(NoteDir::Stories)) {
-        Ok(dir) => dir
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    names.sort();
-    for stem in names.iter().filter_map(|n| n.strip_suffix(".md")) {
-        let rel = NoteRelPath::in_dir(NoteDir::Stories, stem);
-        if let Some(body) = arc_index::read_note(notes_dir, &rel)?
-            && links_story(&body, story_id)
-        {
-            return Ok(Some((rel, body)));
-        }
-    }
-    Ok(None)
-}
-
-fn links_story(content: &str, story_id: StoryId) -> bool {
-    Frontmatter::from_note(content)
-        .is_some_and(|fm| matches!(fm.link, EntityLink::Story { id, .. } if id == story_id))
-}
-
 enum NoteRef {
     Path(NoteRelPath),
     Id(String),
@@ -595,59 +548,6 @@ fn create_note(
         "{}\n# {title}\n\n{body}\n",
         Frontmatter::general(slug.clone(), tags).to_block()?
     );
-    if let Some(p) = abs.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    std::fs::write(&abs, &content)?;
-    arc_index::reindex_note(conn, &rel, &content)?;
-    Ok((slug, rel))
-}
-
-fn create_story_note(
-    conn: &Connection,
-    notes_dir: &Path,
-    story: &Story,
-    iteration_url: Option<String>,
-    epic_url: Option<String>,
-    body: &str,
-) -> Result<(String, NoteRelPath)> {
-    let existing = match arc_index::note_for_story(conn, story.id)? {
-        Some(rel) => Some(rel),
-        None => scan_story_note(notes_dir, story.id)?.map(|(rel, _)| rel),
-    };
-    if let Some(existing) = existing {
-        bail!("story {} already has a note at '{existing}'; use append_note", story.id);
-    }
-    let base = slugify!(&story.name);
-    if base.is_empty() {
-        bail!("story name produced an empty slug");
-    }
-    let Some((slug, rel)) = [base.clone(), format!("{base}-{}", story.id)]
-        .into_iter()
-        .map(|slug| {
-            let rel = NoteRelPath::in_dir(NoteDir::Stories, &slug);
-            (slug, rel)
-        })
-        .find(|(_, rel)| !rel.abs(notes_dir).exists())
-    else {
-        bail!(
-            "notes '{}' and '{}' already exist",
-            NoteRelPath::in_dir(NoteDir::Stories, &base),
-            NoteRelPath::in_dir(NoteDir::Stories, &format!("{base}-{}", story.id))
-        );
-    };
-    let abs = rel.abs(notes_dir);
-    let fm = Frontmatter::linked(
-        slug.clone(),
-        EntityLink::Story {
-            id: story.id,
-            url: story.app_url.clone(),
-            name: Some(story.name.clone()),
-            iteration_url,
-            epic_url,
-        },
-    );
-    let content = format!("{}\n# {}\n\n{}\n", fm.to_block()?, story.name, body);
     if let Some(p) = abs.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -737,73 +637,9 @@ mod tests {
     }
 
     #[test]
-    fn create_story_note_links_and_rejects_duplicates() {
-        let (_c, notes, conn) = setup();
-        let s = story(42, "Optical Flow");
-        let created = create_story_note(
-            &conn,
-            notes.path(),
-            &s,
-            Some("https://it".into()),
-            Some("https://epic".into()),
-            "hi",
-        )
-        .unwrap();
-        assert_eq!(created, ("optical-flow".into(), rel("stories/optical-flow.md")));
-        assert_eq!(
-            arc_index::note_for_story(&conn, 42.into()).unwrap(),
-            Some(rel("stories/optical-flow.md"))
-        );
-        let body = std::fs::read_to_string(notes.path().join("stories/optical-flow.md")).unwrap();
-        let fm = Frontmatter::from_note(&body).unwrap();
-        assert!(matches!(
-            fm.link,
-            EntityLink::Story { id, epic_url: Some(ref e), iteration_url: Some(_), .. } if id.get() == 42 && e == "https://epic"
-        ));
-        let err = create_story_note(&conn, notes.path(), &s, None, None, "again").unwrap_err();
-        assert!(err.to_string().contains("stories/optical-flow.md"), "{err}");
-    }
-
-    #[test]
-    fn create_story_note_sidesteps_another_storys_slug() {
-        let (_c, notes, conn) = setup();
-        create_story_note(&conn, notes.path(), &story(1, "Same Name"), None, None, "a").unwrap();
-        let created =
-            create_story_note(&conn, notes.path(), &story(2, "Same Name"), None, None, "b").unwrap();
-        assert_eq!(created, ("same-name-2".into(), rel("stories/same-name-2.md")));
-        assert_eq!(
-            arc_index::note_for_story(&conn, 2.into()).unwrap(),
-            Some(rel("stories/same-name-2.md"))
-        );
-        let (rel, body) = story_note(&conn, notes.path(), 1.into()).unwrap().unwrap();
-        assert_eq!(rel, "stories/same-name.md");
-        assert!(body.ends_with("a\n"));
-
-        std::fs::write(notes.path().join("stories/other.md"), "---\nid: other\n---\n").unwrap();
-        let created = create_story_note(&conn, notes.path(), &story(3, "Other"), None, None, "c").unwrap();
-        assert_eq!(created.1, "stories/other-3.md");
-    }
-
-    #[test]
-    fn create_story_note_finds_unindexed_note() {
-        let (_c, notes, conn) = setup();
-        std::fs::create_dir_all(notes.path().join("stories")).unwrap();
-        std::fs::write(
-            notes.path().join("stories/renamed.md"),
-            "---\nid: renamed\nstory_id: sc-5\n---\n",
-        )
-        .unwrap();
-        let err = create_story_note(&conn, notes.path(), &story(5, "Five"), None, None, "x")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("stories/renamed.md"), "{err}");
-        assert!(!notes.path().join("stories/five.md").exists());
-    }
-
-    #[test]
     fn append_by_unnormalised_path_keeps_one_index_row() {
         let (_c, notes, conn) = setup();
-        create_story_note(&conn, notes.path(), &story(8, "X"), None, None, "b").unwrap();
+        arc_context::create_story_note(&conn, notes.path(), &story(8, "X"), NoteLinks::default(), "b").unwrap();
         let rel = resolve(&conn, None, Some("./stories//x.md")).unwrap();
         assert_eq!(rel, "stories/x.md");
         append_note(&conn, notes.path(), &rel, "more").unwrap();
@@ -827,36 +663,6 @@ mod tests {
         assert!(resolve(&conn, None, Some("../x.md")).is_err());
         assert!(resolve(&conn, Some("nope"), None).is_err());
         assert!(resolve(&conn, None, None).is_err());
-    }
-
-    #[test]
-    fn story_note_scans_for_unindexed_notes() {
-        let (_c, notes, conn) = setup();
-        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
-
-        std::fs::create_dir_all(notes.path().join("stories")).unwrap();
-        std::fs::write(notes.path().join("stories/some-story.md"), "unindexed").unwrap();
-        std::fs::write(
-            notes.path().join("stories/a-other.md"),
-            "---\nid: a\nstory_id: sc-70\n---\n",
-        )
-        .unwrap();
-        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
-
-        let linked = "---\nid: some-story-7\nstory_id: sc-7\n---\nunindexed";
-        std::fs::write(notes.path().join("stories/some-story-7.md"), linked).unwrap();
-        assert_eq!(
-            story_note(&conn, notes.path(), 7.into()).unwrap(),
-            Some((rel("stories/some-story-7.md"), linked.into()))
-        );
-
-        std::fs::write(notes.path().join("other.md"), "indexed").unwrap();
-        arc_index::reindex_note(&conn, &rel("other.md"), "---\nid: o\nstory_id: sc-7\n---\n")
-            .unwrap();
-        assert_eq!(
-            story_note(&conn, notes.path(), 7.into()).unwrap(),
-            Some((rel("other.md"), "indexed".into()))
-        );
     }
 
     #[test]
@@ -990,7 +796,7 @@ mod tests {
     fn golden_slim_stories_json() {
         let (_c, notes, conn) = setup();
         let (mut cache, s) = golden_detail_story();
-        create_story_note(&conn, notes.path(), &s, None, None, "hi").unwrap();
+        arc_context::create_story_note(&conn, notes.path(), &s, NoteLinks::default(), "hi").unwrap();
         cache.iteration_stories = Some(vec![s, story(8, "eight")]);
         assert_eq!(
             slim_stories(&cache, &conn).unwrap(),

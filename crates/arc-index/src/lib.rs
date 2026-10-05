@@ -6,7 +6,7 @@ use rusqlite::OpenFlags;
 
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
 use arc_notes::todos::{Todo, TodoSource};
-use arc_notes::{BranchName, NoteRelPath};
+use arc_notes::{BranchName, NoteDir, NoteRelPath};
 use arc_core::StoryId;
 
 const DB_FILE: &str = "arc.db";
@@ -345,6 +345,47 @@ pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> 
     }
 }
 
+pub fn story_note(
+    conn: &Connection,
+    notes_dir: &Path,
+    story_id: StoryId,
+) -> Result<Option<(NoteRelPath, String)>> {
+    if let Some(rel) = note_for_story(conn, story_id)?
+        && let Some(body) = read_note(notes_dir, &rel)?
+    {
+        return Ok(Some((rel, body)));
+    }
+    scan_story_note(notes_dir, story_id)
+}
+
+pub fn scan_story_note(
+    notes_dir: &Path,
+    story_id: StoryId,
+) -> Result<Option<(NoteRelPath, String)>> {
+    let mut names: Vec<String> = match std::fs::read_dir(notes_dir.join(NoteDir::Stories)) {
+        Ok(dir) => dir
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    names.sort();
+    for stem in names.iter().filter_map(|n| n.strip_suffix(".md")) {
+        let rel = NoteRelPath::in_dir(NoteDir::Stories, stem);
+        if let Some(body) = read_note(notes_dir, &rel)?
+            && links_story(&body, story_id)
+        {
+            return Ok(Some((rel, body)));
+        }
+    }
+    Ok(None)
+}
+
+fn links_story(content: &str, story_id: StoryId) -> bool {
+    Frontmatter::from_note(content)
+        .is_some_and(|fm| matches!(fm.link, EntityLink::Story { id, .. } if id == story_id))
+}
+
 fn value_to_json(v: rusqlite::types::ValueRef) -> serde_json::Value {
     use rusqlite::types::ValueRef;
     match v {
@@ -529,6 +570,37 @@ mod tests {
             vec![rel("foo.md"), rel("stories/foo.md")]
         );
         assert!(note_paths_for_id(&conn, "bar").unwrap().is_empty());
+    }
+
+    #[test]
+    fn story_note_scans_for_unindexed_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let notes = tempfile::tempdir().unwrap();
+        let conn = open(tmp.path()).unwrap();
+        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
+
+        std::fs::create_dir_all(notes.path().join("stories")).unwrap();
+        std::fs::write(notes.path().join("stories/some-story.md"), "unindexed").unwrap();
+        std::fs::write(
+            notes.path().join("stories/a-other.md"),
+            "---\nid: a\nstory_id: sc-70\n---\n",
+        )
+        .unwrap();
+        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
+
+        let linked = "---\nid: some-story-7\nstory_id: sc-7\n---\nunindexed";
+        std::fs::write(notes.path().join("stories/some-story-7.md"), linked).unwrap();
+        assert_eq!(
+            story_note(&conn, notes.path(), 7.into()).unwrap(),
+            Some((rel("stories/some-story-7.md"), linked.into()))
+        );
+
+        std::fs::write(notes.path().join("other.md"), "indexed").unwrap();
+        reindex_note(&conn, &rel("other.md"), "---\nid: o\nstory_id: sc-7\n---\n").unwrap();
+        assert_eq!(
+            story_note(&conn, notes.path(), 7.into()).unwrap(),
+            Some((rel("other.md"), "indexed".into()))
+        );
     }
 
     #[test]

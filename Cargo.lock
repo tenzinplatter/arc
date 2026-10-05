@@ -96,6 +96,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-context"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-core",
+ "arc-index",
+ "arc-notes",
+ "arc-shortcut",
+ "chrono",
+ "serde",
+ "serde_json",
+ "slugify",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "arc-core"
 version = "0.1.0"
 dependencies = [
@@ -143,6 +161,7 @@ name = "arc-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-context",
  "arc-core",
  "arc-index",
  "arc-notes",

@@ -50,6 +50,7 @@ arc-core = { path = "crates/arc-core" }
 arc-shortcut = { path = "crates/arc-shortcut" }
 arc-notes = { path = "crates/arc-notes" }
 arc-index = { path = "crates/arc-index" }
+arc-context = { path = "crates/arc-context" }
 arc-mcp = { path = "crates/arc-mcp" }
 arc-daemon = { path = "crates/arc-daemon" }
 arc-tui = { path = "crates/arc-tui" }

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 arc-core = { workspace = true }
 arc-index = { workspace = true }
+arc-context = { workspace = true }
 arc-notes = { workspace = true }
 arc-shortcut = { workspace = true }
 anyhow = { workspace = true }

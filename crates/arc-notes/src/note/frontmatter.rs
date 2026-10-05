@@ -166,7 +166,8 @@ impl<'a> SplitNote<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
 pub struct BranchName(String);
 
 impl BranchName {
