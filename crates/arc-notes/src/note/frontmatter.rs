@@ -1,10 +1,12 @@
+use std::fmt;
+use std::ops::Range;
+
+use anyhow::{Context, bail};
 use arc_core::{EpicId, IterationId, StoryId};
 use chrono::NaiveDate;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_yaml::{Mapping, Value};
 
-/// The Shortcut entity a note is linked to. A note is about *at most one*
-/// entity — the enum makes "linked to a story AND an epic id" unrepresentable.
-/// (A story note still carries its iteration/epic *links* as context.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityLink {
     None,
@@ -27,23 +29,82 @@ pub enum EntityLink {
     },
 }
 
-/// Parsed frontmatter of a note. Mirrors the shape already on disk (Obsidian
-/// `id`/`aliases`/`tags` plus the Shortcut linkage), so reading is
-/// non-destructive and writing stays Obsidian-compatible.
+impl EntityLink {
+    pub fn kind(&self) -> Option<&'static str> {
+        match self {
+            EntityLink::None => None,
+            EntityLink::Story { .. } => Some("story"),
+            EntityLink::Iteration { .. } => Some("iteration"),
+            EntityLink::Epic { .. } => Some("epic"),
+        }
+    }
+
+    pub fn id_raw(&self) -> Option<i32> {
+        match self {
+            EntityLink::None => None,
+            EntityLink::Story { id, .. } => Some(id.get()),
+            EntityLink::Iteration { id, .. } => Some(id.get()),
+            EntityLink::Epic { id, .. } => Some(id.get()),
+        }
+    }
+
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            EntityLink::None => None,
+            EntityLink::Story { url, .. }
+            | EntityLink::Iteration { url, .. }
+            | EntityLink::Epic { url, .. } => Some(url),
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            EntityLink::None => None,
+            EntityLink::Story { name, .. }
+            | EntityLink::Iteration { name, .. }
+            | EntityLink::Epic { name, .. } => name.as_deref(),
+        }
+    }
+
+    pub fn iteration_url(&self) -> Option<&str> {
+        match self {
+            EntityLink::Story { iteration_url, .. } => iteration_url.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn epic_url(&self) -> Option<&str> {
+        match self {
+            EntityLink::Story { epic_url, .. } => epic_url.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
-    /// Obsidian slug — the filename stem.
     pub id: String,
     pub created: Option<NaiveDate>,
     pub note_type: Option<String>,
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
     pub link: EntityLink,
-    /// Git branches linked to this note (story notes).
     pub branches: Vec<String>,
 }
 
 impl Frontmatter {
+    fn created_today(slug: String, link: EntityLink) -> Self {
+        Self {
+            id: slug,
+            created: Some(arc_core::time::today()),
+            note_type: None,
+            tags: Vec::new(),
+            aliases: Vec::new(),
+            link,
+            branches: Vec::new(),
+        }
+    }
+
     pub fn story(
         slug: String,
         story_id: StoryId,
@@ -51,164 +112,181 @@ impl Frontmatter {
         story_url: String,
         iteration_url: Option<String>,
     ) -> Self {
-        Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
-            note_type: None,
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::Story {
+        Self::created_today(
+            slug,
+            EntityLink::Story {
                 id: story_id,
                 url: story_url,
                 name: Some(story_name),
                 iteration_url,
                 epic_url: None,
             },
-        }
+        )
     }
 
     pub fn iteration(slug: String, id: IterationId, name: String, url: String) -> Self {
-        Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
-            note_type: None,
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::Iteration {
-                id,
-                url,
-                name: Some(name),
-            },
-        }
+        Self::created_today(slug, EntityLink::Iteration { id, url, name: Some(name) })
     }
 
     pub fn epic(slug: String, id: EpicId, name: String, url: String) -> Self {
-        Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
-            note_type: None,
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::Epic {
-                id,
-                url,
-                name: Some(name),
-            },
-        }
+        Self::created_today(slug, EntityLink::Epic { id, url, name: Some(name) })
     }
 
-    /// A plain note with no Shortcut linkage (created via MCP, etc.).
     pub fn general(slug: String, tags: Vec<String>) -> Self {
         Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
-            note_type: None,
             tags,
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::None,
+            ..Self::created_today(slug, EntityLink::None)
         }
     }
 
     pub fn daily(slug: String) -> Self {
         Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
             note_type: Some("daily".into()),
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::None,
+            ..Self::created_today(slug, EntityLink::None)
         }
     }
 
     pub fn scratch(slug: String) -> Self {
         Self {
-            id: slug,
-            created: Some(arc_core::time::today()),
             note_type: Some("scratch".into()),
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            branches: Vec::new(),
-            link: EntityLink::None,
+            ..Self::created_today(slug, EntityLink::None)
         }
     }
 
-    /// Parse the frontmatter block out of a full note file. Returns `None` when
-    /// the file has no leading `---` fence or the YAML doesn't parse.
     pub fn from_note(content: &str) -> Option<Frontmatter> {
-        let yaml = extract_yaml(content)?;
-        let raw: RawFrontmatter = serde_yaml::from_str(yaml).ok()?;
-        Some(raw.into())
+        SplitNote::new(content)?.frontmatter()
     }
 
-    /// The `---\n…\n---\n` block for a fresh note.
     pub fn to_block(&self) -> anyhow::Result<String> {
         let raw = RawFrontmatter::from(self.clone());
         Ok(format!("---\n{}---\n", serde_yaml::to_string(&raw)?))
     }
 }
 
-/// Add `branch` to a note's `branches:` frontmatter. A text-level edit: every
-/// other byte of the note (comments, quoting, other keys, body) is untouched.
-/// No-op if already present. Errors rather than guess on layouts it can't
-/// edit confidently.
-pub fn add_branch(content: &str, branch: &str) -> anyhow::Result<String> {
-    use anyhow::{Context, bail};
+#[derive(Clone, Debug)]
+pub struct SplitNote<'a> {
+    content: &'a str,
+    yaml: Range<usize>,
+    body_start: usize,
+    newline: &'static str,
+}
 
-    if branch.is_empty() {
-        bail!("empty branch name");
+impl<'a> SplitNote<'a> {
+    /// Fences are whole lines after an optional BOM; an indented `---` or a `----` is YAML content.
+    pub fn new(content: &'a str) -> Option<Self> {
+        let bom = if content.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        let mut lines = content[bom..].split_inclusive('\n');
+        let open = lines.next()?;
+        if !open.ends_with('\n') || open.trim_end() != "---" {
+            return None;
+        }
+        let newline = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
+        let yaml_start = bom + open.len();
+        let mut pos = yaml_start;
+        for line in lines {
+            if line.trim_end() == "---" {
+                return Some(Self {
+                    content,
+                    yaml: yaml_start..pos,
+                    body_start: pos + line.len(),
+                    newline,
+                });
+            }
+            pos += line.len();
+        }
+        None
     }
-    let fenced = split_frontmatter(content).context("note has no frontmatter block")?;
-    let yaml = &content[fenced.yaml.clone()];
+
+    pub fn yaml(&self) -> &'a str {
+        &self.content[self.yaml.clone()]
+    }
+
+    pub fn body(&self) -> &'a str {
+        &self.content[self.body_start..]
+    }
+
+    pub fn frontmatter(&self) -> Option<Frontmatter> {
+        let raw: RawFrontmatter = serde_yaml::from_str(self.yaml()).ok()?;
+        Some(raw.into())
+    }
+
+    pub fn with_yaml(&self, yaml: &str) -> String {
+        format!(
+            "{}{yaml}{}",
+            &self.content[..self.yaml.start],
+            &self.content[self.yaml.end..]
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BranchName(String);
+
+impl BranchName {
+    pub fn parse(name: &str) -> anyhow::Result<Self> {
+        if name.is_empty() {
+            bail!("empty branch name");
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BranchName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn branches_key() -> Value {
+    Value::from("branches")
+}
+
+pub fn add_branch(content: &str, branch: &BranchName) -> anyhow::Result<String> {
+    let note = SplitNote::new(content).context("note has no frontmatter block")?;
+    let yaml = note.yaml();
     let before = parse_mapping(yaml)?;
-    let key = serde_yaml::Value::from("branches");
-    let existing = before.get(&key);
-    let old = existing.map(lenient_strings).unwrap_or_default();
-    if old.iter().any(|b| b == branch) {
+    let existing = before.get(branches_key());
+    let mut branches = existing.map(lenient_strings).unwrap_or_default();
+    if branches.iter().any(|b| b == branch.as_str()) {
         return Ok(content.to_string());
     }
 
-    let nl = fenced.newline;
-    let item = yaml_scalar(branch);
+    let nl = note.newline;
+    let item = yaml_scalar(branch.as_str());
     let new_yaml = match existing {
         None => format!("{yaml}branches:{nl}  - {item}{nl}"),
         Some(value) => edit_branches(yaml, value, &item, nl)?,
     };
 
-    // Verify the edit did exactly one thing: appended `branch`.
-    let after = parse_mapping(&new_yaml).context("edited frontmatter no longer parses")?;
-    let got = after.get(&key).map(lenient_strings).unwrap_or_default();
-    let mut want = old;
-    want.push(branch.to_string());
-    let without = |mut m: serde_yaml::Mapping| {
-        m.remove(&key);
-        m
-    };
-    if got != want || without(before) != without(after) {
-        bail!("refusing to edit frontmatter: adding the branch would disturb other values");
-    }
-
-    Ok(format!(
-        "{}{new_yaml}{}",
-        &content[..fenced.yaml.start],
-        &content[fenced.yaml.end..]
-    ))
+    branches.push(branch.as_str().to_string());
+    ensure_only_branches_changed(before, &new_yaml, &branches)?;
+    Ok(note.with_yaml(&new_yaml))
 }
 
-/// Rewrite an existing `branches:` entry in `yaml` to also list `item`.
-fn edit_branches(
-    yaml: &str,
-    value: &serde_yaml::Value,
-    item: &str,
-    nl: &str,
-) -> anyhow::Result<String> {
-    use anyhow::bail;
-    use serde_yaml::Value;
+fn ensure_only_branches_changed(
+    mut before: Mapping,
+    new_yaml: &str,
+    want_branches: &[String],
+) -> anyhow::Result<()> {
+    let mut after = parse_mapping(new_yaml).context("edited frontmatter no longer parses")?;
+    let got = after.get(branches_key()).map(lenient_strings).unwrap_or_default();
+    before.remove(branches_key());
+    after.remove(branches_key());
+    if got != want_branches || before != after {
+        bail!("refusing to edit frontmatter: adding the branch would disturb other values");
+    }
+    Ok(())
+}
 
+fn edit_branches(yaml: &str, value: &Value, item: &str, nl: &str) -> anyhow::Result<String> {
     let lines: Vec<(usize, &str)> = yaml
         .split_inclusive('\n')
         .scan(0, |off, l| {
@@ -258,13 +336,12 @@ fn edit_branches(
             Ok(insert_after(close, format!(", {item}")))
         }
         Value::Sequence(_) if rest.is_empty() || rest.starts_with('#') => {
-            // The block list: following blank/indented/`-` lines.
-            let region = lines[idx + 1..]
+            let block_list = lines[idx + 1..]
                 .iter()
                 .take_while(|(_, l)| l.trim().is_empty() || l.starts_with([' ', '\t', '-']));
             let mut indent = None;
             let mut last_end = None;
-            for &(off, l) in region {
+            for &(off, l) in block_list {
                 let body = l.trim_start();
                 if body.is_empty() || body.starts_with('#') {
                     continue;
@@ -283,23 +360,19 @@ fn edit_branches(
     }
 }
 
-/// Parse frontmatter YAML as a mapping; empty frontmatter is an empty mapping.
-fn parse_mapping(yaml: &str) -> anyhow::Result<serde_yaml::Mapping> {
+fn parse_mapping(yaml: &str) -> anyhow::Result<Mapping> {
     match serde_yaml::from_str(yaml)? {
-        serde_yaml::Value::Null => Ok(Default::default()),
-        serde_yaml::Value::Mapping(m) => Ok(m),
-        _ => anyhow::bail!("frontmatter is not a mapping"),
+        Value::Null => Ok(Default::default()),
+        Value::Mapping(m) => Ok(m),
+        _ => bail!("frontmatter is not a mapping"),
     }
 }
 
-/// `s` as a YAML scalar: plain when unambiguous, else double-quoted. Valid in
-/// both block and flow context.
 fn yaml_scalar(s: &str) -> String {
     let plain = s
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
-        && serde_yaml::from_str::<serde_yaml::Value>(s).ok()
-            == Some(serde_yaml::Value::String(s.into()));
+        && serde_yaml::from_str::<Value>(s).ok() == Some(Value::String(s.into()));
     if plain {
         return s.to_string();
     }
@@ -316,52 +389,7 @@ fn yaml_scalar(s: &str) -> String {
     out
 }
 
-/// Byte layout of a note's leading frontmatter block.
-struct Fenced {
-    /// The YAML between the fences.
-    yaml: std::ops::Range<usize>,
-    /// Line ending of the opening fence (`\n` or `\r\n`).
-    newline: &'static str,
-}
-
-/// Locate the frontmatter: an optional BOM, a first line that is exactly
-/// `---`, and the next line that is exactly `---` (trailing whitespace
-/// allowed on both). An indented `---` is YAML content, not a fence.
-fn split_frontmatter(content: &str) -> Option<Fenced> {
-    let start = if content.starts_with('\u{feff}') {
-        '\u{feff}'.len_utf8()
-    } else {
-        0
-    };
-    let mut lines = content[start..].split_inclusive('\n');
-    let open = lines.next()?;
-    if !open.ends_with('\n') || open.trim_end() != "---" {
-        return None;
-    }
-    let newline = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
-    let yaml_start = start + open.len();
-    let mut pos = yaml_start;
-    for line in lines {
-        if line.trim_end() == "---" {
-            return Some(Fenced {
-                yaml: yaml_start..pos,
-                newline,
-            });
-        }
-        pos += line.len();
-    }
-    None
-}
-
-/// Slice the YAML between the frontmatter fences.
-fn extract_yaml(content: &str) -> Option<&str> {
-    split_frontmatter(content).map(|f| &content[f.yaml])
-}
-
-/// A string list read leniently: a single string or number becomes one item,
-/// non-scalar list items are skipped, anything else is empty.
-fn lenient_strings(v: &serde_yaml::Value) -> Vec<String> {
-    use serde_yaml::Value;
+fn lenient_strings(v: &Value) -> Vec<String> {
     let one = |v: &Value| match v {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -374,17 +402,13 @@ fn lenient_strings(v: &serde_yaml::Value) -> Vec<String> {
 }
 
 fn de_string_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    Ok(lenient_strings(&serde_yaml::Value::deserialize(d)?))
+    Ok(lenient_strings(&Value::deserialize(d)?))
 }
 
-/// Strip a `sc-`/`it-`/`ep-` prefix and parse the numeric id.
 fn parse_prefixed_id(s: &str) -> Option<i32> {
     s.rsplit('-').next()?.parse().ok()
 }
 
-/// Faithful mirror of on-disk YAML — every field optional, so any real note
-/// (including plain Obsidian notes and legacy shapes) deserializes. Used for
-/// both read and write; `skip_serializing_if` keeps written blocks tidy.
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct RawFrontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,14 +430,12 @@ struct RawFrontmatter {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     note_type: Option<String>,
 
-    // Story note
     #[serde(skip_serializing_if = "Option::is_none")]
     story_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     story_link: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     story_name: Option<String>,
-    /// A story note's link to its iteration/epic.
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -425,7 +447,6 @@ struct RawFrontmatter {
     )]
     branches: Vec<String>,
 
-    // Iteration note
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,7 +454,6 @@ struct RawFrontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_name: Option<String>,
 
-    // Epic note
     #[serde(skip_serializing_if = "Option::is_none")]
     epic_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -444,7 +464,6 @@ struct RawFrontmatter {
 
 impl From<RawFrontmatter> for Frontmatter {
     fn from(r: RawFrontmatter) -> Self {
-        // Classify by which id is present. A note links to at most one entity.
         let link = if let Some(id) = r.story_id.as_deref().and_then(parse_prefixed_id) {
             EntityLink::Story {
                 id: id.into(),
@@ -526,6 +545,60 @@ impl From<Frontmatter> for RawFrontmatter {
 mod tests {
     use super::*;
 
+    fn br(name: &str) -> BranchName {
+        BranchName::parse(name).unwrap()
+    }
+
+    #[test]
+    fn branch_name_rejects_only_empty() {
+        assert!(BranchName::parse("").is_err());
+        assert_eq!(BranchName::parse(" x ").unwrap().as_str(), " x ");
+    }
+
+    #[test]
+    fn split_note_exposes_yaml_body_and_replacement() {
+        let content = "\u{feff}---\r\nid: a\r\n---\r\nbody\r\n";
+        let note = SplitNote::new(content).unwrap();
+        assert_eq!(note.yaml(), "id: a\r\n");
+        assert_eq!(note.body(), "body\r\n");
+        assert_eq!(note.frontmatter().unwrap().id, "a");
+        assert_eq!(note.with_yaml("id: b\r\n"), "\u{feff}---\r\nid: b\r\n---\r\nbody\r\n");
+        assert!(SplitNote::new("---\n: [\n---\n").unwrap().frontmatter().is_none());
+    }
+
+    #[test]
+    fn entity_link_columns_match_variant() {
+        let story = EntityLink::Story {
+            id: 7.into(),
+            url: "https://s/7".into(),
+            name: Some("S".into()),
+            iteration_url: Some("https://it/3".into()),
+            epic_url: None,
+        };
+        assert_eq!(story.kind(), Some("story"));
+        assert_eq!(story.id_raw(), Some(7));
+        assert_eq!(story.url(), Some("https://s/7"));
+        assert_eq!(story.name(), Some("S"));
+        assert_eq!(story.iteration_url(), Some("https://it/3"));
+        assert_eq!(story.epic_url(), None);
+
+        let iteration = EntityLink::Iteration { id: 3.into(), url: "u".into(), name: None };
+        assert_eq!(iteration.kind(), Some("iteration"));
+        assert_eq!(iteration.id_raw(), Some(3));
+        assert_eq!(iteration.name(), None);
+        assert_eq!(iteration.iteration_url(), None);
+
+        let epic = EntityLink::Epic { id: 4.into(), url: "e".into(), name: Some("E".into()) };
+        assert_eq!(epic.kind(), Some("epic"));
+        assert_eq!(epic.url(), Some("e"));
+
+        let none = EntityLink::None;
+        assert_eq!(
+            (none.kind(), none.id_raw(), none.url(), none.name(), none.iteration_url(), none.epic_url()),
+            (None, None, None, None, None, None)
+        );
+    }
+
     #[test]
     fn reads_story_note() {
         let content = "---\nid: my-story\naliases: []\ntags: [a]\ncreated: \"2026-03-31\"\niteration: https://it/1\nstory_id: sc-19559\nstory_link: https://s/19559\n---\n\nbody";
@@ -585,15 +658,15 @@ mod tests {
     #[test]
     fn add_branch_is_idempotent_and_keeps_body() {
         let content = "---\nid: s\nstory_id: sc-42\n---\n\n# Title\n\nbody\n";
-        let once = add_branch(content, "feat-x").unwrap();
-        let twice = add_branch(&once, "feat-x").unwrap();
+        let once = add_branch(content, &br("feat-x")).unwrap();
+        let twice = add_branch(&once, &br("feat-x")).unwrap();
         assert_eq!(once, twice);
         assert!(once.ends_with("\n---\n\n# Title\n\nbody\n"));
         let fm = Frontmatter::from_note(&once).unwrap();
         assert_eq!(fm.branches, vec!["feat-x"]);
         assert!(matches!(fm.link, EntityLink::Story { id, .. } if id.get() == 42));
 
-        let more = add_branch(&once, "feat-y").unwrap();
+        let more = add_branch(&once, &br("feat-y")).unwrap();
         assert_eq!(
             Frontmatter::from_note(&more).unwrap().branches,
             vec!["feat-x", "feat-y"]
@@ -603,7 +676,7 @@ mod tests {
     #[test]
     fn add_branch_preserves_unknown_keys() {
         let content = "---\nid: s\ncssclasses: [wide]\npublish: true\nbranches:\n---\nbody";
-        let out = add_branch(content, "b").unwrap();
+        let out = add_branch(content, &br("b")).unwrap();
         assert_eq!(
             out,
             "---\nid: s\ncssclasses: [wide]\npublish: true\nbranches:\n  - b\n---\nbody"
@@ -613,24 +686,22 @@ mod tests {
 
     #[test]
     fn fences_are_whole_lines() {
-        // Empty frontmatter, then a body containing `Note:` and a `---` rule.
         let content = "---\n---\n# Meeting\nNote: remember X\n\n---\nfooter\n";
-        assert_eq!(extract_yaml(content), Some(""));
-        let out = add_branch(content, "b").unwrap();
+        assert_eq!(SplitNote::new(content).map(|n| n.yaml()), Some(""));
+        let out = add_branch(content, &br("b")).unwrap();
         assert_eq!(
             out,
             "---\nbranches:\n  - b\n---\n# Meeting\nNote: remember X\n\n---\nfooter\n"
         );
 
-        // `----` and indented `---` don't close the block.
         let content = "---\nid: a\nnote: |\n  ---\n  x\n----\n---\nbody";
         assert_eq!(
-            extract_yaml(content),
+            SplitNote::new(content).map(|n| n.yaml()),
             Some("id: a\nnote: |\n  ---\n  x\n----\n")
         );
-        assert!(extract_yaml("---\nid: a\n").is_none());
-        assert!(extract_yaml("--- \nid: a\n---  \n").is_some());
-        assert!(extract_yaml("x\n---\nid: a\n---\n").is_none());
+        assert!(SplitNote::new("---\nid: a\n").map(|n| n.yaml()).is_none());
+        assert!(SplitNote::new("--- \nid: a\n---  \n").map(|n| n.yaml()).is_some());
+        assert!(SplitNote::new("x\n---\nid: a\n---\n").map(|n| n.yaml()).is_none());
     }
 
     #[test]
@@ -662,7 +733,7 @@ mod tests {
     fn add_branch_leaves_other_bytes_alone() {
         let head = "---\n# arc metadata\nid: s # slug\ncreated: \"2026-03-31\"\nversion: 1.10\nsummary: >\n  folded\n  text\n";
         let body = "---\n\n# Title\n\n---\nbody with trailing spaces  \n";
-        let out = add_branch(&format!("{head}{body}"), "feat/x").unwrap();
+        let out = add_branch(&format!("{head}{body}"), &br("feat/x")).unwrap();
         assert_eq!(out, format!("{head}branches:\n  - feat/x\n{body}"));
     }
 
@@ -670,12 +741,12 @@ mod tests {
     fn add_branch_appends_to_block_list() {
         let content = "---\nid: s\nbranches:\n    - a # first\n    - b\n\ntags: [t]\n---\nbody";
         assert_eq!(
-            add_branch(content, "c").unwrap(),
+            add_branch(content, &br("c")).unwrap(),
             "---\nid: s\nbranches:\n    - a # first\n    - b\n    - c\n\ntags: [t]\n---\nbody"
         );
         let content = "---\nbranches:\n- a\n---\n";
         assert_eq!(
-            add_branch(content, "c").unwrap(),
+            add_branch(content, &br("c")).unwrap(),
             "---\nbranches:\n- a\n- c\n---\n"
         );
     }
@@ -683,51 +754,50 @@ mod tests {
     #[test]
     fn add_branch_flow_empty_and_scalar() {
         assert_eq!(
-            add_branch("---\nbranches: [a, 'b']\nx: 1\n---\n", "c").unwrap(),
+            add_branch("---\nbranches: [a, 'b']\nx: 1\n---\n", &br("c")).unwrap(),
             "---\nbranches: [a, 'b', c]\nx: 1\n---\n"
         );
         assert_eq!(
-            add_branch("---\nbranches: []\nx: 1\n---\n", "c").unwrap(),
+            add_branch("---\nbranches: []\nx: 1\n---\n", &br("c")).unwrap(),
             "---\nbranches:\n  - c\nx: 1\n---\n"
         );
         assert_eq!(
-            add_branch("---\nbranches: ~\n---\n", "c").unwrap(),
+            add_branch("---\nbranches: ~\n---\n", &br("c")).unwrap(),
             "---\nbranches:\n  - c\n---\n"
         );
         assert_eq!(
-            add_branch("---\nbranches: main\nx: 1\n---\n", "c").unwrap(),
+            add_branch("---\nbranches: main\nx: 1\n---\n", &br("c")).unwrap(),
             "---\nbranches:\n  - main\n  - c\nx: 1\n---\n"
         );
-        // Already listed as a scalar: no-op.
         let content = "---\nbranches: main\n---\n";
-        assert_eq!(add_branch(content, "main").unwrap(), content);
+        assert_eq!(add_branch(content, &br("main")).unwrap(), content);
     }
 
     #[test]
     fn add_branch_crlf_and_bom() {
         let content = "\u{feff}---\r\nid: s\r\nbranches:\r\n  - a\r\n---\r\nbody\r\n";
-        let out = add_branch(content, "b").unwrap();
+        let out = add_branch(content, &br("b")).unwrap();
         assert_eq!(
             out,
             "\u{feff}---\r\nid: s\r\nbranches:\r\n  - a\r\n  - b\r\n---\r\nbody\r\n"
         );
-        assert_eq!(add_branch(&out, "b").unwrap(), out);
+        assert_eq!(add_branch(&out, &br("b")).unwrap(), out);
 
-        let out = add_branch("---\r\nid: s\r\n---\r\n", "b").unwrap();
+        let out = add_branch("---\r\nid: s\r\n---\r\n", &br("b")).unwrap();
         assert_eq!(out, "---\r\nid: s\r\nbranches:\r\n  - b\r\n---\r\n");
     }
 
     #[test]
     fn add_branch_quotes_ambiguous_names() {
-        let out = add_branch("---\nid: s\n---\n", "true").unwrap();
+        let out = add_branch("---\nid: s\n---\n", &br("true")).unwrap();
         assert!(out.contains("  - \"true\"\n"));
-        let out = add_branch(&out, "a: b#c").unwrap();
+        let out = add_branch(&out, &br("a: b#c")).unwrap();
         assert!(out.contains("  - \"a: b#c\"\n"));
         assert_eq!(
             Frontmatter::from_note(&out).unwrap().branches,
             vec!["true", "a: b#c"]
         );
-        let out = add_branch("---\nbranches: [a]\n---\n", "x,y").unwrap();
+        let out = add_branch("---\nbranches: [a]\n---\n", &br("x,y")).unwrap();
         assert_eq!(out, "---\nbranches: [a, \"x,y\"]\n---\n");
     }
 
@@ -743,15 +813,14 @@ mod tests {
             "---\nid: [unclosed\n---\n",
             "---\nbranches:\n  - a\n# interrupting comment\n  - b\n---\n",
         ] {
-            assert!(add_branch(content, "z").is_err(), "{content:?}");
+            assert!(add_branch(content, &br("z")).is_err(), "{content:?}");
         }
-        assert!(add_branch("---\nid: s\n---\n", "").is_err());
     }
 
     #[test]
     fn add_branch_requires_frontmatter() {
-        assert!(add_branch("# no fence\n", "b").is_err());
-        assert!(add_branch("---\nid: s\n", "b").is_err());
+        assert!(add_branch("# no fence\n", &br("b")).is_err());
+        assert!(add_branch("---\nid: s\n", &br("b")).is_err());
     }
 
     fn pinned_block(mut fm: Frontmatter) -> String {

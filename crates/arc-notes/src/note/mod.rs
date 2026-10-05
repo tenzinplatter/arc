@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use slugify::slugify;
 
 use crate::note::frontmatter::Frontmatter;
+use crate::path::{NoteDir, NoteRelPath};
 
 pub mod frontmatter;
 
@@ -20,12 +21,9 @@ impl Note {
         iteration_app_url: Option<String>,
     ) -> Self {
         let slug = slugify!(&story_name);
+        let path = NoteRelPath::in_dir(NoteDir::Stories, &slug).abs(notes_dir.as_ref());
         let frontmatter =
-            Frontmatter::story(slug.clone(), story_id, story_name, story_app_url, iteration_app_url);
-        let mut path = PathBuf::from(notes_dir.as_ref());
-        path.push("stories");
-        path.push(format!("{slug}.md"));
-
+            Frontmatter::story(slug, story_id, story_name, story_app_url, iteration_app_url);
         Self { frontmatter, path }
     }
 }

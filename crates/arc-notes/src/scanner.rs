@@ -5,7 +5,11 @@ use std::sync::OnceLock;
 use chrono::NaiveDate;
 use regex::Regex;
 
+use uuid::Uuid;
+
+use crate::checkbox::split_checkbox;
 use crate::path::NoteRelPath;
+use crate::todos::{Todo, TodoSource};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTodo {
@@ -15,6 +19,22 @@ pub struct ParsedTodo {
     pub file: NoteRelPath,
     pub line: u32,
     pub fingerprint: u64,
+}
+
+impl ParsedTodo {
+    pub fn into_todo(self, id: Uuid) -> Todo {
+        Todo {
+            id,
+            text: self.text,
+            date: self.date,
+            completed: self.completed,
+            source: TodoSource::NoteParsed {
+                file: self.file,
+                line: self.line,
+                fingerprint: self.fingerprint,
+            },
+        }
+    }
 }
 
 fn date_token_regex() -> &'static Regex {
@@ -34,14 +54,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
 
     for (idx, raw_line) in content.lines().enumerate() {
         let line_no = (idx as u32) + 1;
-        let trimmed = raw_line.trim_start();
-        let (completed, rest) = if let Some(r) = trimmed.strip_prefix("- [ ] ") {
-            (false, r)
-        } else if let Some(r) = trimmed.strip_prefix("- [x] ") {
-            (true, r)
-        } else if let Some(r) = trimmed.strip_prefix("- [X] ") {
-            (true, r)
-        } else {
+        let Some((checkbox, rest)) = split_checkbox(raw_line.trim_start()) else {
             continue;
         };
 
@@ -66,7 +79,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
 
         out.push(ParsedTodo {
             text,
-            completed,
+            completed: checkbox.is_done(),
             date,
             file: file.clone(),
             line: line_no,
@@ -77,9 +90,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
     out
 }
 
-/// Hash of file path + normalized text. Used to identify "same todo" across rescans.
-/// Uses stdlib's `DefaultHasher`; values may rotate on Rust toolchain upgrades,
-/// which causes a one-time mass re-id of every note-parsed todo. Acceptable tradeoff.
+/// `DefaultHasher` output may change across Rust toolchains, re-iding every note-parsed todo once.
 pub fn fingerprint(file: &Path, normalized_text: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     file.hash(&mut h);
@@ -167,11 +178,27 @@ mod tests {
 
     #[test]
     fn fingerprint_stable_across_line_moves() {
-        // Same text on different lines → same fingerprint
         let a = parse_note("- [ ] x", &f());
         let b = parse_note("# header\n\n- [ ] x", &f());
         assert_eq!(a[0].fingerprint, b[0].fingerprint);
         assert_ne!(a[0].line, b[0].line);
+    }
+
+    #[test]
+    fn into_todo_keeps_parsed_fields_as_note_source() {
+        let p = parse_note("- [x] ship @10-06-2026", &f()).remove(0);
+        let fp = p.fingerprint;
+        let todo = p.into_todo(Uuid::nil());
+        assert_eq!(
+            todo,
+            Todo {
+                id: Uuid::nil(),
+                text: "ship".into(),
+                date: NaiveDate::from_ymd_opt(2026, 6, 10),
+                completed: true,
+                source: TodoSource::NoteParsed { file: f(), line: 1, fingerprint: fp },
+            }
+        );
     }
 
     #[test]

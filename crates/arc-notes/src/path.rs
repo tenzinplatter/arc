@@ -4,6 +4,47 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoteDir {
+    Daily,
+    Stories,
+    Iterations,
+    Epics,
+    Scratch,
+}
+
+impl NoteDir {
+    pub const ALL: [NoteDir; 5] = [
+        NoteDir::Daily,
+        NoteDir::Stories,
+        NoteDir::Iterations,
+        NoteDir::Epics,
+        NoteDir::Scratch,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoteDir::Daily => "daily",
+            NoteDir::Stories => "stories",
+            NoteDir::Iterations => "iterations",
+            NoteDir::Epics => "epics",
+            NoteDir::Scratch => "scratch",
+        }
+    }
+}
+
+impl fmt::Display for NoteDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<Path> for NoteDir {
+    fn as_ref(&self) -> &Path {
+        Path::new(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NoteRelPath(String);
@@ -34,6 +75,10 @@ impl NoteRelPath {
     pub fn from_abs(notes_dir: &Path, abs: &Path) -> Option<Self> {
         let rel = abs.strip_prefix(notes_dir).ok()?;
         rel.to_str().map(|s| Self(s.to_owned()))
+    }
+
+    pub fn in_dir(dir: NoteDir, slug: &str) -> Self {
+        Self(format!("{dir}/{slug}.md"))
     }
 
     pub fn from_trusted(rel: String) -> Self {
@@ -92,6 +137,13 @@ mod tests {
         for bad in ["../a.md", "stories/../../a.md", "/etc/a.md", "", ".", "a.txt", "stories"] {
             assert!(NoteRelPath::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn note_dirs_name_their_on_disk_folders() {
+        let names: Vec<&str> = NoteDir::ALL.iter().map(|d| d.as_str()).collect();
+        assert_eq!(names, ["daily", "stories", "iterations", "epics", "scratch"]);
+        assert_eq!(NoteRelPath::in_dir(NoteDir::Stories, "a-b").as_str(), "stories/a-b.md");
     }
 
     #[test]
