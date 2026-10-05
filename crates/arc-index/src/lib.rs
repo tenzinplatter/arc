@@ -278,29 +278,26 @@ fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, b
         anyhow::bail!("only read-only queries are allowed");
     }
     let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let mut rows = stmt.query([])?;
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut truncated = false;
-    while let Some(row) = rows.next()? {
-        if out.len() >= max_rows {
-            truncated = true;
-            break;
-        }
-        let mut obj = serde_json::Map::new();
-        for (i, name) in cols.iter().enumerate() {
-            obj.insert(name.clone(), value_to_json(row.get_ref(i)?));
-        }
-        out.push(serde_json::Value::Object(obj));
-    }
+    let mut objects = stmt.query([])?.mapped(|row| row_to_json(row, &cols));
+    let out = objects
+        .by_ref()
+        .take(max_rows)
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let truncated = objects.next().transpose()?.is_some();
     Ok((serde_json::to_string(&out)?, truncated))
 }
 
+fn row_to_json(row: &rusqlite::Row, cols: &[String]) -> rusqlite::Result<serde_json::Value> {
+    cols.iter()
+        .enumerate()
+        .map(|(i, name)| Ok((name.clone(), value_to_json(row.get_ref(i)?))))
+        .collect::<rusqlite::Result<serde_json::Map<_, _>>>()
+        .map(serde_json::Value::Object)
+}
+
 fn stored_paths(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Result<Vec<NoteRelPath>> {
-    let mut out = Vec::new();
-    for row in rows {
-        out.extend(NoteRelPath::from_stored(row?));
-    }
-    Ok(out)
+    let paths = rows.collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(paths.into_iter().filter_map(NoteRelPath::from_stored).collect())
 }
 
 pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<NoteRelPath>> {
@@ -328,16 +325,16 @@ pub fn story_for_branch(
          WHERE b.branch = ?1 AND n.link_kind = 'story'
          ORDER BY n.path NOT LIKE 'stories/%', n.path",
     )?;
-    let mut rows = stmt.query_map([branch.as_str()], |r| {
-        Ok((StoryId::from(r.get::<_, i32>(0)?), r.get::<_, String>(1)?))
-    })?;
-    for row in &mut rows {
-        let (id, path) = row?;
-        if let Some(rel) = NoteRelPath::from_stored(path) {
-            return Ok(Some((id, rel)));
-        }
-    }
-    Ok(None)
+    let found = stmt
+        .query_map([branch.as_str()], |r| {
+            Ok((StoryId::from(r.get::<_, i32>(0)?), r.get::<_, String>(1)?))
+        })?
+        .find_map(|row| match row {
+            Ok((id, path)) => NoteRelPath::from_stored(path).map(|rel| Ok((id, rel))),
+            Err(e) => Some(Err(e)),
+        })
+        .transpose()?;
+    Ok(found)
 }
 
 pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> {

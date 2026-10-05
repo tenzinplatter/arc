@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::checkbox::{Checkbox, split_checkbox};
@@ -71,15 +71,10 @@ fn open_lock(cache_dir: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 fn read_todos_inner(cache_dir: &Path) -> Vec<Todo> {
-    let path = todos_path(cache_dir);
-    let Ok(mut f) = std::fs::File::open(&path) else {
-        return Vec::new();
-    };
-    let mut buf = String::new();
-    if f.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-    serde_json::from_str(&buf).unwrap_or_default()
+    std::fs::read_to_string(todos_path(cache_dir))
+        .ok()
+        .and_then(|buf| serde_json::from_str(&buf).ok())
+        .unwrap_or_default()
 }
 
 fn write_todos_inner(cache_dir: &Path, todos: &[Todo]) -> anyhow::Result<()> {
@@ -116,13 +111,23 @@ pub async fn modify_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<T
 where
     F: FnOnce(&mut Vec<Todo>) + Send + 'static,
 {
+    transform_with_lock(cache_dir, move |mut list| {
+        f(&mut list);
+        list
+    })
+    .await
+}
+
+pub async fn transform_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
+where
+    F: FnOnce(Vec<Todo>) -> Vec<Todo> + Send + 'static,
+{
     let cache_dir = cache_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let lock = open_lock(&cache_dir)?;
         FileExt::lock_exclusive(&lock)?;
         let result = (|| {
-            let mut list = read_todos_inner(&cache_dir);
-            f(&mut list);
+            let list = f(read_todos_inner(&cache_dir));
             write_todos_inner(&cache_dir, &list)?;
             Ok::<_, anyhow::Error>(list)
         })();
@@ -133,22 +138,12 @@ where
 }
 
 fn rewrite_checkbox_line(content: &str, line_1based: u32, state: Checkbox) -> Option<String> {
-    if line_1based == 0 {
-        return None;
-    }
-    let target_idx = (line_1based - 1) as usize;
-    let mut out = String::with_capacity(content.len());
-    let mut found = false;
-    for (idx, segment) in content.split_inclusive('\n').enumerate() {
-        if idx == target_idx {
-            let rewritten = rewrite_checkbox_in_segment(segment, state)?;
-            out.push_str(&rewritten);
-            found = true;
-        } else {
-            out.push_str(segment);
-        }
-    }
-    found.then_some(out)
+    let target_idx = line_1based.checked_sub(1)? as usize;
+    let segments: Vec<&str> = content.split_inclusive('\n').collect();
+    let (before, rest) = segments.split_at_checked(target_idx)?;
+    let (target, after) = rest.split_first()?;
+    let rewritten = rewrite_checkbox_in_segment(target, state)?;
+    Some(format!("{}{rewritten}{}", before.concat(), after.concat()))
 }
 
 fn rewrite_checkbox_in_segment(segment: &str, state: Checkbox) -> Option<String> {

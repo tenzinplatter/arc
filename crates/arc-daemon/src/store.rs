@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use arc_notes::NoteRelPath;
 use arc_notes::scanner::ParsedTodo;
-use arc_notes::todos::{Todo, TodoSource, modify_with_lock};
+use arc_notes::todos::{Todo, TodoSource, transform_with_lock};
 
 pub async fn merge_file(
     cache_dir: &Path,
@@ -13,22 +13,23 @@ pub async fn merge_file(
     parsed: Vec<ParsedTodo>,
 ) -> Result<Vec<Todo>> {
     let file = file.clone();
-    modify_with_lock(cache_dir, move |list| {
-        let mut unmatched = parsed;
-        let mut next: Vec<Todo> = Vec::with_capacity(list.len() + unmatched.len());
-        for todo in list.drain(..) {
-            let Some(fp) = fingerprint_from(&todo, &file) else {
-                next.push(todo);
-                continue;
-            };
-            if let Some(pos) = unmatched.iter().position(|p| p.fingerprint == fp) {
-                next.push(unmatched.remove(pos).into_todo(todo.id));
-            }
-        }
-        next.extend(unmatched.into_iter().map(|p| p.into_todo(Uuid::new_v4())));
-        *list = next;
-    })
-    .await
+    transform_with_lock(cache_dir, move |list| merge(list, &file, parsed)).await
+}
+
+fn merge(list: Vec<Todo>, file: &NoteRelPath, mut unmatched: Vec<ParsedTodo>) -> Vec<Todo> {
+    let kept: Vec<Todo> = list
+        .into_iter()
+        .filter_map(|todo| match fingerprint_from(&todo, file) {
+            None => Some(todo),
+            Some(fp) => unmatched
+                .iter()
+                .position(|p| p.fingerprint == fp)
+                .map(|pos| unmatched.remove(pos).into_todo(todo.id)),
+        })
+        .collect();
+    kept.into_iter()
+        .chain(unmatched.into_iter().map(|p| p.into_todo(Uuid::new_v4())))
+        .collect()
 }
 
 fn fingerprint_from(todo: &Todo, file: &NoteRelPath) -> Option<u64> {
@@ -40,11 +41,13 @@ fn fingerprint_from(todo: &Todo, file: &NoteRelPath) -> Option<u64> {
 
 pub async fn drop_file(cache_dir: &Path, file: &NoteRelPath) -> Result<Vec<Todo>> {
     let file = file.clone();
-    modify_with_lock(cache_dir, move |list| {
-        list.retain(|t| match &t.source {
-            TodoSource::NoteParsed { file: f, .. } => f != &file,
-            _ => true,
-        });
+    transform_with_lock(cache_dir, move |list| {
+        list.into_iter()
+            .filter(|t| match &t.source {
+                TodoSource::NoteParsed { file: f, .. } => f != &file,
+                _ => true,
+            })
+            .collect()
     })
     .await
 }

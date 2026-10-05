@@ -51,17 +51,19 @@ pub struct NoteRelPath(String);
 
 impl NoteRelPath {
     pub fn parse(rel: &str) -> anyhow::Result<Self> {
-        let mut parts = Vec::new();
-        for c in Path::new(rel).components() {
-            match c {
-                Component::Normal(p) => parts.push(
+        let parts = Path::new(rel)
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(p) => Some(
                     p.to_str()
-                        .ok_or_else(|| anyhow!("path must be valid UTF-8: '{rel}'"))?,
+                        .ok_or_else(|| anyhow!("path must be valid UTF-8: '{rel}'")),
                 ),
-                Component::CurDir => {}
-                _ => bail!("path must be relative to the notes dir without `..`: '{rel}'"),
-            }
-        }
+                Component::CurDir => None,
+                _ => Some(Err(anyhow!(
+                    "path must be relative to the notes dir without `..`: '{rel}'"
+                ))),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         if parts.is_empty() {
             bail!("path must be relative to the notes dir without `..`: '{rel}'");
         }
@@ -78,11 +80,10 @@ impl NoteRelPath {
     }
 
     pub fn from_stored(rel: String) -> Option<Self> {
-        let mut components = Path::new(&rel).components().peekable();
-        components.peek()?;
-        components
-            .all(|c| matches!(c, Component::Normal(_)))
-            .then_some(Self(rel))
+        let components = || Path::new(&rel).components();
+        let valid = components().next().is_some()
+            && components().all(|c| matches!(c, Component::Normal(_)));
+        valid.then_some(Self(rel))
     }
 
     pub fn in_dir(dir: NoteDir, slug: &str) -> Self {

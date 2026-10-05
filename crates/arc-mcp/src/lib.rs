@@ -153,17 +153,18 @@ impl ArcMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let story_id = StoryId::from(story_id);
         let mut cache = self.read_cache().await;
-        let mut notes = Vec::new();
-        if let Err(e) = self.refresh_story(&mut cache, story_id).await {
-            notes.push(format!("note: couldn't refresh from Shortcut ({e:#}); showing cached copy"));
-        }
+        let refresh_note = self
+            .refresh_story(&mut cache, story_id)
+            .await
+            .err()
+            .map(|e| format!("note: couldn't refresh from Shortcut ({e:#}); showing cached copy"));
         let Some(story) = cache.find_story(story_id).cloned() else {
             return Ok(fail(format!(
                 "story {story_id} isn't cached and couldn't be fetched{}",
-                notes.first().map(|n| format!(" — {n}")).unwrap_or_default()
+                refresh_note.map(|n| format!(" — {n}")).unwrap_or_default()
             )));
         };
-        notes.extend(self.lookups(&mut cache, |c| lookup_miss(c, &story)).await);
+        let lookup_note = self.lookups(&mut cache, |c| lookup_miss(c, &story)).await;
         let cache_dir = self.cache_dir.clone();
         let json = tokio::task::spawn_blocking(move || -> Result<String> {
             let conn = arc_index::open_readonly(&cache_dir)?;
@@ -172,9 +173,7 @@ impl ArcMcp {
         })
         .await
         .map_err(internal)?;
-        let mut content = vec![ContentBlock::text(tool_try!(json))];
-        content.extend(notes.into_iter().map(ContentBlock::text));
-        Ok(CallToolResult::success(content))
+        Ok(with_notes(tool_try!(json), refresh_note.into_iter().chain(lookup_note)))
     }
 
     #[tool(
@@ -343,7 +342,10 @@ impl ArcMcp {
             source: TodoSource::Manual,
         };
         let updated = tool_try!(
-            arc_notes::todos::modify_with_lock(&self.cache_dir, move |list| list.push(todo)).await
+            arc_notes::todos::transform_with_lock(&self.cache_dir, move |list| {
+                list.into_iter().chain([todo]).collect()
+            })
+            .await
         );
 
         let cache_dir = self.cache_dir.clone();
@@ -360,10 +362,10 @@ impl ArcMcp {
 
 impl ArcMcp {
     async fn read_cache(&self) -> Cache {
-        let mut cache = Cache::read(self.cache_dir.clone()).await;
         // a missing cache file defaults to ~/.cache/arc; writes must go to ours
-        cache.cache_dir = self.cache_dir.clone();
-        cache
+        Cache::read(self.cache_dir.clone())
+            .await
+            .with_cache_dir(self.cache_dir.clone())
     }
 
     async fn client(&self, cache: &mut Cache) -> Result<ApiClient> {
@@ -417,10 +419,13 @@ fn created_result((id, path): (String, NoteRelPath)) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(format!("id: {id}\npath: {path}"))])
 }
 
-fn with_notes(text: String, note: Option<String>) -> CallToolResult {
-    let mut content = vec![ContentBlock::text(text)];
-    content.extend(note.map(ContentBlock::text));
-    CallToolResult::success(content)
+fn with_notes(text: String, notes: impl IntoIterator<Item = String>) -> CallToolResult {
+    CallToolResult::success(
+        std::iter::once(text)
+            .chain(notes)
+            .map(ContentBlock::text)
+            .collect(),
+    )
 }
 
 fn lookup_miss(cache: &Cache, s: &Story) -> bool {
@@ -432,22 +437,25 @@ fn lookup_miss(cache: &Cache, s: &Story) -> bool {
 }
 
 fn slim_stories(cache: &Cache, conn: &Connection) -> Result<Value> {
-    let stories = cache.iteration_stories.as_deref().unwrap_or_default();
-    let mut out = Vec::with_capacity(stories.len());
-    for s in stories {
-        out.push(json!({
-            "id": s.id,
-            "name": s.name,
-            "state": cache.state_name(s.workflow_state_id),
-            "type": s.story_type,
-            "url": s.app_url,
-            "iteration_id": s.iteration_id,
-            "epic_id": s.epic_id,
-            "estimate": s.estimate,
-            "has_note": arc_index::note_for_story(conn, s.id)?.is_some(),
-        }));
-    }
-    Ok(Value::Array(out))
+    cache
+        .iteration_stories
+        .iter()
+        .flatten()
+        .map(|s| {
+            Ok(json!({
+                "id": s.id,
+                "name": s.name,
+                "state": cache.state_name(s.workflow_state_id),
+                "type": s.story_type,
+                "url": s.app_url,
+                "iteration_id": s.iteration_id,
+                "epic_id": s.epic_id,
+                "estimate": s.estimate,
+                "has_note": arc_index::note_for_story(conn, s.id)?.is_some(),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Value::Array)
 }
 
 fn story_detail(cache: &Cache, s: &Story, note: Option<String>) -> Value {
@@ -547,26 +555,21 @@ fn resolve_note(conn: &Connection, note: NoteRef) -> Result<NoteRelPath> {
         NoteRef::Path(rel) => return Ok(rel),
         NoteRef::Id(id) => id,
     };
-    let mut paths = arc_index::note_paths_for_id(conn, &id)?;
-    match paths.len() {
-        0 => bail!("no note with id '{id}'"),
-        1 => Ok(paths.remove(0)),
-        _ => bail!(
+    match arc_index::note_paths_for_id(conn, &id)?.as_slice() {
+        [] => bail!("no note with id '{id}'"),
+        [only] => Ok(only.clone()),
+        several => bail!(
             "id '{id}' matches several notes; pass `path` instead: {}",
-            paths.iter().map(NoteRelPath::as_str).collect::<Vec<_>>().join(", ")
+            several.iter().map(NoteRelPath::as_str).collect::<Vec<_>>().join(", ")
         ),
     }
 }
 
 fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
-    let mut body = arc_index::read_note(notes_dir, rel)?
+    let existing = arc_index::read_note(notes_dir, rel)?
         .ok_or_else(|| anyhow!("no note at '{rel}'"))?;
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push('\n');
-    body.push_str(content.trim_end());
-    body.push('\n');
+    let separator = if existing.ends_with('\n') { "\n" } else { "\n\n" };
+    let body = format!("{existing}{separator}{}\n", content.trim_end());
     std::fs::write(rel.abs(notes_dir), &body)?;
     arc_index::reindex_note(conn, rel, &body)?;
     Ok(())
@@ -588,8 +591,10 @@ fn create_note(
     if abs.exists() {
         bail!("note '{slug}' already exists; use append_note");
     }
-    let mut content = Frontmatter::general(slug.clone(), tags).to_block()?;
-    content.push_str(&format!("\n# {title}\n\n{body}\n"));
+    let content = format!(
+        "{}\n# {title}\n\n{body}\n",
+        Frontmatter::general(slug.clone(), tags).to_block()?
+    );
     if let Some(p) = abs.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -632,18 +637,17 @@ fn create_story_note(
         );
     };
     let abs = rel.abs(notes_dir);
-    let mut fm = Frontmatter::story(
+    let fm = Frontmatter::linked(
         slug.clone(),
-        story.id,
-        story.name.clone(),
-        story.app_url.clone(),
-        iteration_url,
+        EntityLink::Story {
+            id: story.id,
+            url: story.app_url.clone(),
+            name: Some(story.name.clone()),
+            iteration_url,
+            epic_url,
+        },
     );
-    if let EntityLink::Story { epic_url: e, .. } = &mut fm.link {
-        *e = epic_url;
-    }
-    let mut content = fm.to_block()?;
-    content.push_str(&format!("\n# {}\n\n{}\n", story.name, body));
+    let content = format!("{}\n# {}\n\n{}\n", fm.to_block()?, story.name, body);
     if let Some(p) = abs.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -655,9 +659,9 @@ fn create_story_note(
 #[tool_handler]
 impl ServerHandler for ArcMcp {
     fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
-        info.server_info = Implementation::new("arc", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("arc", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
             "arc: the notes vault plus a cache of Shortcut stories. Stories: \
              `active_stories` (slim list of the current iterations), `get_story` (full \
              detail incl. description and comments), `get_story_note` (a story's note). \
@@ -668,10 +672,8 @@ impl ServerHandler for ArcMcp {
              cached for the current iteration(s) and may be stale (use the Shortcut MCP \
              for live search); `get_story` refetches the story from Shortcut, falling back \
              to the cache when it's unreachable. Shortcut writes (creating stories, state changes, \
-             comments) aren't handled here — use the Shortcut MCP."
-                .into(),
-        );
-        info
+             comments) aren't handled here — use the Shortcut MCP.",
+            )
     }
 }
 

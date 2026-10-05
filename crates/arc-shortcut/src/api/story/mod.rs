@@ -38,31 +38,20 @@ struct StorySearchResults {
 
 impl ApiClient {
     pub(crate) async fn search_stories_all_pages(&self, query: &str) -> anyhow::Result<Vec<Story>> {
+        let params = [("query", query), ("page_size", "250"), ("detail", "full")];
+        let mut response = self.get_with_query("search/stories", &params).await?;
         let mut all = Vec::new();
-        let mut next_path: Option<String> = None;
-
         loop {
-            let response = match &next_path {
-                None => {
-                    let params = [("query", query), ("page_size", "250"), ("detail", "full")];
-                    self.get_with_query("search/stories", &params).await?
-                }
-                Some(path) => self.get_next_page(path).await?,
-            };
-
             let page: StorySearchResults = response
                 .json()
                 .await
                 .context("Failed to parse search/stories response")?;
-
             all.extend(page.data);
-            match page.next {
-                Some(n) => next_path = Some(n),
-                None => break,
-            }
+            let Some(next) = page.next else {
+                return Ok(all);
+            };
+            response = self.get_next_page(&next).await?;
         }
-
-        Ok(all)
     }
 
     pub async fn get_story(&self, id: StoryId) -> anyhow::Result<Story> {

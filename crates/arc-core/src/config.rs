@@ -106,15 +106,12 @@ impl Config {
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {
-    let path = shellexpand::full(path.to_str().unwrap()).unwrap();
-    let path_string = path.to_string();
-    let buf = Path::new(&path_string);
-    buf.to_path_buf()
+    PathBuf::from(shellexpand::full(path.to_str().unwrap()).unwrap().into_owned())
 }
 
 fn default_cache_dir() -> PathBuf {
-    let mut base = env::home_dir().expect("Couldn't find home dir");
-    base.push(".cache");
-    base.push("arc");
-    base
+    env::home_dir()
+        .expect("Couldn't find home dir")
+        .join(".cache")
+        .join("arc")
 }

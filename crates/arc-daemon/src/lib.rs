@@ -10,7 +10,7 @@ use arc_core::config::Config;
 use crate::scheduler::{DBusNotifier, ScheduledTodo, Scheduler, SystemClock};
 use crate::watcher::WatchEvent;
 use arc_notes::NoteRelPath;
-use arc_notes::todos::TodoSource;
+use arc_notes::todos::{Todo, TodoSource};
 
 pub mod install;
 pub mod scheduler;
@@ -112,27 +112,20 @@ async fn mirror_todos(cache_dir: &Path, index: &mut arc_index::Connection) {
 }
 
 fn list_markdown(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
     if !dir.exists() {
-        return Ok(out);
+        return Ok(Vec::new());
     }
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for entry in std::fs::read_dir(&d)? {
-            let entry = entry?;
-            let p = entry.path();
+    let nested = std::fs::read_dir(dir)?
+        .map(|entry| {
+            let p = entry?.path();
             if p.is_dir() {
-                stack.push(p);
-            } else if p
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-            {
-                out.push(p);
+                list_markdown(&p)
+            } else {
+                Ok(watcher::is_markdown(&p).then_some(p).into_iter().collect())
             }
-        }
-    }
-    Ok(out)
+        })
+        .collect::<Result<Vec<Vec<PathBuf>>>>()?;
+    Ok(nested.concat())
 }
 
 fn read_current_content(event: &WatchEvent) -> std::io::Result<Option<String>> {
@@ -183,28 +176,29 @@ async fn handle_event(
 async fn rebuild_schedule(cache_dir: &Path, sched: &mut Scheduler) -> Result<()> {
     let todos = arc_notes::todos::load_todos(cache_dir).await;
     sched.clear();
-    for t in todos {
-        if t.completed {
-            continue;
-        }
-        let Some(date) = t.date else { continue };
-        let fire_at = Local
-            .with_ymd_and_hms(date.year(), date.month(), date.day(), 9, 0, 0)
-            .single()
-            .unwrap_or_else(Local::now);
-        let title = match &t.source {
-            TodoSource::NoteParsed { file, .. } => file
-                .file_stem()
-                .map(|s| format!("arc — {}", s))
-                .unwrap_or_else(|| "arc".to_string()),
-            TodoSource::Manual => "arc".to_string(),
-        };
-        sched.upsert(ScheduledTodo {
-            id: t.id,
-            title,
-            body: t.text,
-            fire_at,
-        });
+    for scheduled in todos.into_iter().filter_map(scheduled_todo) {
+        sched.upsert(scheduled);
     }
     Ok(())
+}
+
+fn scheduled_todo(t: Todo) -> Option<ScheduledTodo> {
+    let date = t.date.filter(|_| !t.completed)?;
+    let fire_at = Local
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), 9, 0, 0)
+        .single()
+        .unwrap_or_else(Local::now);
+    let title = match &t.source {
+        TodoSource::NoteParsed { file, .. } => file
+            .file_stem()
+            .map(|s| format!("arc — {}", s))
+            .unwrap_or_else(|| "arc".to_string()),
+        TodoSource::Manual => "arc".to_string(),
+    };
+    Some(ScheduledTodo {
+        id: t.id,
+        title,
+        body: t.text,
+        fire_at,
+    })
 }

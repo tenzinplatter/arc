@@ -49,14 +49,11 @@ fn collapse_whitespace(s: &str) -> String {
 }
 
 pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
-    let mut out = Vec::new();
     let re = date_token_regex();
 
-    for (idx, raw_line) in content.lines().enumerate() {
+    content.lines().enumerate().filter_map(|(idx, raw_line)| {
         let line_no = (idx as u32) + 1;
-        let Some((checkbox, rest)) = split_checkbox(raw_line.trim_start()) else {
-            continue;
-        };
+        let (checkbox, rest) = split_checkbox(raw_line.trim_start())?;
 
         let (date, text) = match re
             .captures(rest)
@@ -65,29 +62,26 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
                 let d = NaiveDate::parse_from_str(&c[1], "%d-%m-%Y").ok()?;
                 Some((d, m.range()))
             }) {
-            Some((d, range)) => {
-                let mut s = String::with_capacity(rest.len().saturating_sub(range.len()));
-                s.push_str(&rest[..range.start]);
-                s.push_str(&rest[range.end..]);
-                (Some(d), collapse_whitespace(&s))
-            }
+            Some((d, range)) => (
+                Some(d),
+                collapse_whitespace(&format!("{}{}", &rest[..range.start], &rest[range.end..])),
+            ),
             None => (None, collapse_whitespace(rest)),
         };
 
         let normalized = text.to_lowercase();
         let fp = fingerprint(Path::new(file.as_str()), &normalized);
 
-        out.push(ParsedTodo {
+        Some(ParsedTodo {
             text,
             completed: checkbox.is_done(),
             date,
             file: file.clone(),
             line: line_no,
             fingerprint: fp,
-        });
-    }
-
-    out
+        })
+    })
+    .collect()
 }
 
 /// `DefaultHasher` output may change across Rust toolchains, re-iding every note-parsed todo once.

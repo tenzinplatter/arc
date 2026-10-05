@@ -41,7 +41,7 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
-    fn created_today(slug: String, link: EntityLink) -> Self {
+    pub fn linked(slug: String, link: EntityLink) -> Self {
         Self {
             id: slug,
             created: Some(arc_core::time::today()),
@@ -60,7 +60,7 @@ impl Frontmatter {
         story_url: String,
         iteration_url: Option<String>,
     ) -> Self {
-        Self::created_today(
+        Self::linked(
             slug,
             EntityLink::Story {
                 id: story_id,
@@ -73,31 +73,31 @@ impl Frontmatter {
     }
 
     pub fn iteration(slug: String, id: IterationId, name: String, url: String) -> Self {
-        Self::created_today(slug, EntityLink::Iteration { id, url, name: Some(name) })
+        Self::linked(slug, EntityLink::Iteration { id, url, name: Some(name) })
     }
 
     pub fn epic(slug: String, id: EpicId, name: String, url: String) -> Self {
-        Self::created_today(slug, EntityLink::Epic { id, url, name: Some(name) })
+        Self::linked(slug, EntityLink::Epic { id, url, name: Some(name) })
     }
 
     pub fn general(slug: String, tags: Vec<String>) -> Self {
         Self {
             tags,
-            ..Self::created_today(slug, EntityLink::None)
+            ..Self::linked(slug, EntityLink::None)
         }
     }
 
     pub fn daily(slug: String) -> Self {
         Self {
             note_type: Some("daily".into()),
-            ..Self::created_today(slug, EntityLink::None)
+            ..Self::linked(slug, EntityLink::None)
         }
     }
 
     pub fn scratch(slug: String) -> Self {
         Self {
             note_type: Some("scratch".into()),
-            ..Self::created_today(slug, EntityLink::None)
+            ..Self::linked(slug, EntityLink::None)
         }
     }
 
@@ -134,19 +134,14 @@ impl<'a> SplitNote<'a> {
         }
         let newline = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
         let yaml_start = bom + open.len();
-        let mut pos = yaml_start;
-        for line in lines {
-            if line.trim_end() == "---" {
-                return Some(Self {
-                    content,
-                    yaml: yaml_start..pos,
-                    body_start: pos + line.len(),
-                    newline,
-                });
-            }
-            pos += line.len();
-        }
-        None
+        let (close, line) = lines_with_offsets(&content[yaml_start..])
+            .find(|(_, line)| line.trim_end() == "---")?;
+        Some(Self {
+            content,
+            yaml: yaml_start..yaml_start + close,
+            body_start: yaml_start + close + line.len(),
+            newline,
+        })
     }
 
     pub fn yaml(&self) -> &'a str {
@@ -193,6 +188,14 @@ impl fmt::Display for BranchName {
     }
 }
 
+fn lines_with_offsets(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    s.split_inclusive('\n').scan(0, |off, l| {
+        let start = *off;
+        *off += l.len();
+        Some((start, l))
+    })
+}
+
 fn branches_key() -> Value {
     Value::from("branches")
 }
@@ -202,7 +205,7 @@ pub fn add_branch(content: &str, branch: &BranchName) -> anyhow::Result<String> 
     let yaml = note.yaml();
     let before = parse_mapping(yaml)?;
     let existing = before.get(branches_key());
-    let mut branches = existing.map(lenient_strings).unwrap_or_default();
+    let branches = existing.map(lenient_strings).unwrap_or_default();
     if branches.iter().any(|b| b == branch.as_str()) {
         return Ok(content.to_string());
     }
@@ -214,40 +217,39 @@ pub fn add_branch(content: &str, branch: &BranchName) -> anyhow::Result<String> 
         Some(value) => edit_branches(yaml, value, &item, nl)?,
     };
 
-    branches.push(branch.as_str().to_string());
-    ensure_only_branches_changed(before, &new_yaml, &branches)?;
+    let want_branches = [branches, vec![branch.as_str().to_string()]].concat();
+    ensure_only_branches_changed(before, &new_yaml, &want_branches)?;
     Ok(note.with_yaml(&new_yaml))
 }
 
 fn ensure_only_branches_changed(
-    mut before: Mapping,
+    before: Mapping,
     new_yaml: &str,
     want_branches: &[String],
 ) -> anyhow::Result<()> {
-    let mut after = parse_mapping(new_yaml).context("edited frontmatter no longer parses")?;
+    let after = parse_mapping(new_yaml).context("edited frontmatter no longer parses")?;
     let got = after.get(branches_key()).map(lenient_strings).unwrap_or_default();
-    before.remove(branches_key());
-    after.remove(branches_key());
-    if got != want_branches || before != after {
+    if got != want_branches || without_branches(before) != without_branches(after) {
         bail!("refusing to edit frontmatter: adding the branch would disturb other values");
     }
     Ok(())
 }
 
+fn without_branches(mapping: Mapping) -> Mapping {
+    mapping
+        .into_iter()
+        .filter(|(k, _)| *k != branches_key())
+        .collect()
+}
+
 fn edit_branches(yaml: &str, value: &Value, item: &str, nl: &str) -> anyhow::Result<String> {
-    let lines: Vec<(usize, &str)> = yaml
-        .split_inclusive('\n')
-        .scan(0, |off, l| {
-            let start = *off;
-            *off += l.len();
-            Some((start, l))
-        })
-        .collect();
-    let mut keys = lines
+    let lines: Vec<(usize, &str)> = lines_with_offsets(yaml).collect();
+    let keys: Vec<_> = lines
         .iter()
         .enumerate()
-        .filter(|(_, (_, l))| l.starts_with("branches:"));
-    let (Some((idx, &(start, line))), None) = (keys.next(), keys.next()) else {
+        .filter(|(_, (_, l))| l.starts_with("branches:"))
+        .collect();
+    let [(idx, &(start, line))] = keys[..] else {
         bail!("can't locate a single top-level `branches:` line");
     };
     let end = start + line.len();
@@ -287,18 +289,15 @@ fn edit_branches(yaml: &str, value: &Value, item: &str, nl: &str) -> anyhow::Res
             let block_list = lines[idx + 1..]
                 .iter()
                 .take_while(|(_, l)| l.trim().is_empty() || l.starts_with([' ', '\t', '-']));
-            let mut indent = None;
-            let mut last_end = None;
-            for &(off, l) in block_list {
-                let body = l.trim_start();
-                if body.is_empty() || body.starts_with('#') {
-                    continue;
-                }
-                if indent.is_none() && (body.starts_with("- ") || body.trim_end() == "-") {
-                    indent = Some(&l[..l.len() - body.len()]);
-                }
-                last_end = Some(off + l.len());
-            }
+            let entries: Vec<(usize, &str, &str)> = block_list
+                .map(|&(off, l)| (off, l, l.trim_start()))
+                .filter(|(_, _, body)| !body.is_empty() && !body.starts_with('#'))
+                .collect();
+            let indent = entries
+                .iter()
+                .find(|(_, _, body)| body.starts_with("- ") || body.trim_end() == "-")
+                .map(|(_, l, body)| &l[..l.len() - body.len()]);
+            let last_end = entries.last().map(|(off, l, _)| off + l.len());
             let (Some(indent), Some(at)) = (indent, last_end) else {
                 bail!("can't find `branches` list items");
             };
@@ -324,17 +323,16 @@ fn yaml_scalar(s: &str) -> String {
     if plain {
         return s.to_string();
     }
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    let escaped: String = s
+        .chars()
+        .map(|c| match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            c if c.is_control() => format!("\\u{:04X}", c as u32),
+            c => c.to_string(),
+        })
+        .collect();
+    format!("\"{escaped}\"")
 }
 
 fn lenient_strings(v: &Value) -> Vec<String> {
@@ -450,42 +448,44 @@ impl From<RawFrontmatter> for Frontmatter {
 
 impl From<Frontmatter> for RawFrontmatter {
     fn from(f: Frontmatter) -> Self {
-        let mut raw = RawFrontmatter {
-            id: Some(f.id),
-            aliases: f.aliases,
-            tags: f.tags,
-            created: f.created,
-            note_type: f.note_type,
-            branches: f.branches,
-            ..Default::default()
-        };
-        match f.link {
-            EntityLink::None => {}
+        let link = match f.link {
+            EntityLink::None => RawFrontmatter::default(),
             EntityLink::Story {
                 id,
                 url,
                 name,
                 iteration_url,
                 epic_url,
-            } => {
-                raw.story_id = Some(format!("sc-{id}"));
-                raw.story_link = Some(url);
-                raw.story_name = name;
-                raw.iteration = iteration_url;
-                raw.epic = epic_url;
-            }
-            EntityLink::Iteration { id, url, name } => {
-                raw.iteration_id = Some(format!("it-{id}"));
-                raw.iteration_link = Some(url);
-                raw.iteration_name = name;
-            }
-            EntityLink::Epic { id, url, name } => {
-                raw.epic_id = Some(format!("ep-{id}"));
-                raw.epic_link = Some(url);
-                raw.epic_name = name;
-            }
+            } => RawFrontmatter {
+                story_id: Some(format!("sc-{id}")),
+                story_link: Some(url),
+                story_name: name,
+                iteration: iteration_url,
+                epic: epic_url,
+                ..Default::default()
+            },
+            EntityLink::Iteration { id, url, name } => RawFrontmatter {
+                iteration_id: Some(format!("it-{id}")),
+                iteration_link: Some(url),
+                iteration_name: name,
+                ..Default::default()
+            },
+            EntityLink::Epic { id, url, name } => RawFrontmatter {
+                epic_id: Some(format!("ep-{id}")),
+                epic_link: Some(url),
+                epic_name: name,
+                ..Default::default()
+            },
+        };
+        RawFrontmatter {
+            id: Some(f.id),
+            aliases: f.aliases,
+            tags: f.tags,
+            created: f.created,
+            note_type: f.note_type,
+            branches: f.branches,
+            ..link
         }
-        raw
     }
 }
 

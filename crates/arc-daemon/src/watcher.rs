@@ -63,7 +63,7 @@ pub fn spawn(
     Ok(watcher)
 }
 
-fn is_markdown(path: &Path) -> bool {
+pub(crate) fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
@@ -80,10 +80,8 @@ fn debounce_loop(
             Ok(Err(_)) | Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        while let Ok(maybe_ev) = rx.try_recv() {
-            if let Ok(ev) = maybe_ev {
-                ingest(&ev, &mut pending);
-            }
+        for ev in rx.try_iter().flatten() {
+            ingest(&ev, &mut pending);
         }
         for ev in take_settled(&mut pending, Instant::now()) {
             if tx.send(ev).is_err() {
@@ -94,26 +92,21 @@ fn debounce_loop(
 }
 
 fn take_settled(pending: &mut HashMap<PathBuf, Pending>, now: Instant) -> Vec<WatchEvent> {
-    let mut settled = Vec::new();
-    pending.retain(|path, p| {
-        let is_settled = now.duration_since(p.last_seen) >= DEBOUNCE_WINDOW;
-        if is_settled {
-            settled.push(p.kind.event(path.clone()));
-        }
-        !is_settled
-    });
-    settled
+    pending
+        .extract_if(|_, p| now.duration_since(p.last_seen) >= DEBOUNCE_WINDOW)
+        .map(|(path, p)| p.kind.event(path))
+        .collect()
 }
 
 fn ingest(ev: &notify::Event, pending: &mut HashMap<PathBuf, Pending>) {
     let kind = WatchKind::of(&ev.kind);
-    for path in ev.paths.iter().filter(|p| is_markdown(p)) {
-        pending.insert(
+    pending.extend(ev.paths.iter().filter(|p| is_markdown(p)).map(|path| {
+        (
             path.clone(),
             Pending {
                 last_seen: Instant::now(),
                 kind,
             },
-        );
-    }
+        )
+    }));
 }

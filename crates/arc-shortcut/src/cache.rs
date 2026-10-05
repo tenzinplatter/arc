@@ -15,10 +15,7 @@ use crate::api::{
 };
 use arc_core::{StoryId, dbg_file};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    fs::{self, File},
-    io::AsyncReadExt,
-};
+use tokio::fs;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Cache {
@@ -69,6 +66,10 @@ impl Cache {
         })
     }
 
+    pub fn with_cache_dir(self, cache_dir: PathBuf) -> Self {
+        Self { cache_dir, ..self }
+    }
+
     pub fn set_user(&mut self, user: CurrentUser) {
         self.user_id = Some(user.id);
         self.user_mention_name = Some(user.mention_name);
@@ -109,15 +110,14 @@ impl Cache {
     }
 
     fn default_cache_dir() -> PathBuf {
-        let mut base = env::home_dir().expect("Couldn't find home dir");
-        base.push(".cache");
-        base.push("arc");
-        base
+        env::home_dir()
+            .expect("Couldn't find home dir")
+            .join(".cache")
+            .join("arc")
     }
 
-    pub fn get_cache_file(mut cache_dir: PathBuf) -> PathBuf {
-        cache_dir.push("cache.json");
-        cache_dir
+    pub fn get_cache_file(cache_dir: PathBuf) -> PathBuf {
+        cache_dir.join("cache.json")
     }
 
     pub async fn read(cache_dir: PathBuf) -> Self {
@@ -138,7 +138,7 @@ impl Cache {
             return Self::default();
         }
 
-        let contents = match read_file(&cache_file).await {
+        let contents = match fs::read_to_string(&cache_file).await {
             Ok(contents) => contents,
             Err(_) => {
                 return Self::default();
@@ -164,12 +164,14 @@ impl Cache {
     /// Merges in the on-disk lookup maps and missing user (self wins) so concurrent writers keep each other's fetches.
     pub async fn write(&self) -> anyhow::Result<()> {
         let cache_file = Self::get_cache_file(self.cache_dir.clone());
-        let mut merged = self.clone();
-        if let Ok(contents) = read_file(&cache_file).await
-            && let Ok(disk) = serde_json::from_str::<Cache>(&contents)
-        {
-            merged.absorb(disk);
-        }
+        let disk = fs::read_to_string(&cache_file)
+            .await
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Cache>(&contents).ok());
+        let merged = match disk {
+            Some(disk) => self.clone().absorbing(disk),
+            None => self.clone(),
+        };
 
         let bytes = serde_json::to_vec(&merged)?;
         let dir = self.cache_dir.clone();
@@ -185,7 +187,7 @@ impl Cache {
         Ok(())
     }
 
-    fn absorb(&mut self, disk: Cache) {
+    fn absorbing(mut self, disk: Cache) -> Self {
         for (k, v) in disk.stories_by_id {
             self.stories_by_id.entry(k).or_insert(v);
         }
@@ -199,6 +201,7 @@ impl Cache {
             self.user_id = disk.user_id;
             self.user_mention_name = self.user_mention_name.take().or(disk.user_mention_name);
         }
+        self
     }
 }
 
@@ -252,13 +255,6 @@ async fn refresh_members(cache: &mut Cache, client: &ApiClient) -> anyhow::Resul
         .map(|m| (m.id, m.mention_name))
         .collect();
     cache.write().await
-}
-
-async fn read_file(file: &PathBuf) -> anyhow::Result<String> {
-    let mut f = File::open(file).await?;
-    let mut buf = String::new();
-    f.read_to_string(&mut buf).await?;
-    Ok(buf)
 }
 
 #[cfg(test)]
