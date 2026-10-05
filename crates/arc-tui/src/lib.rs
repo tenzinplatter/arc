@@ -14,13 +14,13 @@ use crate::{
         cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
-    cli::{Commands, ContextFormat, DaemonCommands, HookCommands, InstallArgs, LinkMode},
+    cli::{Commands, ContextFormat, DaemonCommands, HookCommands, LinkMode, SettingsArgs},
     note::Note,
 };
 use arc_context::{Handoff, LinkOutcome, NoteRename, StoryNote};
 use arc_core::{Config, dbg_file};
 use arc_hooks::Hook;
-use arc_hooks::install::{Claude, Installer};
+use arc_hooks::install::{ArcExe, Claude, HookBinary, Installer};
 use arc_shortcut::fetch_story;
 
 pub use arc_shortcut::{api, cache};
@@ -95,10 +95,7 @@ pub async fn print_context(format: ContextFormat) {
 
 const CLAUDE_SETTINGS: &str = ".claude/settings.json";
 
-fn installer(args: InstallArgs) -> anyhow::Result<Installer> {
-    let arc = env::current_exe()
-        .and_then(|exe| exe.canonicalize())
-        .context("can't locate the running arc executable")?;
+fn installer(args: SettingsArgs) -> anyhow::Result<Installer> {
     let settings = match args.settings {
         Some(settings) => settings,
         None => env::home_dir()
@@ -107,9 +104,15 @@ fn installer(args: InstallArgs) -> anyhow::Result<Installer> {
     };
     Ok(Installer {
         settings,
-        arc,
         claude: Claude::locate(args.claude),
     })
+}
+
+fn running_arc() -> anyhow::Result<ArcExe> {
+    env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map(ArcExe::classify)
+        .context("can't locate the running arc executable")
 }
 
 pub async fn hook(command: HookCommands) -> anyhow::Result<()> {
@@ -119,8 +122,9 @@ pub async fn hook(command: HookCommands) -> anyhow::Result<()> {
         HookCommands::Stop => Hook::Stop,
         HookCommands::SessionEnd => Hook::SessionEnd,
         HookCommands::Install(args) => {
-            let mode = args.mode;
-            return installer(args)?.install(mode, &mut io::stdout());
+            let arc = HookBinary::choose(running_arc()?, ArcExe::on_path(), args.dev_builds)?;
+            let mode = args.target.mode;
+            return installer(args.target)?.install(&arc, mode, &mut io::stdout());
         }
         HookCommands::Uninstall(args) => {
             let mode = args.mode;

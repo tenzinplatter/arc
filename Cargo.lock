@@ -155,6 +155,7 @@ dependencies = [
  "arc-notes",
  "arc-shortcut",
  "chrono",
+ "indexmap",
  "serde",
  "serde_json",
  "tempfile",

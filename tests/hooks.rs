@@ -38,10 +38,14 @@ impl Home {
     }
 
     fn arc(&self, args: &[&str], stdin: &str) -> Output {
+        self.arc_with_path(args, stdin, &std::env::var_os("PATH").unwrap_or_default())
+    }
+
+    fn arc_with_path(&self, args: &[&str], stdin: &str, path: &std::ffi::OsStr) -> Output {
         let mut child = Command::new(ARC)
             .args(args)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", path)
             .env("HOME", self.path())
             .env("XDG_CONFIG_HOME", self.path().join("config"))
             .env("XDG_CACHE_HOME", self.path().join("cache-home"))
@@ -135,20 +139,20 @@ fn hooks_are_silent_when_no_story_resolves() {
     );
 }
 
-#[test]
-fn install_dry_run_writes_nothing() {
-    let home = Home::new();
+fn dry_run(home: &Home, path: &Path, extra: &[&str]) -> Output {
     let missing_claude = home.path().join("no-claude");
-    let out = home.arc(
-        &[
-            "hook",
-            "install",
-            "--dry-run",
-            "--claude",
-            missing_claude.to_str().unwrap(),
-        ],
-        "",
-    );
+    let mut args = vec![
+        "hook",
+        "install",
+        "--dry-run",
+        "--claude",
+        missing_claude.to_str().unwrap(),
+    ];
+    args.extend(extra);
+    home.arc_with_path(&args, "", path.as_os_str())
+}
+
+fn assert_dry_run_installs(out: Output, home: &Home, arc: &Path) -> String {
     assert!(
         out.status.success(),
         "{}",
@@ -157,23 +161,65 @@ fn install_dry_run_writes_nothing() {
     let printed = String::from_utf8(out.stdout).unwrap();
     let settings = home.path().join(".claude/settings.json");
     assert!(
-        printed.starts_with(&format!("would write {}:\n", settings.display())),
+        printed.contains(&format!("would write {}:\n", settings.display())),
         "{printed}"
     );
-    let exe = std::fs::canonicalize(ARC).unwrap();
     assert!(
         printed.contains(&format!(
-            "\"command\": \"{} hook post-bash\"",
-            exe.display()
+            "\"command\": \"{} hook post-bash 2>/dev/null || true\"",
+            arc.display()
         )),
         "{printed}"
     );
     assert!(
         printed.contains(&format!(
             "claude mcp add --scope user --transport stdio arc -- {} mcp",
-            exe.display()
+            arc.display()
         )),
         "{printed}"
     );
     assert!(!home.path().join(".claude").exists());
+    printed
+}
+
+#[cfg(unix)]
+#[test]
+fn install_prefers_an_installed_arc_over_a_dev_build() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let installed = bin.join("arc");
+    std::fs::write(&installed, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = std::fs::canonicalize(installed).unwrap();
+    let printed = assert_dry_run_installs(dry_run(&home, &bin, &[]), &home, &installed);
+    assert!(
+        printed.starts_with(&format!(
+            "using the arc on PATH ({}) rather than the dev build ",
+            installed.display()
+        )),
+        "{printed}"
+    );
+}
+
+#[test]
+fn install_refuses_a_dev_build_unless_allowed() {
+    let home = Home::new();
+    let empty = home.path().join("empty-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let refused = dry_run(&home, &empty, &[]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--allow-dev-build"), "{stderr}");
+    assert!(refused.stdout.is_empty());
+    assert!(!home.path().join(".claude").exists());
+
+    let exe = std::fs::canonicalize(ARC).unwrap();
+    let printed =
+        assert_dry_run_installs(dry_run(&home, &empty, &["--allow-dev-build"]), &home, &exe);
+    assert!(
+        printed.starts_with("warning: hooks will run the dev build "),
+        "{printed}"
+    );
 }

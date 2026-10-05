@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use arc_context::EntryText;
 use arc_core::StoryId;
-use arc_hooks::install::Mode;
+use arc_hooks::install::{DevBuilds, Mode};
 use clap::builder::{BoolValueParser, TypedValueParser};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
@@ -133,11 +133,24 @@ pub enum HookCommands {
     /// Add the arc hooks to Claude Code's user settings and register the arc MCP server.
     Install(InstallArgs),
     /// Remove the arc hooks from Claude Code's user settings and unregister the arc MCP server.
-    Uninstall(InstallArgs),
+    Uninstall(SettingsArgs),
 }
 
 #[derive(Args)]
 pub struct InstallArgs {
+    #[command(flatten)]
+    pub target: SettingsArgs,
+    /// Point the hooks at this binary even when it is a cargo dev build under target/.
+    #[arg(
+        long = "allow-dev-build",
+        action = ArgAction::SetTrue,
+        value_parser = BoolValueParser::new().map(dev_builds),
+    )]
+    pub dev_builds: DevBuilds,
+}
+
+#[derive(Args)]
+pub struct SettingsArgs {
     /// Print the resulting settings and the `claude mcp` command without writing or running anything.
     #[arg(
         long = "dry-run",
@@ -151,6 +164,13 @@ pub struct InstallArgs {
     /// `claude` CLI used to (un)register the MCP server. Defaults to `claude` on PATH.
     #[arg(long)]
     pub claude: Option<PathBuf>,
+}
+
+fn dev_builds(allow: bool) -> DevBuilds {
+    match allow {
+        true => DevBuilds::Allow,
+        false => DevBuilds::Refuse,
+    }
 }
 
 fn install_mode(dry_run: bool) -> Mode {
@@ -237,15 +257,29 @@ mod tests {
         assert!(matches!(
             parse(&["hook", "install", "--dry-run", "--settings", "/tmp/s.json"]).unwrap(),
             Commands::Hook(HookCommands::Install(InstallArgs {
-                mode: Mode::DryRun,
-                settings: Some(_),
-                claude: None
+                target: SettingsArgs {
+                    mode: Mode::DryRun,
+                    settings: Some(_),
+                    claude: None
+                },
+                dev_builds: DevBuilds::Refuse,
+            }))
+        ));
+        assert!(matches!(
+            parse(&["hook", "install", "--allow-dev-build"]).unwrap(),
+            Commands::Hook(HookCommands::Install(InstallArgs {
+                dev_builds: DevBuilds::Allow,
+                ..
             }))
         ));
         assert!(matches!(
             parse(&["hook", "uninstall"]).unwrap(),
-            Commands::Hook(HookCommands::Uninstall(InstallArgs { mode: Mode::Apply, .. }))
+            Commands::Hook(HookCommands::Uninstall(SettingsArgs {
+                mode: Mode::Apply,
+                ..
+            }))
         ));
+        assert!(parse(&["hook", "uninstall", "--allow-dev-build"]).is_err());
         assert!(parse(&["hook", "nope"]).is_err());
     }
 
