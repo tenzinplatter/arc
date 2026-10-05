@@ -57,7 +57,7 @@ impl WidgetRef for TodosListView<'_> {
         }
 
         let today = today();
-        let sections = group_todos_by_section(&visible, today).into_sections();
+        let sections = group_todos_by_section(&visible, today);
 
         struct Row {
             todo: Todo,

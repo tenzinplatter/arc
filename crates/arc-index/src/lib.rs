@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_note_branches_path ON note_branches(path);
 CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(link_kind, entity_id);
 ";
 
+const WRITER_CONTENTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn db_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(DB_FILE)
 }
@@ -58,8 +60,7 @@ pub fn open(cache_dir: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path(cache_dir))
         .with_context(|| format!("open index at {}", db_path(cache_dir).display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    // The daemon and the MCP server both hold writer connections.
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(WRITER_CONTENTION_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }

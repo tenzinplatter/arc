@@ -1,25 +1,26 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use arc_notes::NoteDir;
+use arc_notes::{NoteDir, NoteRelPath};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    app::{cmd::{Cmd, NotePath, NoteToOpen}, msg::NotesListMsg},
+    app::{cmd::{Cmd, NoteToOpen}, msg::NotesListMsg},
     navkey,
 };
 
 pub use crate::app::model::NotesListState;
 
-fn scan_dir_newest_first(notes_dir: &Path, dir: NoteDir) -> Vec<PathBuf> {
+fn scan_dir_newest_first(notes_dir: &Path, dir: NoteDir) -> Vec<NoteRelPath> {
     let Ok(entries) = std::fs::read_dir(notes_dir.join(dir)) else {
         return Vec::new();
     };
-    let mut notes: Vec<PathBuf> = entries
+    let mut notes: Vec<NoteRelPath> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| NoteRelPath::from_abs(notes_dir, &path))
         .collect();
-    notes.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    notes.sort_by(|a, b| b.cmp(a));
     notes
 }
 
@@ -37,11 +38,11 @@ impl NotesListState {
         }
     }
 
-    pub fn notes_in(&self, dir: NoteDir) -> &[PathBuf] {
+    pub fn notes_in(&self, dir: NoteDir) -> &[NoteRelPath] {
         self.notes.get(&dir).map(Vec::as_slice).unwrap_or_default()
     }
 
-    pub fn sections(&self) -> impl Iterator<Item = (NoteDir, &[PathBuf])> {
+    pub fn sections(&self) -> impl Iterator<Item = (NoteDir, &[NoteRelPath])> {
         NoteDir::ALL.into_iter().map(|dir| (dir, self.notes_in(dir)))
     }
 
@@ -49,11 +50,11 @@ impl NotesListState {
         self.sections().all(|(_, notes)| notes.is_empty())
     }
 
-    fn all_notes(&self) -> Vec<&PathBuf> {
+    fn all_notes(&self) -> Vec<&NoteRelPath> {
         self.sections().flat_map(|(_, notes)| notes).collect()
     }
 
-    fn section_of(&self, path: &PathBuf) -> Option<NoteDir> {
+    fn section_of(&self, path: &NoteRelPath) -> Option<NoteDir> {
         self.sections()
             .find(|(_, notes)| notes.contains(path))
             .map(|(dir, _)| dir)
@@ -143,7 +144,7 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
 
         NotesListMsg::OpenNote => {
             if let Some(ref path) = state.selected_path {
-                vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(NotePath::Absolute(path.clone())))]
+                vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(path.clone()))]
             } else {
                 vec![Cmd::None]
             }
@@ -172,8 +173,9 @@ mod tests {
 
     #[test]
     fn section_jump_wraps_in_display_order_and_restores_last_selection() {
-        let daily = PathBuf::from("/n/daily/a.md");
-        let (b, c) = (PathBuf::from("/n/stories/b.md"), PathBuf::from("/n/stories/c.md"));
+        let rel = |p: &str| NoteRelPath::parse(p).unwrap();
+        let daily = rel("daily/a.md");
+        let (b, c) = (rel("stories/b.md"), rel("stories/c.md"));
         let mut state = NotesListState {
             selected_path: Some(c.clone()),
             notes: [

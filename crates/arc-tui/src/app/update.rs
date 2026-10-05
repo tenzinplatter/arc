@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::{
     app::{
         App,
-        cmd::{Cmd, NotePath, NoteToOpen},
+        cmd::{Cmd, NoteToOpen},
         model::{LoadingState, Overlay, ViewType},
         msg::{AddTodoModalMsg, CreateNoteModalMsg, EpicListMsg, IterationListMsg, Msg},
         pane::{action_menu, add_todo_modal, create_note_modal, description_modal, epic_list, iteration_list, notes_list, searchable_list, story_list, todos_list},
@@ -341,8 +341,9 @@ impl App {
                         .and_then(|id| self.model.data.todos.iter().find(|t| t.id == id))
                         .map(|t| &t.source);
                     if let Some(crate::todos::TodoSource::NoteParsed { file, .. }) = source {
-                        let path = NotePath::InNotesDir(file.clone());
-                        return vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(path))];
+                        return vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(
+                            file.clone(),
+                        ))];
                     }
                     return self.update(Msg::AddTodoModal(AddTodoModalMsg::Open));
                 }
@@ -443,7 +444,7 @@ fn active_story_left_iteration(
 ) -> bool {
     !stories.iter().any(|s| s.id == active.id)
         && crate::api::story::iteration_of(active, current_iterations).is_some()
-        &&active.owner_ids.contains(&user_id)
+        && active.owner_ids.contains(&user_id)
 }
 
 fn id_set_unchanged<T, Id: PartialEq>(old: &[T], new: &[T], id: impl Fn(&T) -> Id) -> bool {

@@ -1,6 +1,4 @@
-use std::path::{Path, PathBuf};
-
-use arc_notes::NoteDir;
+use arc_notes::{NoteDir, NoteRelPath};
 use chrono::NaiveDate;
 use ratatui::{
     buffer::Buffer,
@@ -54,8 +52,8 @@ fn section_title(dir: NoteDir) -> &'static str {
     }
 }
 
-fn display_name(path: &Path, dir: NoteDir) -> String {
-    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+fn display_name(path: &NoteRelPath, dir: NoteDir) -> String {
+    let stem = match path.file_stem() {
         Some(s) => s,
         None => return "???".to_string(),
     };
@@ -90,7 +88,7 @@ impl<'a> WidgetRef for NotesListView<'a> {
             return;
         }
 
-        let sections: Vec<(NoteDir, &[PathBuf])> = self
+        let sections: Vec<(NoteDir, &[NoteRelPath])> = self
             .state
             .sections()
             .filter(|(_, notes)| !notes.is_empty())

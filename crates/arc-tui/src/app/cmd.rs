@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{
     fs::{File, create_dir_all, read_to_string},
     process::Command,
@@ -72,36 +72,13 @@ pub fn open_in_editor(config: &Config, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub enum NotePath {
-    InNotesDir(NoteRelPath),
-    Absolute(PathBuf),
-}
-
-impl NotePath {
-    fn in_dir(dir: NoteDir, slug: &str) -> Self {
-        NotePath::InNotesDir(NoteRelPath::in_dir(dir, slug))
-    }
-
-    fn resolve(&self, notes_dir: &Path) -> PathBuf {
-        match self {
-            NotePath::InNotesDir(rel) => rel.abs(notes_dir),
-            NotePath::Absolute(abs) => abs.clone(),
-        }
-    }
-
-    fn obsidian_id(&self) -> String {
-        let stem = match self {
-            NotePath::InNotesDir(rel) => rel.file_stem(),
-            NotePath::Absolute(abs) => abs.file_stem().and_then(|s| s.to_str()),
-        };
-        stem.unwrap_or_default().to_string()
-    }
+fn obsidian_id(path: &NoteRelPath) -> String {
+    path.file_stem().unwrap_or_default().to_string()
 }
 
 #[derive(Debug, Clone)]
 pub struct NoteToOpen {
-    pub path: NotePath,
+    pub path: NoteRelPath,
     pub template: Frontmatter,
 }
 
@@ -109,7 +86,7 @@ impl NoteToOpen {
     pub fn story(story: &Story, iteration_app_url: Option<String>) -> Self {
         let slug = slugify!(&story.name);
         Self {
-            path: NotePath::in_dir(NoteDir::Stories, &slug),
+            path: NoteRelPath::in_dir(NoteDir::Stories, &slug),
             template: Frontmatter::story(
                 slug,
                 story.id,
@@ -123,7 +100,7 @@ impl NoteToOpen {
     pub fn iteration(iteration: &Iteration) -> Self {
         let slug = slugify!(&iteration.name);
         Self {
-            path: NotePath::in_dir(NoteDir::Iterations, &slug),
+            path: NoteRelPath::in_dir(NoteDir::Iterations, &slug),
             template: Frontmatter::iteration(
                 slug,
                 iteration.id,
@@ -136,28 +113,28 @@ impl NoteToOpen {
     pub fn epic(epic: &EpicSlim) -> Self {
         let slug = slugify!(&epic.name);
         Self {
-            path: NotePath::in_dir(NoteDir::Epics, &slug),
+            path: NoteRelPath::in_dir(NoteDir::Epics, &slug),
             template: Frontmatter::epic(slug, epic.id, epic.name.clone(), epic.app_url.clone()),
         }
     }
 
     pub fn daily(date: chrono::NaiveDate) -> Self {
-        Self::existing_or_daily_template(NotePath::in_dir(NoteDir::Daily, &date.to_string()))
+        Self::existing_or_daily_template(NoteRelPath::in_dir(NoteDir::Daily, &date.to_string()))
     }
 
     pub fn scratch(name: &str) -> Self {
-        let path = NotePath::in_dir(NoteDir::Scratch, &slugify!(name));
-        let template = Frontmatter::scratch(path.obsidian_id());
+        let path = NoteRelPath::in_dir(NoteDir::Scratch, &slugify!(name));
+        let template = Frontmatter::scratch(obsidian_id(&path));
         Self { path, template }
     }
 
-    pub fn existing_or_daily_template(path: NotePath) -> Self {
-        let template = Frontmatter::daily(path.obsidian_id());
+    pub fn existing_or_daily_template(path: NoteRelPath) -> Self {
+        let template = Frontmatter::daily(obsidian_id(&path));
         Self { path, template }
     }
 
     pub fn open(self, config: &Config) -> anyhow::Result<()> {
-        let path = self.path.resolve(&config.notes_dir);
+        let path = self.path.abs(&config.notes_dir);
         if let Some(p) = path.parent() {
             create_dir_all(p)?;
         }
@@ -240,8 +217,8 @@ pub fn open_mux_session_sync(name: &str, mux: &Mux) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn resolved(note: &NoteToOpen) -> PathBuf {
-        note.path.resolve(Path::new("/notes"))
+    fn resolved(note: &NoteToOpen) -> std::path::PathBuf {
+        note.path.abs(Path::new("/notes"))
     }
 
     fn block(fm: &Frontmatter) -> String {
@@ -282,10 +259,9 @@ mod tests {
 
     #[test]
     fn existing_note_seeds_daily_template_from_its_stem() {
-        let note = NoteToOpen::existing_or_daily_template(NotePath::Absolute(
-            "/elsewhere/stories/foo.md".into(),
-        ));
-        assert_eq!(resolved(&note), Path::new("/elsewhere/stories/foo.md"));
+        let note =
+            NoteToOpen::existing_or_daily_template(NoteRelPath::parse("stories/foo.md").unwrap());
+        assert_eq!(resolved(&note), Path::new("/notes/stories/foo.md"));
         assert_eq!(block(&note.template), block(&Frontmatter::daily("foo".into())));
     }
 }

@@ -3,10 +3,7 @@ use tokio::task::JoinHandle;
 use tui_scrollview::ScrollViewState;
 use tui_widget_list::ListState;
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -21,7 +18,7 @@ use crate::{
     todos::Todo,
 };
 use arc_core::{Config, EpicId, IterationId, StoryId};
-use arc_notes::NoteDir;
+use arc_notes::{NoteDir, NoteRelPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoadingState {
@@ -182,9 +179,9 @@ impl Default for StoryListState {
 
 #[derive(Clone, Debug, Default)]
 pub struct NotesListState {
-    pub selected_path: Option<PathBuf>,
-    pub notes: HashMap<NoteDir, Vec<PathBuf>>,
-    pub section_selections: HashMap<NoteDir, PathBuf>,
+    pub selected_path: Option<NoteRelPath>,
+    pub notes: HashMap<NoteDir, Vec<NoteRelPath>>,
+    pub section_selections: HashMap<NoteDir, NoteRelPath>,
 }
 
 #[derive(Clone, Debug, Default)]
