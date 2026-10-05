@@ -10,7 +10,7 @@ use crate::{
     app::{cmd::Cmd, msg::StoryListMsg, pane::nav},
     keybindings::Key,
 };
-use arc_core::dbg_file;
+use arc_core::{IterationId, StoryId, dbg_file};
 
 pub use crate::app::model::StoryListState;
 
@@ -28,7 +28,7 @@ fn group_stories_by_iteration<'a>(
     show_finished: bool,
 ) -> Vec<IterationSection<'a>> {
     // Build a HashMap grouping stories by iteration_id
-    let mut grouped: HashMap<Option<i32>, Vec<&'a Story>> = HashMap::new();
+    let mut grouped: HashMap<Option<IterationId>, Vec<&'a Story>> = HashMap::new();
     for story in stories {
         // Filter out completed stories if show_finished is false
         if !show_finished && story.completed {
@@ -71,18 +71,18 @@ fn group_stories_by_iteration<'a>(
 }
 
 /// Ids of all stories across sections, in display order.
-fn ordered_ids(sections: &[IterationSection]) -> Vec<i32> {
+fn ordered_ids(sections: &[IterationSection]) -> Vec<StoryId> {
     sections
         .iter()
         .flat_map(|s| s.stories.iter().map(|s| s.id))
         .collect()
 }
 
-fn next_story_id(current_story_id: i32, sections: &[IterationSection]) -> Option<i32> {
+fn next_story_id(current_story_id: StoryId, sections: &[IterationSection]) -> Option<StoryId> {
     nav::step_wrapping(&ordered_ids(sections), current_story_id, true)
 }
 
-fn prev_story_id(current_story_id: i32, sections: &[IterationSection]) -> Option<i32> {
+fn prev_story_id(current_story_id: StoryId, sections: &[IterationSection]) -> Option<StoryId> {
     nav::step_wrapping(&ordered_ids(sections), current_story_id, false)
 }
 

@@ -16,7 +16,7 @@ use crate::{
     error::ErrorInfo,
     todos::Todo,
 };
-use arc_core::Config;
+use arc_core::{Config, EpicId, IterationId, StoryId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoadingState {
@@ -141,12 +141,12 @@ pub struct UiState {
 }
 
 // Epic and iteration panes share the same fuzzy-searchable list state.
-pub use crate::app::pane::searchable_list::SearchListState as IterationListState;
-pub use crate::app::pane::searchable_list::SearchListState as EpicListState;
+pub type IterationListState = crate::app::pane::searchable_list::SearchListState<IterationId>;
+pub type EpicListState = crate::app::pane::searchable_list::SearchListState<EpicId>;
 
 #[derive(Clone, Debug)]
 pub struct StoryListState {
-    pub selected_story_id: Option<i32>,
+    pub selected_story_id: Option<StoryId>,
     pub show_finished: bool,
 }
 

@@ -10,6 +10,8 @@ use rusqlite::OpenFlags;
 
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
 use arc_notes::todos::{Todo, TodoSource};
+use arc_notes::NoteRelPath;
+use arc_core::StoryId;
 
 const DB_FILE: &str = "arc.db";
 
@@ -79,7 +81,7 @@ pub fn open_readonly(cache_dir: &Path) -> Result<Connection> {
 
 /// Upsert one note's frontmatter, tags + branches. `rel` is the notes-dir-relative path.
 /// Atomic: readers never see the note half-written.
-pub fn reindex_note(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
+pub fn reindex_note(conn: &Connection, rel: &NoteRelPath, content: &str) -> Result<()> {
     // A savepoint (not a transaction) so this nests inside a caller's transaction.
     conn.execute_batch("SAVEPOINT reindex_note")?;
     match write_note_rows(conn, rel, content) {
@@ -94,8 +96,8 @@ pub fn reindex_note(conn: &Connection, rel: &Path, content: &str) -> Result<()> 
     }
 }
 
-fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
-    let path = rel.to_string_lossy().to_string();
+fn write_note_rows(conn: &Connection, rel: &NoteRelPath, content: &str) -> Result<()> {
+    let path = rel.as_str().to_string();
     let fm = Frontmatter::from_note(content);
     let title = note_title(content, fm.as_ref());
 
@@ -119,7 +121,7 @@ fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
             epic_url,
         } => (
             Some("story"),
-            Some(*id),
+            Some(id.get()),
             Some(url.clone()),
             name.clone(),
             iteration_url.clone(),
@@ -127,7 +129,7 @@ fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
         ),
         EntityLink::Iteration { id, url, name } => (
             Some("iteration"),
-            Some(*id),
+            Some(id.get()),
             Some(url.clone()),
             name.clone(),
             None,
@@ -135,7 +137,7 @@ fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
         ),
         EntityLink::Epic { id, url, name } => (
             Some("epic"),
-            Some(*id),
+            Some(id.get()),
             Some(url.clone()),
             name.clone(),
             None,
@@ -169,8 +171,8 @@ fn write_note_rows(conn: &Connection, rel: &Path, content: &str) -> Result<()> {
 }
 
 /// Drop a note (and its tags + branches) from the index.
-pub fn remove_note(conn: &Connection, rel: &Path) -> Result<()> {
-    let path = rel.to_string_lossy().to_string();
+pub fn remove_note(conn: &Connection, rel: &NoteRelPath) -> Result<()> {
+    let path = rel.as_str().to_string();
     conn.execute("DELETE FROM notes WHERE path = ?1", [&path])?;
     conn.execute("DELETE FROM note_tags WHERE path = ?1", [&path])?;
     conn.execute("DELETE FROM note_branches WHERE path = ?1", [&path])?;
@@ -188,7 +190,7 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
             TodoSource::Manual => ("manual", None, None),
             TodoSource::NoteParsed { file, line, .. } => (
                 "note",
-                Some(file.to_string_lossy().to_string()),
+                Some(file.as_str().to_string()),
                 Some(*line),
             ),
         };
@@ -273,39 +275,45 @@ fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<(String, b
 }
 
 /// Paths of every note with this Obsidian `id` — ids can collide across dirs.
-pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<String>> {
+pub fn note_paths_for_id(conn: &Connection, id: &str) -> Result<Vec<NoteRelPath>> {
     let mut stmt = conn.prepare("SELECT path FROM notes WHERE id = ?1 ORDER BY path")?;
     let paths = stmt
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<String>>>()?;
+        .query_map([id], |r| r.get(0).map(NoteRelPath::from_trusted))?
+        .collect::<rusqlite::Result<Vec<NoteRelPath>>>()?;
     Ok(paths)
 }
 
 /// Path of the note linked to a story, preferring one under `stories/`.
-pub fn note_for_story(conn: &Connection, story_id: i32) -> Result<Option<String>> {
+pub fn note_for_story(conn: &Connection, story_id: StoryId) -> Result<Option<NoteRelPath>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM notes WHERE link_kind = 'story' AND entity_id = ?1
          ORDER BY path NOT LIKE 'stories/%', path LIMIT 1",
     )?;
-    let mut rows = stmt.query_map([story_id], |r| r.get(0))?;
+    let mut rows = stmt.query_map([story_id.get()], |r| r.get(0).map(NoteRelPath::from_trusted))?;
     Ok(rows.next().transpose()?)
 }
 
 /// `(story_id, path)` of the story note listing `branch` in its `branches:`.
-pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(i32, String)>> {
+pub fn story_for_branch(conn: &Connection, branch: &str) -> Result<Option<(StoryId, NoteRelPath)>> {
     let mut stmt = conn.prepare(
         "SELECT n.entity_id, n.path FROM note_branches b
          JOIN notes n ON n.path = b.path
          WHERE b.branch = ?1 AND n.link_kind = 'story'
          ORDER BY n.path NOT LIKE 'stories/%', n.path LIMIT 1",
     )?;
-    let mut rows = stmt.query_map([branch], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut rows = stmt.query_map([branch], |r| {
+        Ok((
+            StoryId::from(r.get::<_, i32>(0)?),
+            NoteRelPath::from_trusted(r.get(1)?),
+        ))
+    })?;
     Ok(rows.next().transpose()?)
 }
 
 /// Read a note by notes-dir-relative path. `None` if it doesn't exist. Errors
 /// on absolute paths or `..` so untrusted paths can't escape `notes_dir`.
-pub fn read_note(notes_dir: &Path, rel: &str) -> Result<Option<String>> {
+pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> {
+    let rel = rel.as_str();
     let escapes = Path::new(rel).components().any(|c| {
         !matches!(
             c,
@@ -354,6 +362,10 @@ fn note_title(content: &str, fm: Option<&Frontmatter>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rel(s: &str) -> NoteRelPath {
+        NoteRelPath::from_trusted(s.into())
+    }
     use chrono::NaiveDate;
 
     #[test]
@@ -361,7 +373,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
         let content = "---\nid: my-story\ntags: [backend]\ncreated: \"2026-03-31\"\nstory_id: sc-19559\nstory_link: https://s/19559\n---\n\n# Ship the thing\n\nbody";
-        reindex_note(&conn, Path::new("stories/my-story.md"), content).unwrap();
+        reindex_note(&conn, &rel("stories/my-story.md"), content).unwrap();
 
         let rows = query(
             &conn,
@@ -380,7 +392,7 @@ mod tests {
     fn reindex_replaces_not_duplicates() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
-        let p = Path::new("a.md");
+        let p = &rel("a.md");
         reindex_note(&conn, p, "---\nid: a\n---\n").unwrap();
         reindex_note(&conn, p, "---\nid: a\n---\n").unwrap();
         let n: i64 = conn
@@ -397,7 +409,7 @@ mod tests {
         std::fs::write(notes.join("stories/a.md"), "---\nid: a\n---\n# Hi\n").unwrap();
 
         let mut conn = open(tmp.path()).unwrap();
-        reindex_note(&conn, Path::new("stories/a.md"), "---\nid: a\n---\n# Hi\n").unwrap();
+        reindex_note(&conn, &rel("stories/a.md"), "---\nid: a\n---\n# Hi\n").unwrap();
 
         let todos = vec![Todo::new_manual(
             "do it".into(),
@@ -407,7 +419,7 @@ mod tests {
         let got = query(&conn, "SELECT text FROM todos").unwrap();
         assert!(got.contains("do it"));
 
-        let body = read_note(&notes, "stories/a.md").unwrap().unwrap();
+        let body = read_note(&notes, &rel("stories/a.md")).unwrap().unwrap();
         assert!(body.contains("# Hi"));
 
         assert!(query(&conn, "DELETE FROM todos").is_err());
@@ -417,12 +429,12 @@ mod tests {
     fn indexes_branches_and_clears_on_remove() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
-        let p = Path::new("stories/s.md");
+        let p = &rel("stories/s.md");
         let content = "---\nid: s\nstory_id: sc-42\nbranches: [me/sc-42/s, stacked]\n---\n";
         reindex_note(&conn, p, content).unwrap();
         assert_eq!(
             story_for_branch(&conn, "stacked").unwrap(),
-            Some((42, "stories/s.md".into()))
+            Some((42.into(), rel("stories/s.md")))
         );
         assert_eq!(story_for_branch(&conn, "nope").unwrap(), None);
 
@@ -447,7 +459,7 @@ mod tests {
     fn branches_on_non_story_notes_dont_resolve() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
-        reindex_note(&conn, Path::new("x.md"), "---\nid: x\nbranches: [b]\n---\n").unwrap();
+        reindex_note(&conn, &rel("x.md"), "---\nid: x\nbranches: [b]\n---\n").unwrap();
         assert_eq!(story_for_branch(&conn, "b").unwrap(), None);
     }
 
@@ -456,24 +468,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
         let fm = "---\nid: s\nstory_id: sc-7\n---\n";
-        reindex_note(&conn, Path::new("archive/s.md"), fm).unwrap();
-        reindex_note(&conn, Path::new("stories/s.md"), fm).unwrap();
+        reindex_note(&conn, &rel("archive/s.md"), fm).unwrap();
+        reindex_note(&conn, &rel("stories/s.md"), fm).unwrap();
         assert_eq!(
-            note_for_story(&conn, 7).unwrap(),
-            Some("stories/s.md".into())
+            note_for_story(&conn, 7.into()).unwrap(),
+            Some(rel("stories/s.md"))
         );
-        assert_eq!(note_for_story(&conn, 8).unwrap(), None);
+        assert_eq!(note_for_story(&conn, 8.into()).unwrap(), None);
     }
 
     #[test]
     fn note_paths_for_colliding_ids() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
-        reindex_note(&conn, Path::new("stories/foo.md"), "---\nid: foo\n---\n").unwrap();
-        reindex_note(&conn, Path::new("foo.md"), "---\nid: foo\n---\n").unwrap();
+        reindex_note(&conn, &rel("stories/foo.md"), "---\nid: foo\n---\n").unwrap();
+        reindex_note(&conn, &rel("foo.md"), "---\nid: foo\n---\n").unwrap();
         assert_eq!(
             note_paths_for_id(&conn, "foo").unwrap(),
-            vec!["foo.md".to_string(), "stories/foo.md".to_string()]
+            vec![rel("foo.md"), rel("stories/foo.md")]
         );
         assert!(note_paths_for_id(&conn, "bar").unwrap().is_empty());
     }
@@ -484,12 +496,12 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("stories")).unwrap();
         std::fs::write(tmp.path().join("stories/a.md"), "hi").unwrap();
         assert_eq!(
-            read_note(tmp.path(), "stories/a.md").unwrap(),
+            read_note(tmp.path(), &rel("stories/a.md")).unwrap(),
             Some("hi".into())
         );
-        assert_eq!(read_note(tmp.path(), "missing.md").unwrap(), None);
+        assert_eq!(read_note(tmp.path(), &rel("missing.md")).unwrap(), None);
         for bad in ["/etc/passwd", "../x.md", "stories/../../x.md", ""] {
-            assert!(read_note(tmp.path(), bad).is_err(), "{bad}");
+            assert!(read_note(tmp.path(), &rel(bad)).is_err(), "{bad}");
         }
     }
 
@@ -498,7 +510,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open(tmp.path()).unwrap();
         for i in 0..3 {
-            reindex_note(&conn, Path::new(&format!("{i}.md")), "---\nid: x\n---\n").unwrap();
+            reindex_note(&conn, &rel(&format!("{i}.md")), "---\nid: x\n---\n").unwrap();
         }
         let (rows, truncated) = query_capped(&conn, "SELECT path FROM notes", 2).unwrap();
         assert!(truncated);
@@ -536,7 +548,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut conn = open(tmp.path()).unwrap();
         let tx = conn.transaction().unwrap();
-        reindex_note(&tx, Path::new("a.md"), "---\nid: a\nbranches: [b]\n---\n").unwrap();
+        reindex_note(&tx, &rel("a.md"), "---\nid: a\nbranches: [b]\n---\n").unwrap();
         tx.rollback().unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM note_branches", [], |r| r.get(0))
@@ -618,10 +630,10 @@ mod tests {
     fn golden_index_rows_are_stable() {
         let tmp = tempfile::tempdir().unwrap();
         let mut conn = open(tmp.path()).unwrap();
-        reindex_note(&conn, Path::new("stories/sc-7.md"), "---\nid: sc-7\ntags: [t]\ncreated: 2026-03-31\ntype: story\nstory_id: sc-7\nstory_link: https://s/7\nstory_name: Seven\niteration: https://it/3\nepic: https://ep/40\nbranches: [sc-7-branch]\n---\n\n# Title seven\n").unwrap();
-        reindex_note(&conn, Path::new("iterations/it-3.md"), "---\nid: it-3\niteration_id: it-3\niteration_link: https://it/3\niteration_name: Sprint 3\n---\n").unwrap();
-        reindex_note(&conn, Path::new("epics/ep-40.md"), "---\nid: ep-40\nepic_id: ep-40\nepic_link: https://ep/40\nepic_name: Forty\n---\n").unwrap();
-        reindex_note(&conn, Path::new("scratch/plain.md"), "# Plain heading\nno frontmatter\n").unwrap();
+        reindex_note(&conn, &rel("stories/sc-7.md"), "---\nid: sc-7\ntags: [t]\ncreated: 2026-03-31\ntype: story\nstory_id: sc-7\nstory_link: https://s/7\nstory_name: Seven\niteration: https://it/3\nepic: https://ep/40\nbranches: [sc-7-branch]\n---\n\n# Title seven\n").unwrap();
+        reindex_note(&conn, &rel("iterations/it-3.md"), "---\nid: it-3\niteration_id: it-3\niteration_link: https://it/3\niteration_name: Sprint 3\n---\n").unwrap();
+        reindex_note(&conn, &rel("epics/ep-40.md"), "---\nid: ep-40\nepic_id: ep-40\nepic_link: https://ep/40\nepic_name: Forty\n---\n").unwrap();
+        reindex_note(&conn, &rel("scratch/plain.md"), "# Plain heading\nno frontmatter\n").unwrap();
         mirror_todos(&mut conn, &[
             Todo {
                 id: uuid::Uuid::from_u128(1),
@@ -635,7 +647,7 @@ mod tests {
                 text: "parsed".into(),
                 date: None,
                 completed: true,
-                source: TodoSource::NoteParsed { file: "stories/sc-7.md".into(), line: 12, fingerprint: 5 },
+                source: TodoSource::NoteParsed { file: rel("stories/sc-7.md"), line: 12, fingerprint: 5 },
             },
         ]).unwrap();
         let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&query(&conn, sql).unwrap()).unwrap() };

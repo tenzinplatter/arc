@@ -3,7 +3,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiClient, story::Story};
-use arc_core::dbg_file;
+use arc_core::{IterationId, dbg_file};
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -15,7 +15,7 @@ pub enum IterationStatus {
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Iteration {
-    pub id: i32,
+    pub id: IterationId,
     pub name: String,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
@@ -39,7 +39,7 @@ impl ApiClient {
 
     pub async fn get_owned_iteration_stories(
         &self,
-        iteration_ids: Vec<i32>,
+        iteration_ids: Vec<IterationId>,
     ) -> anyhow::Result<Vec<Story>> {
         let iteration_stories = join_all(iteration_ids.iter().map(|id| async move {
             let query = format!("iteration:{} owner:{}", id, self.mention_name);

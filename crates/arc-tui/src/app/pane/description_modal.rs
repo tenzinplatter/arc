@@ -84,7 +84,7 @@ mod tests {
 
     fn create_test_story() -> Story {
         Story {
-            id: 1,
+            id: 1.into(),
             name: "Test Story".to_string(),
             description: "Test description".to_string(),
             completed: false,

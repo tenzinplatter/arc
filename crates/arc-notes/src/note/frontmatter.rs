@@ -1,3 +1,4 @@
+use arc_core::{EpicId, IterationId, StoryId};
 use chrono::NaiveDate;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -8,19 +9,19 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub enum EntityLink {
     None,
     Story {
-        id: i32,
+        id: StoryId,
         url: String,
         name: Option<String>,
         iteration_url: Option<String>,
         epic_url: Option<String>,
     },
     Iteration {
-        id: i32,
+        id: IterationId,
         url: String,
         name: Option<String>,
     },
     Epic {
-        id: i32,
+        id: EpicId,
         url: String,
         name: Option<String>,
     },
@@ -45,7 +46,7 @@ pub struct Frontmatter {
 impl Frontmatter {
     pub fn story(
         slug: String,
-        story_id: i32,
+        story_id: StoryId,
         story_name: String,
         story_url: String,
         iteration_url: Option<String>,
@@ -67,7 +68,7 @@ impl Frontmatter {
         }
     }
 
-    pub fn iteration(slug: String, id: i32, name: String, url: String) -> Self {
+    pub fn iteration(slug: String, id: IterationId, name: String, url: String) -> Self {
         Self {
             id: slug,
             created: Some(arc_core::time::today()),
@@ -83,7 +84,7 @@ impl Frontmatter {
         }
     }
 
-    pub fn epic(slug: String, id: i32, name: String, url: String) -> Self {
+    pub fn epic(slug: String, id: EpicId, name: String, url: String) -> Self {
         Self {
             id: slug,
             created: Some(arc_core::time::today()),
@@ -446,7 +447,7 @@ impl From<RawFrontmatter> for Frontmatter {
         // Classify by which id is present. A note links to at most one entity.
         let link = if let Some(id) = r.story_id.as_deref().and_then(parse_prefixed_id) {
             EntityLink::Story {
-                id,
+                id: id.into(),
                 url: r.story_link.unwrap_or_default(),
                 name: r.story_name,
                 iteration_url: r.iteration,
@@ -454,13 +455,13 @@ impl From<RawFrontmatter> for Frontmatter {
             }
         } else if let Some(id) = r.iteration_id.as_deref().and_then(parse_prefixed_id) {
             EntityLink::Iteration {
-                id,
+                id: id.into(),
                 url: r.iteration_link.unwrap_or_default(),
                 name: r.iteration_name,
             }
         } else if let Some(id) = r.epic_id.as_deref().and_then(parse_prefixed_id) {
             EntityLink::Epic {
-                id,
+                id: id.into(),
                 url: r.epic_link.unwrap_or_default(),
                 name: r.epic_name,
             }
@@ -531,7 +532,7 @@ mod tests {
         let fm = Frontmatter::from_note(content).unwrap();
         assert_eq!(fm.id, "my-story");
         assert_eq!(fm.tags, vec!["a"]);
-        assert!(matches!(fm.link, EntityLink::Story { id: 19559, .. }));
+        assert!(matches!(fm.link, EntityLink::Story { id, .. } if id.get() == 19559));
     }
 
     #[test]
@@ -539,7 +540,7 @@ mod tests {
         let content = "---\niteration_id: it-17842\niteration_link: https://it/17842\ncreated: 2026-02-18\n---\n";
         let fm = Frontmatter::from_note(content).unwrap();
         assert_eq!(fm.created, NaiveDate::from_ymd_opt(2026, 2, 18));
-        assert!(matches!(fm.link, EntityLink::Iteration { id: 17842, .. }));
+        assert!(matches!(fm.link, EntityLink::Iteration { id, .. } if id.get() == 17842));
     }
 
     #[test]
@@ -559,7 +560,7 @@ mod tests {
     fn story_roundtrips_through_block() {
         let fm = Frontmatter::story(
             "s".into(),
-            42,
+            42.into(),
             "Name".into(),
             "https://s/42".into(),
             Some("https://it/1".into()),
@@ -567,13 +568,13 @@ mod tests {
         let block = fm.to_block().unwrap();
         let full = format!("{block}\nbody");
         let back = Frontmatter::from_note(&full).unwrap();
-        assert!(matches!(back.link, EntityLink::Story { id: 42, .. }));
+        assert!(matches!(back.link, EntityLink::Story { id, .. } if id.get() == 42));
         assert!(block.contains("story_id: sc-42"));
     }
 
     #[test]
     fn branches_roundtrip_through_block() {
-        let mut fm = Frontmatter::story("s".into(), 42, "Name".into(), "https://s/42".into(), None);
+        let mut fm = Frontmatter::story("s".into(), 42.into(), "Name".into(), "https://s/42".into(), None);
         assert!(!fm.to_block().unwrap().contains("branches"));
         fm.branches = vec!["me/sc-42/name".into()];
         let full = format!("{}\nbody", fm.to_block().unwrap());
@@ -590,7 +591,7 @@ mod tests {
         assert!(once.ends_with("\n---\n\n# Title\n\nbody\n"));
         let fm = Frontmatter::from_note(&once).unwrap();
         assert_eq!(fm.branches, vec!["feat-x"]);
-        assert!(matches!(fm.link, EntityLink::Story { id: 42, .. }));
+        assert!(matches!(fm.link, EntityLink::Story { id, .. } if id.get() == 42));
 
         let more = add_branch(&once, "feat-y").unwrap();
         assert_eq!(
@@ -654,7 +655,7 @@ mod tests {
         .unwrap();
         assert!(fm.branches.is_empty());
         assert_eq!(fm.tags, vec!["a", "1"]);
-        assert!(matches!(fm.link, EntityLink::Story { id: 3, .. }));
+        assert!(matches!(fm.link, EntityLink::Story { id, .. } if id.get() == 3));
     }
 
     #[test]
@@ -763,7 +764,7 @@ mod tests {
     fn golden_story_block_with_iteration() {
         let fm = Frontmatter::story(
             "sc-7-slug".into(),
-            7,
+            7.into(),
             "Story seven".into(),
             "https://s/7".into(),
             Some("https://it/3".into()),
@@ -776,7 +777,7 @@ mod tests {
 
     #[test]
     fn golden_story_block_without_iteration() {
-        let fm = Frontmatter::story("sc-8-slug".into(), 8, "Story eight".into(), "https://s/8".into(), None);
+        let fm = Frontmatter::story("sc-8-slug".into(), 8.into(), "Story eight".into(), "https://s/8".into(), None);
         assert_eq!(
             pinned_block(fm),
             "---\nid: sc-8-slug\ncreated: 2026-03-31\nstory_id: sc-8\nstory_link: https://s/8\nstory_name: Story eight\n---\n"
@@ -785,7 +786,7 @@ mod tests {
 
     #[test]
     fn golden_iteration_block() {
-        let fm = Frontmatter::iteration("it-3-slug".into(), 3, "Sprint 3".into(), "https://it/3".into());
+        let fm = Frontmatter::iteration("it-3-slug".into(), 3.into(), "Sprint 3".into(), "https://it/3".into());
         assert_eq!(
             pinned_block(fm),
             "---\nid: it-3-slug\ncreated: 2026-03-31\niteration_id: it-3\niteration_link: https://it/3\niteration_name: Sprint 3\n---\n"
@@ -794,7 +795,7 @@ mod tests {
 
     #[test]
     fn golden_epic_block() {
-        let fm = Frontmatter::epic("ep-40-slug".into(), 40, "Epic forty".into(), "https://ep/40".into());
+        let fm = Frontmatter::epic("ep-40-slug".into(), 40.into(), "Epic forty".into(), "https://ep/40".into());
         assert_eq!(
             pinned_block(fm),
             "---\nid: ep-40-slug\ncreated: 2026-03-31\nepic_id: ep-40\nepic_link: https://ep/40\nepic_name: Epic forty\n---\n"
@@ -835,7 +836,7 @@ mod tests {
             tags: vec!["t".into()],
             aliases: vec!["alias".into()],
             link: EntityLink::Story {
-                id: 9,
+                id: 9.into(),
                 url: "https://s/9".into(),
                 name: Some("Story nine".into()),
                 iteration_url: Some("https://it/3".into()),

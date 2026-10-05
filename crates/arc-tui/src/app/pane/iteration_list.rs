@@ -4,6 +4,7 @@ use crossterm::event::KeyEvent;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::api::iteration::Iteration;
+use arc_core::IterationId;
 use crate::app::cmd::Cmd;
 use crate::app::model::IterationListState;
 use crate::app::msg::IterationListMsg;
@@ -29,7 +30,7 @@ pub fn combined_visible<'a>(
     query: &str,
 ) -> Vec<&'a Iteration> {
     let active_filtered = filter_items(current, query);
-    let active_ids: HashSet<i32> = active_filtered.iter().map(|it| it.id).collect();
+    let active_ids: HashSet<IterationId> = active_filtered.iter().map(|it| it.id).collect();
     let rest_filtered: Vec<&Iteration> = filter_items(all, query)
         .into_iter()
         .filter(|it| !active_ids.contains(&it.id))

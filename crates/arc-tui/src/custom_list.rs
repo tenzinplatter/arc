@@ -9,29 +9,32 @@ use ratatui::{
 
 /// Items that can appear in a `LinearList` must expose an id and a display label.
 pub trait LinearListItem {
-    fn id(&self) -> i32;
+    type Id: Copy + Eq;
+    fn id(&self) -> Self::Id;
     fn label(&self) -> &str;
 }
 
 impl LinearListItem for arc_shortcut::api::iteration::Iteration {
-    fn id(&self) -> i32 { self.id }
+    type Id = arc_core::IterationId;
+    fn id(&self) -> Self::Id { self.id }
     fn label(&self) -> &str { &self.name }
 }
 
 impl LinearListItem for arc_shortcut::api::epic::EpicSlim {
-    fn id(&self) -> i32 { self.id }
+    type Id = arc_core::EpicId;
+    fn id(&self) -> Self::Id { self.id }
     fn label(&self) -> &str { &self.name }
 }
 
 /// A simple, bordered linear list widget with selection highlighting and dividers.
 pub struct LinearList<'a, T: LinearListItem> {
     pub items: &'a [T],
-    pub selected_id: Option<i32>,
+    pub selected_id: Option<T::Id>,
     pub empty_message: &'a str,
 }
 
 impl<'a, T: LinearListItem> LinearList<'a, T> {
-    pub fn new(items: &'a [T], selected_id: Option<i32>, empty_message: &'a str) -> Self {
+    pub fn new(items: &'a [T], selected_id: Option<T::Id>, empty_message: &'a str) -> Self {
         LinearList {
             items,
             selected_id,

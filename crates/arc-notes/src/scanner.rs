@@ -1,16 +1,18 @@
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use chrono::NaiveDate;
 use regex::Regex;
+
+use crate::path::NoteRelPath;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedTodo {
     pub text: String,
     pub completed: bool,
     pub date: Option<NaiveDate>,
-    pub file: PathBuf,
+    pub file: NoteRelPath,
     pub line: u32,
     pub fingerprint: u64,
 }
@@ -26,7 +28,7 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn parse_note(content: &str, file: &Path) -> Vec<ParsedTodo> {
+pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
     let mut out = Vec::new();
     let re = date_token_regex();
 
@@ -60,13 +62,13 @@ pub fn parse_note(content: &str, file: &Path) -> Vec<ParsedTodo> {
         };
 
         let normalized = text.to_lowercase();
-        let fp = fingerprint(file, &normalized);
+        let fp = fingerprint(Path::new(file.as_str()), &normalized);
 
         out.push(ParsedTodo {
             text,
             completed,
             date,
-            file: file.to_path_buf(),
+            file: file.clone(),
             line: line_no,
             fingerprint: fp,
         });
@@ -89,8 +91,8 @@ pub fn fingerprint(file: &Path, normalized_text: &str) -> u64 {
 mod tests {
     use super::*;
 
-    fn f() -> PathBuf {
-        PathBuf::from("note.md")
+    fn f() -> NoteRelPath {
+        NoteRelPath::from_trusted("note.md".into())
     }
 
     #[test]

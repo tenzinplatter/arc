@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, user::MemberId};
+use arc_core::EpicId;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct EpicSlim {
-    pub id: i32,
+    pub id: EpicId,
     pub name: String,
     pub app_url: String,
-    pub owner_ids: Vec<Uuid>,
+    pub owner_ids: Vec<MemberId>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

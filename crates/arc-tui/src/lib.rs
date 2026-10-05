@@ -135,12 +135,12 @@ pub async fn handle_command(
 
         Commands::Active { id } => {
             let mut cache = cache;
-            let story = match cache.find_story(id) {
+            let story = match cache.find_story(id.into()) {
                 Some(story) => story.clone(),
                 None => {
                     let client =
                         ApiClient::from_token_and_cache(&config.api_token, &mut cache).await?;
-                    fetch_story(&mut cache, &client, id)
+                    fetch_story(&mut cache, &client, id.into())
                         .await
                         .with_context(|| format!("Failed to fetch story {id}"))?
                 }

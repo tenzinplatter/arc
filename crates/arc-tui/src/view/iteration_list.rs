@@ -61,7 +61,7 @@ impl WidgetRef for IterationListView<'_> {
             .collect();
 
         use std::collections::HashSet;
-        let active_ids: HashSet<i32> = active_visible.iter().map(|it| it.id).collect();
+        let active_ids: HashSet<arc_core::IterationId> = active_visible.iter().map(|it| it.id).collect();
         let rest_visible: Vec<Iteration> = filter_items(self.all_iterations, query)
             .into_iter()
             .filter(|it| !active_ids.contains(&it.id))

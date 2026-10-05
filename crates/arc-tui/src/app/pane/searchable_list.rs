@@ -8,11 +8,21 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::navkey;
 
-#[derive(Clone, Debug, Default)]
-pub struct SearchListState {
-    pub selected_id: Option<i32>,
+#[derive(Clone, Debug)]
+pub struct SearchListState<Id> {
+    pub selected_id: Option<Id>,
     pub search_query: String,
     pub search_active: bool,
+}
+
+impl<Id> Default for SearchListState<Id> {
+    fn default() -> Self {
+        Self {
+            selected_id: None,
+            search_query: String::new(),
+            search_active: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,20 +38,20 @@ pub enum SearchListMsg {
 }
 
 /// What the caller should do after a generic update.
-pub enum Outcome {
+pub enum Outcome<Id> {
     Idle,
     /// Open the item with this id (the current selection).
-    Open(i32),
+    Open(Id),
 }
 
 /// Apply a message to the shared list state. `visible_ids` yields the ids of the
 /// currently-visible items (in display order) for a given query — the caller
 /// captures its own item set and filtering rule.
-pub fn update(
-    state: &mut SearchListState,
-    visible_ids: impl Fn(&str) -> Vec<i32>,
+pub fn update<Id: Copy + PartialEq>(
+    state: &mut SearchListState<Id>,
+    visible_ids: impl Fn(&str) -> Vec<Id>,
     msg: SearchListMsg,
-) -> Outcome {
+) -> Outcome<Id> {
     match msg {
         SearchListMsg::FocusNext => {
             move_selection(state, &visible_ids, true);
@@ -85,7 +95,11 @@ pub fn update(
     }
 }
 
-fn move_selection(state: &mut SearchListState, visible_ids: &impl Fn(&str) -> Vec<i32>, forward: bool) {
+fn move_selection<Id: Copy + PartialEq>(
+    state: &mut SearchListState<Id>,
+    visible_ids: &impl Fn(&str) -> Vec<Id>,
+    forward: bool,
+) {
     let visible = visible_ids(&state.search_query.clone());
     if visible.is_empty() {
         return;

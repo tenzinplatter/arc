@@ -1,9 +1,11 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use slugify::slugify;
-use uuid::Uuid;
-
-use crate::api::{ApiClient, branch::Branch, iteration::Iteration, story::comment::StoryComment};
+use crate::api::{
+    ApiClient, branch::Branch, iteration::Iteration, story::comment::StoryComment,
+    user::MemberId, workflow::WorkflowStateId,
+};
+use arc_core::{EpicId, IterationId, StoryId};
 
 pub mod comment;
 
@@ -13,18 +15,18 @@ pub struct Story {
     pub completed: bool,
     pub comments: Vec<StoryComment>,
     pub description: String,
-    pub epic_id: Option<i32>,
-    pub id: i32,
-    pub iteration_id: Option<i32>,
+    pub epic_id: Option<EpicId>,
+    pub id: StoryId,
+    pub iteration_id: Option<IterationId>,
     pub name: String,
     pub app_url: String,
     // defaulted so caches written before these fields existed still parse
     #[serde(default)]
-    pub workflow_state_id: Option<i64>,
+    pub workflow_state_id: Option<WorkflowStateId>,
     #[serde(default)]
     pub story_type: String,
     #[serde(default)]
-    pub owner_ids: Vec<Uuid>,
+    pub owner_ids: Vec<MemberId>,
     #[serde(default)]
     pub estimate: Option<i32>,
 }
@@ -71,7 +73,7 @@ impl ApiClient {
         Ok(all)
     }
 
-    pub async fn get_story(&self, id: i32) -> anyhow::Result<Story> {
+    pub async fn get_story(&self, id: StoryId) -> anyhow::Result<Story> {
         let response = self
             .get(&format!("stories/{id}"))
             .await?
@@ -84,7 +86,7 @@ impl ApiClient {
 
     pub async fn update_story_description(
         &self,
-        story_id: i32,
+        story_id: StoryId,
         new_description: String,
     ) -> anyhow::Result<()> {
         let body = serde_json::json!({
@@ -110,7 +112,7 @@ impl Story {
 }
 
 pub fn get_story_associated_iteration<'a>(
-    iteration_id: Option<i32>,
+    iteration_id: Option<IterationId>,
     iterations: impl IntoIterator<Item = &'a Iteration>,
 ) -> Option<&'a Iteration> {
     let iteration_id = iteration_id?;
@@ -150,8 +152,8 @@ mod tests {
             "workflow_state_id": 500000007
         }"#;
         let story: Story = serde_json::from_str(json).unwrap();
-        assert_eq!(story.id, 16727);
-        assert_eq!(story.workflow_state_id, Some(500000007));
+        assert_eq!(story.id, 16727.into());
+        assert_eq!(story.workflow_state_id, Some(500000007.into()));
         assert_eq!(story.story_type, "feature");
         assert_eq!(story.owner_ids.len(), 1);
         assert_eq!(story.estimate, Some(3));

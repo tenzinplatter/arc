@@ -24,7 +24,7 @@ use crate::{
 pub struct ActionMenuState {
     pub list_state: ListState,
     pub is_showing: bool,
-    pub target_story_id: Option<i32>,
+    pub target_story_id: Option<arc_core::StoryId>,
 }
 
 impl Default for ActionMenuState {

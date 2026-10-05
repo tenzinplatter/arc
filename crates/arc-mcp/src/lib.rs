@@ -6,7 +6,7 @@
 //! back to cached data when it's unreachable.
 
 use std::future::Future;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,9 +24,10 @@ use slugify::slugify;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use arc_core::Config;
+use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
+use arc_notes::NoteRelPath;
 use arc_notes::todos::{Todo, TodoSource};
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
@@ -159,6 +160,7 @@ impl ArcMcp {
         &self,
         Parameters(StoryIdArgs { story_id }): Parameters<StoryIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let story_id = StoryId::from(story_id);
         let mut cache = self.read_cache().await;
         let mut notes = Vec::new();
         if let Err(e) = self.refresh_story(&mut cache, story_id).await {
@@ -174,7 +176,7 @@ impl ArcMcp {
         let cache_dir = self.cache_dir.clone();
         let json = tokio::task::spawn_blocking(move || -> Result<String> {
             let conn = arc_index::open_readonly(&cache_dir)?;
-            let note = arc_index::note_for_story(&conn, story_id)?;
+            let note = arc_index::note_for_story(&conn, story_id)?.map(|p| p.to_string());
             Ok(story_detail(&cache, &story, note).to_string())
         })
         .await
@@ -191,8 +193,9 @@ impl ArcMcp {
         &self,
         Parameters(StoryIdArgs { story_id }): Parameters<StoryIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let story_id = StoryId::from(story_id);
         let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
-        let found = tokio::task::spawn_blocking(move || -> Result<Option<(String, String)>> {
+        let found = tokio::task::spawn_blocking(move || -> Result<Option<(NoteRelPath, String)>> {
             let conn = arc_index::open_readonly(&cache_dir)?;
             story_note(&conn, &notes_dir, story_id)
         })
@@ -256,7 +259,7 @@ impl ArcMcp {
         Parameters(AppendNoteArgs { id, path, content }): Parameters<AppendNoteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let (cache_dir, notes_dir) = (self.cache_dir.clone(), self.notes_dir.clone());
-        let rel = tokio::task::spawn_blocking(move || -> Result<String> {
+        let rel = tokio::task::spawn_blocking(move || -> Result<NoteRelPath> {
             let conn = arc_index::open(&cache_dir)?;
             let rel = resolve_note(&conn, id.as_deref(), path.as_deref())?;
             append_note(&conn, &notes_dir, &rel, &content)?;
@@ -294,6 +297,7 @@ impl ArcMcp {
         &self,
         Parameters(CreateStoryNoteArgs { story_id, body }): Parameters<CreateStoryNoteArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let story_id = StoryId::from(story_id);
         let mut cache = self.read_cache().await;
         if cache.find_story(story_id).is_none()
             && let Err(e) = self.refresh_story(&mut cache, story_id).await
@@ -405,7 +409,7 @@ impl ArcMcp {
 
     /// Fetch a fresh copy of the story and persist it. The cache is re-read
     /// after the fetch so concurrent writers' changes aren't clobbered.
-    async fn refresh_story(&self, cache: &mut Cache, id: i32) -> Result<()> {
+    async fn refresh_story(&self, cache: &mut Cache, id: StoryId) -> Result<()> {
         let client = self.client(cache).await?;
         let story = timed(client.get_story(id)).await?;
         *cache = self.read_cache().await;
@@ -538,8 +542,8 @@ fn story_detail(cache: &Cache, s: &Story, note: Option<String>) -> Value {
 fn story_note(
     conn: &Connection,
     notes_dir: &Path,
-    story_id: i32,
-) -> Result<Option<(String, String)>> {
+    story_id: StoryId,
+) -> Result<Option<(NoteRelPath, String)>> {
     if let Some(rel) = arc_index::note_for_story(conn, story_id)?
         && let Some(body) = arc_index::read_note(notes_dir, &rel)?
     {
@@ -549,7 +553,7 @@ fn story_note(
 }
 
 /// First `stories/*.md` whose frontmatter links to the story.
-fn scan_story_note(notes_dir: &Path, story_id: i32) -> Result<Option<(String, String)>> {
+fn scan_story_note(notes_dir: &Path, story_id: StoryId) -> Result<Option<(NoteRelPath, String)>> {
     let mut names: Vec<String> = match std::fs::read_dir(notes_dir.join("stories")) {
         Ok(dir) => dir
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
@@ -560,7 +564,7 @@ fn scan_story_note(notes_dir: &Path, story_id: i32) -> Result<Option<(String, St
     };
     names.sort();
     for name in names {
-        let rel = format!("stories/{name}");
+        let rel = NoteRelPath::from_trusted(format!("stories/{name}"));
         if let Some(body) = arc_index::read_note(notes_dir, &rel)?
             && links_story(&body, story_id)
         {
@@ -570,39 +574,15 @@ fn scan_story_note(notes_dir: &Path, story_id: i32) -> Result<Option<(String, St
     Ok(None)
 }
 
-fn links_story(content: &str, story_id: i32) -> bool {
+fn links_story(content: &str, story_id: StoryId) -> bool {
     Frontmatter::from_note(content)
         .is_some_and(|fm| matches!(fm.link, EntityLink::Story { id, .. } if id == story_id))
 }
 
-/// Normalised notes-dir-relative path (`./` and repeated `/` dropped).
-/// Rejects absolute paths and anything that could climb out of the notes dir.
-fn check_rel_path(rel: &str) -> Result<String> {
-    let mut parts = Vec::new();
-    for c in Path::new(rel).components() {
-        match c {
-            Component::Normal(p) => parts.push(
-                p.to_str()
-                    .ok_or_else(|| anyhow!("path must be valid UTF-8: '{rel}'"))?,
-            ),
-            Component::CurDir => {}
-            _ => bail!("path must be relative to the notes dir without `..`: '{rel}'"),
-        }
-    }
-    if parts.is_empty() {
-        bail!("path must be relative to the notes dir without `..`: '{rel}'");
-    }
-    let norm = parts.join("/");
-    if Path::new(&norm).extension().is_none_or(|e| e != "md") {
-        bail!("path must be a .md note: '{rel}'");
-    }
-    Ok(norm)
-}
-
 /// Notes-dir-relative path from an explicit `path`, else a unique `id`.
-fn resolve_note(conn: &Connection, id: Option<&str>, path: Option<&str>) -> Result<String> {
+fn resolve_note(conn: &Connection, id: Option<&str>, path: Option<&str>) -> Result<NoteRelPath> {
     if let Some(rel) = path {
-        return check_rel_path(rel);
+        return NoteRelPath::parse(rel);
     }
     let id = id.ok_or_else(|| anyhow!("pass `id` or `path`"))?;
     let mut paths = arc_index::note_paths_for_id(conn, id)?;
@@ -611,13 +591,13 @@ fn resolve_note(conn: &Connection, id: Option<&str>, path: Option<&str>) -> Resu
         1 => Ok(paths.remove(0)),
         _ => bail!(
             "id '{id}' matches several notes; pass `path` instead: {}",
-            paths.join(", ")
+            paths.iter().map(NoteRelPath::as_str).collect::<Vec<_>>().join(", ")
         ),
     }
 }
 
 /// Append markdown to an existing note and refresh its index row.
-fn append_note(conn: &Connection, notes_dir: &Path, rel: &str, content: &str) -> Result<()> {
+fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
     let mut body = arc_index::read_note(notes_dir, rel)?
         .ok_or_else(|| anyhow!("no note at '{rel}'"))?;
     if !body.ends_with('\n') {
@@ -626,8 +606,8 @@ fn append_note(conn: &Connection, notes_dir: &Path, rel: &str, content: &str) ->
     body.push('\n');
     body.push_str(content.trim_end());
     body.push('\n');
-    std::fs::write(notes_dir.join(rel), &body)?;
-    arc_index::reindex_note(conn, Path::new(rel), &body)?;
+    std::fs::write(rel.abs(notes_dir), &body)?;
+    arc_index::reindex_note(conn, rel, &body)?;
     Ok(())
 }
 
@@ -654,7 +634,7 @@ fn create_note(
         std::fs::create_dir_all(p)?;
     }
     std::fs::write(&abs, &content)?;
-    arc_index::reindex_note(conn, Path::new(&rel), &content)?;
+    arc_index::reindex_note(conn, &NoteRelPath::from_trusted(rel.clone()), &content)?;
     Ok((slug, rel))
 }
 
@@ -708,7 +688,7 @@ fn create_story_note(
         std::fs::create_dir_all(p)?;
     }
     std::fs::write(&abs, &content)?;
-    arc_index::reindex_note(conn, Path::new(&rel), &content)?;
+    arc_index::reindex_note(conn, &NoteRelPath::from_trusted(rel.clone()), &content)?;
     Ok((slug, rel))
 }
 
@@ -755,10 +735,15 @@ pub async fn run_stdio(config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use arc_shortcut::api::story::comment::StoryComment;
+    use arc_shortcut::api::user::MemberId;
+
+    fn rel(s: &str) -> NoteRelPath {
+        NoteRelPath::from_trusted(s.into())
+    }
 
     fn story(id: i32, name: &str) -> Story {
         Story {
-            id,
+            id: id.into(),
             name: name.into(),
             app_url: format!("https://app.shortcut.com/x/story/{id}"),
             ..Default::default()
@@ -784,7 +769,7 @@ mod tests {
         append_note(&conn, notes.path(), &rel, "more\n\n").unwrap();
         let body = std::fs::read_to_string(notes.path().join(&rel)).unwrap();
         assert!(body.ends_with("body\n\nmore\n"));
-        assert!(append_note(&conn, notes.path(), "missing.md", "x").is_err());
+        assert!(append_note(&conn, notes.path(), &NoteRelPath::from_trusted("missing.md".into()), "x").is_err());
     }
 
     #[test]
@@ -802,14 +787,14 @@ mod tests {
         .unwrap();
         assert_eq!(created, ("optical-flow".into(), "stories/optical-flow.md".into()));
         assert_eq!(
-            arc_index::note_for_story(&conn, 42).unwrap(),
-            Some("stories/optical-flow.md".into())
+            arc_index::note_for_story(&conn, 42.into()).unwrap(),
+            Some(rel("stories/optical-flow.md"))
         );
         let body = std::fs::read_to_string(notes.path().join("stories/optical-flow.md")).unwrap();
         let fm = Frontmatter::from_note(&body).unwrap();
         assert!(matches!(
             fm.link,
-            EntityLink::Story { id: 42, epic_url: Some(ref e), iteration_url: Some(_), .. } if e == "https://epic"
+            EntityLink::Story { id, epic_url: Some(ref e), iteration_url: Some(_), .. } if id.get() == 42 && e == "https://epic"
         ));
         let err = create_story_note(&conn, notes.path(), &s, None, None, "again").unwrap_err();
         assert!(err.to_string().contains("stories/optical-flow.md"), "{err}");
@@ -823,10 +808,10 @@ mod tests {
             create_story_note(&conn, notes.path(), &story(2, "Same Name"), None, None, "b").unwrap();
         assert_eq!(created, ("same-name-2".into(), "stories/same-name-2.md".into()));
         assert_eq!(
-            arc_index::note_for_story(&conn, 2).unwrap(),
-            Some("stories/same-name-2.md".into())
+            arc_index::note_for_story(&conn, 2.into()).unwrap(),
+            Some(rel("stories/same-name-2.md"))
         );
-        let (rel, body) = story_note(&conn, notes.path(), 1).unwrap().unwrap();
+        let (rel, body) = story_note(&conn, notes.path(), 1.into()).unwrap().unwrap();
         assert_eq!(rel, "stories/same-name.md");
         assert!(body.ends_with("a\n"));
 
@@ -853,16 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn rel_path_validation() {
-        assert_eq!(check_rel_path("stories/a.md").unwrap(), "stories/a.md");
-        assert_eq!(check_rel_path("./a.md").unwrap(), "a.md");
-        assert_eq!(check_rel_path(".//stories//./a.md").unwrap(), "stories/a.md");
-        for bad in ["../a.md", "stories/../../a.md", "/etc/a.md", "", ".", "a.txt", "stories"] {
-            assert!(check_rel_path(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
     fn append_by_unnormalised_path_keeps_one_index_row() {
         let (_c, notes, conn) = setup();
         create_story_note(&conn, notes.path(), &story(8, "X"), None, None, "b").unwrap();
@@ -876,8 +851,8 @@ mod tests {
     #[test]
     fn resolve_note_by_id_and_path() {
         let (_c, _n, conn) = setup();
-        arc_index::reindex_note(&conn, Path::new("foo.md"), "---\nid: foo\n---\n").unwrap();
-        arc_index::reindex_note(&conn, Path::new("stories/foo.md"), "---\nid: foo\n---\n")
+        arc_index::reindex_note(&conn, &rel("foo.md"), "---\nid: foo\n---\n").unwrap();
+        arc_index::reindex_note(&conn, &rel("stories/foo.md"), "---\nid: foo\n---\n")
             .unwrap();
         let err = resolve_note(&conn, Some("foo"), None).unwrap_err().to_string();
         assert!(err.contains("foo.md") && err.contains("stories/foo.md"), "{err}");
@@ -893,7 +868,7 @@ mod tests {
     #[test]
     fn story_note_scans_for_unindexed_notes() {
         let (_c, notes, conn) = setup();
-        assert_eq!(story_note(&conn, notes.path(), 7).unwrap(), None);
+        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
 
         // same slug, but not linked to this story
         std::fs::create_dir_all(notes.path().join("stories")).unwrap();
@@ -903,32 +878,32 @@ mod tests {
             "---\nid: a\nstory_id: sc-70\n---\n",
         )
         .unwrap();
-        assert_eq!(story_note(&conn, notes.path(), 7).unwrap(), None);
+        assert_eq!(story_note(&conn, notes.path(), 7.into()).unwrap(), None);
 
         let linked = "---\nid: some-story-7\nstory_id: sc-7\n---\nunindexed";
         std::fs::write(notes.path().join("stories/some-story-7.md"), linked).unwrap();
         assert_eq!(
-            story_note(&conn, notes.path(), 7).unwrap(),
-            Some(("stories/some-story-7.md".into(), linked.into()))
+            story_note(&conn, notes.path(), 7.into()).unwrap(),
+            Some((rel("stories/some-story-7.md"), linked.into()))
         );
 
         // index wins over the scan
         std::fs::write(notes.path().join("other.md"), "indexed").unwrap();
-        arc_index::reindex_note(&conn, Path::new("other.md"), "---\nid: o\nstory_id: sc-7\n---\n")
+        arc_index::reindex_note(&conn, &rel("other.md"), "---\nid: o\nstory_id: sc-7\n---\n")
             .unwrap();
         assert_eq!(
-            story_note(&conn, notes.path(), 7).unwrap(),
-            Some(("other.md".into(), "indexed".into()))
+            story_note(&conn, notes.path(), 7.into()).unwrap(),
+            Some((rel("other.md"), "indexed".into()))
         );
     }
 
     #[test]
     fn slim_stories_shape() {
         let (_c, _n, conn) = setup();
-        arc_index::reindex_note(&conn, Path::new("stories/a.md"), "---\nid: a\nstory_id: sc-1\n---\n")
+        arc_index::reindex_note(&conn, &rel("stories/a.md"), "---\nid: a\nstory_id: sc-1\n---\n")
             .unwrap();
         let mut a = story(1, "A");
-        a.workflow_state_id = Some(500);
+        a.workflow_state_id = Some(500.into());
         a.story_type = "feature".into();
         a.estimate = Some(3);
         a.description = "long".into();
@@ -936,7 +911,7 @@ mod tests {
             iteration_stories: Some(vec![a, story(2, "B")]),
             ..Default::default()
         };
-        cache.workflow_states.insert(500, "In Progress".into());
+        cache.workflow_states.insert(500.into(), "In Progress".into());
 
         let v = slim_stories(&cache, &conn).unwrap();
         assert_eq!(
@@ -953,8 +928,8 @@ mod tests {
 
     #[test]
     fn story_detail_names_and_comments() {
-        let owner = Uuid::from_u128(1);
-        let unknown = Uuid::from_u128(2);
+        let owner = MemberId::from(Uuid::from_u128(1));
+        let unknown = MemberId::from(Uuid::from_u128(2));
         let mut s = story(3, "C");
         s.owner_ids = vec![owner, unknown];
         let comment = |pos: i32, deleted: bool, text: &str| StoryComment {
@@ -984,21 +959,21 @@ mod tests {
             ..Default::default()
         };
         store_story(&mut cache, story(1, "new"));
-        assert_eq!(cache.find_story(1).unwrap().name, "new");
+        assert_eq!(cache.find_story(1.into()).unwrap().name, "new");
         assert!(cache.stories_by_id.is_empty());
         store_story(&mut cache, story(9, "outside"));
-        assert_eq!(cache.stories_by_id[&9].name, "outside");
+        assert_eq!(cache.stories_by_id[&9.into()].name, "outside");
     }
 
     #[test]
     fn store_story_refreshes_active_and_by_id_copies() {
         let mut cache = Cache {
             active_story: Some(story(5, "old")),
-            stories_by_id: [(5, story(5, "old"))].into(),
+            stories_by_id: [(5.into(), story(5, "old"))].into(),
             ..Default::default()
         };
         store_story(&mut cache, story(5, "new"));
-        assert_eq!(cache.find_story(5).unwrap().name, "new");
+        assert_eq!(cache.find_story(5.into()).unwrap().name, "new");
         assert_eq!(cache.active_story.as_ref().unwrap().name, "new");
 
         // active story alone gets an up-to-date stories_by_id entry too
@@ -1007,7 +982,7 @@ mod tests {
             ..Default::default()
         };
         store_story(&mut cache, story(6, "new"));
-        assert_eq!(cache.stories_by_id[&6].name, "new");
+        assert_eq!(cache.stories_by_id[&6.into()].name, "new");
         assert_eq!(cache.active_story.unwrap().name, "new");
     }
 
@@ -1023,10 +998,10 @@ mod tests {
     }
 
     fn golden_detail_story() -> (Cache, Story) {
-        let known = uuid::Uuid::from_u128(1);
-        let unknown = uuid::Uuid::from_u128(2);
+        let known = MemberId::from(uuid::Uuid::from_u128(1));
+        let unknown = MemberId::from(uuid::Uuid::from_u128(2));
         let mut cache = Cache::default();
-        cache.workflow_states.insert(500, "In Progress".into());
+        cache.workflow_states.insert(500.into(), "In Progress".into());
         cache.members.insert(known, "tenzin".into());
         let comment = |id: i64, author_id, deleted, position, text: &str| StoryComment {
             id,
@@ -1045,12 +1020,12 @@ mod tests {
                 comment(1, Some(known), false, 0, "first"),
             ],
             description: "desc".into(),
-            epic_id: Some(40),
-            id: 7,
-            iteration_id: Some(3),
+            epic_id: Some(40.into()),
+            id: 7.into(),
+            iteration_id: Some(3.into()),
             name: "story seven".into(),
             app_url: "https://app.shortcut.com/x/story/7".into(),
-            workflow_state_id: Some(500),
+            workflow_state_id: Some(500.into()),
             story_type: "feature".into(),
             owner_ids: vec![known, unknown],
             estimate: Some(3),

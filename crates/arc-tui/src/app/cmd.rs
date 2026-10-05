@@ -6,28 +6,30 @@ use std::{
 
 use slugify::slugify;
 
+use arc_notes::NoteRelPath;
+
 use crate::{
     api::story::Story,
     note::{Note, frontmatter::Frontmatter},
     tmux, zellij,
 };
-use arc_core::{Config, Mux, dbg_file};
+use arc_core::{Config, EpicId, IterationId, Mux, StoryId, dbg_file};
 
 #[derive(Debug, Clone)]
 pub enum Cmd {
     None,
     OpenNote {
-        story_id: i32,
+        story_id: StoryId,
         story_name: String,
         story_app_url: String,
         iteration_app_url: Option<String>,
     },
     WriteCache,
     FetchStories {
-        iteration_ids: Vec<i32>,
+        iteration_ids: Vec<IterationId>,
     },
     EditStoryContent {
-        story_id: i32,
+        story_id: StoryId,
         description: String,
     },
     FetchEpics,
@@ -44,12 +46,12 @@ pub enum Cmd {
         app_url: String,
     },
     OpenIterationNote {
-        iteration_id: i32,
+        iteration_id: IterationId,
         iteration_name: String,
         iteration_app_url: String,
     },
     OpenEpicNote {
-        epic_id: i32,
+        epic_id: EpicId,
         epic_name: String,
         epic_app_url: String,
     },
@@ -62,7 +64,7 @@ pub enum Cmd {
     },
     WriteTodos,
     SyncNoteCheckbox {
-        file: PathBuf,
+        file: NoteRelPath,
         text: String,
         complete: bool,
     },
@@ -106,7 +108,7 @@ fn open_with_frontmatter(config: &Config, path: &Path, fm: Frontmatter) -> anyho
 }
 
 pub fn open_note_in_editor(
-    story_id: i32,
+    story_id: StoryId,
     story_name: String,
     story_app_url: String,
     iteration_app_url: Option<String>,
@@ -123,7 +125,7 @@ pub fn open_note_in_editor(
 }
 
 pub fn open_iteration_note_in_editor(
-    iteration_id: i32,
+    iteration_id: IterationId,
     iteration_name: String,
     iteration_app_url: String,
     config: &Config,
@@ -137,7 +139,7 @@ pub fn open_iteration_note_in_editor(
 }
 
 pub fn open_epic_note_in_editor(
-    epic_id: i32,
+    epic_id: EpicId,
     epic_name: String,
     epic_app_url: String,
     config: &Config,

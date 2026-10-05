@@ -1,7 +1,6 @@
 use anyhow::Context;
 use reqwest::{Client, RequestBuilder, Response};
 use serde::Serialize;
-use uuid::Uuid;
 
 pub mod branch;
 pub mod epic;
@@ -10,12 +9,14 @@ pub mod story;
 pub mod user;
 pub mod workflow;
 
+use user::MemberId;
+
 pub const API_BASE_URL: &str = "https://api.app.shortcut.com/api/v3";
 
 #[derive(Clone)]
 pub struct ApiClient {
     api_token: String,
-    pub user_id: Uuid,
+    pub user_id: MemberId,
     pub mention_name: String,
     http_client: Client,
 }
@@ -73,7 +74,7 @@ impl ApiClient {
             .header("Content-Type", "application/json")
     }
 
-    pub fn new(api_token: String, user_id: Uuid, mention_name: String) -> Self {
+    pub fn new(api_token: String, user_id: MemberId, mention_name: String) -> Self {
         Self {
             api_token,
             user_id,

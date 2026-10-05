@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use arc_core::config::Config;
 use crate::scheduler::{DBusNotifier, ScheduledTodo, Scheduler, SystemClock};
 use crate::watcher::WatchEvent;
+use arc_notes::NoteRelPath;
 use arc_notes::todos::TodoSource;
 
 pub mod install;
@@ -88,7 +89,10 @@ async fn bootstrap_scan(
     let files = list_markdown(notes_dir)?;
     info!("bootstrap: scanning {} note files", files.len());
     for abs in files {
-        let rel = abs.strip_prefix(notes_dir).unwrap_or(&abs).to_path_buf();
+        let Some(rel) = NoteRelPath::from_abs(notes_dir, &abs) else {
+            warn!("bootstrap: skipping {} outside notes dir", abs.display());
+            continue;
+        };
         let content = match std::fs::read_to_string(&abs) {
             Ok(c) => c,
             Err(e) => {
@@ -98,10 +102,10 @@ async fn bootstrap_scan(
         };
         let parsed = arc_notes::scanner::parse_note(&content, &rel);
         if let Err(e) = store::merge_file(cache_dir, &rel, parsed).await {
-            warn!("merge {} failed: {e:#}", rel.display());
+            warn!("merge {rel} failed: {e:#}");
         }
         if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
-            warn!("index {} failed: {e:#}", rel.display());
+            warn!("index {rel} failed: {e:#}");
         }
     }
     mirror_todos(cache_dir, index).await;
@@ -150,10 +154,10 @@ async fn handle_event(
         WatchEvent::Changed(p) => (p, false),
         WatchEvent::Removed(p) => (p, true),
     };
-    let rel = abs
-        .strip_prefix(&config.notes_dir)
-        .unwrap_or(&abs)
-        .to_path_buf();
+    let Some(rel) = NoteRelPath::from_abs(&config.notes_dir, &abs) else {
+        warn!("skipping {} outside notes dir", abs.display());
+        return Ok(());
+    };
 
     let treat_as_removed = removed
         || matches!(
@@ -183,7 +187,7 @@ async fn handle_event(
         let parsed = arc_notes::scanner::parse_note(&content, &rel);
         let _ = store::merge_file(&config.cache_dir, &rel, parsed).await?;
         if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
-            warn!("index {} failed: {e:#}", rel.display());
+            warn!("index {rel} failed: {e:#}");
         }
     }
     mirror_todos(&config.cache_dir, index).await;
@@ -207,7 +211,6 @@ async fn rebuild_schedule(cache_dir: &Path, sched: &mut Scheduler) -> Result<()>
         let title = match &t.source {
             TodoSource::NoteParsed { file, .. } => file
                 .file_stem()
-                .and_then(|s| s.to_str())
                 .map(|s| format!("arc — {}", s))
                 .unwrap_or_else(|| "arc".to_string()),
             TodoSource::Manual => "arc".to_string(),

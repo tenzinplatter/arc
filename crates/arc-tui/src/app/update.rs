@@ -220,13 +220,19 @@ impl App {
     /// - **Inactive with query** (`search_active = false`, query non-empty): list is
     ///   filtered but navigation works normally. Esc clears the query entirely.
     fn try_handle_search_key(&mut self, key: KeyEvent) -> Option<Vec<Cmd>> {
-        let state = match self.model.ui.active_view {
-            ViewType::Iterations => &self.model.ui.iteration_list,
-            ViewType::Epics => &self.model.ui.epic_list,
+        let (search_active, has_query) = match self.model.ui.active_view {
+            ViewType::Iterations => {
+                let state = &self.model.ui.iteration_list;
+                (state.search_active, !state.search_query.is_empty())
+            }
+            ViewType::Epics => {
+                let state = &self.model.ui.epic_list;
+                (state.search_active, !state.search_query.is_empty())
+            }
             _ => return None,
         };
 
-        match searchable_list::search_key(key.code, state.search_active, !state.search_query.is_empty()) {
+        match searchable_list::search_key(key.code, search_active, has_query) {
             searchable_list::SearchKey::Passthrough => None,
             searchable_list::SearchKey::Consume => Some(vec![Cmd::None]),
             searchable_list::SearchKey::Msg(list_msg) => {
@@ -534,7 +540,7 @@ fn active_story_left_iteration(
     active: &crate::api::story::Story,
     stories: &[crate::api::story::Story],
     current_iterations: &[crate::api::iteration::Iteration],
-    user_id: Option<uuid::Uuid>,
+    user_id: Option<crate::api::user::MemberId>,
 ) -> bool {
     !stories.iter().any(|s| s.id == active.id)
         && active
@@ -545,7 +551,7 @@ fn active_story_left_iteration(
 
 /// True when both slices hold the same ids in the same order — used to skip a
 /// re-render/cache-write when a refresh returned an unchanged list.
-fn id_set_unchanged<T>(old: &[T], new: &[T], id: impl Fn(&T) -> i32) -> bool {
+fn id_set_unchanged<T, Id: PartialEq>(old: &[T], new: &[T], id: impl Fn(&T) -> Id) -> bool {
     old.len() == new.len() && old.iter().zip(new).all(|(a, b)| id(a) == id(b))
 }
 
@@ -557,12 +563,13 @@ mod tests {
         story::Story,
     };
     use chrono::NaiveDate;
+    use crate::api::user::MemberId;
     use uuid::Uuid;
 
     fn iteration(id: i32) -> Iteration {
         let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         Iteration {
-            id,
+            id: id.into(),
             name: String::new(),
             start_date: date,
             end_date: date,
@@ -571,10 +578,10 @@ mod tests {
         }
     }
 
-    fn story(id: i32, iteration_id: Option<i32>, owner_ids: Vec<Uuid>) -> Story {
+    fn story(id: i32, iteration_id: Option<i32>, owner_ids: Vec<MemberId>) -> Story {
         Story {
-            id,
-            iteration_id,
+            id: id.into(),
+            iteration_id: iteration_id.map(Into::into),
             owner_ids,
             ..Default::default()
         }
@@ -582,8 +589,8 @@ mod tests {
 
     #[test]
     fn active_story_retention() {
-        let me = Uuid::from_u128(1);
-        let other = Uuid::from_u128(2);
+        let me = MemberId::from(Uuid::from_u128(1));
+        let other = MemberId::from(Uuid::from_u128(2));
         let current = [iteration(10)];
         let listed = [story(1, Some(10), vec![me])];
 

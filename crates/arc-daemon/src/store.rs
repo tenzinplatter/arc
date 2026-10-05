@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use uuid::Uuid;
 
+use arc_notes::NoteRelPath;
 use arc_notes::scanner::ParsedTodo;
 use arc_notes::todos::{Todo, TodoSource, modify_with_lock};
 
@@ -14,10 +15,10 @@ use arc_notes::todos::{Todo, TodoSource, modify_with_lock};
 ///   id + completed; otherwise generates a new Uuid.
 pub async fn merge_file(
     cache_dir: &Path,
-    file: &Path,
+    file: &NoteRelPath,
     parsed: Vec<ParsedTodo>,
 ) -> Result<Vec<Todo>> {
-    let file = file.to_path_buf();
+    let file = file.clone();
     modify_with_lock(cache_dir, move |list| {
         // Parsed entries not yet matched to an existing todo. We drain matches
         // out of this as we walk the list, so whatever remains is genuinely new.
@@ -77,8 +78,8 @@ pub async fn merge_file(
 }
 
 /// Drop all NoteParsed entries for `file` (used on file delete/rename-out).
-pub async fn drop_file(cache_dir: &Path, file: &Path) -> Result<Vec<Todo>> {
-    let file = file.to_path_buf();
+pub async fn drop_file(cache_dir: &Path, file: &NoteRelPath) -> Result<Vec<Todo>> {
+    let file = file.clone();
     modify_with_lock(cache_dir, move |list| {
         list.retain(|t| match &t.source {
             TodoSource::NoteParsed { file: f, .. } => f != &file,
@@ -92,14 +93,13 @@ pub async fn drop_file(cache_dir: &Path, file: &Path) -> Result<Vec<Todo>> {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use std::path::PathBuf;
 
     fn parsed(file: &str, text: &str, fingerprint: u64) -> ParsedTodo {
         ParsedTodo {
             text: text.to_string(),
             completed: false,
             date: None,
-            file: PathBuf::from(file),
+            file: NoteRelPath::from_trusted(file.into()),
             line: 1,
             fingerprint,
         }
@@ -122,7 +122,7 @@ mod tests {
 
         let final_list = merge_file(
             cache,
-            Path::new("a.md"),
+            &NoteRelPath::from_trusted("a.md".into()),
             vec![parsed("a.md", "from note", 1)],
         )
         .await
@@ -143,7 +143,7 @@ mod tests {
         // First pass.
         let first = merge_file(
             cache,
-            Path::new("a.md"),
+            &NoteRelPath::from_trusted("a.md".into()),
             vec![parsed("a.md", "ship it", 0xabc)],
         )
         .await
@@ -153,7 +153,7 @@ mod tests {
         // Daemon rescans, same fingerprint, line moved.
         let mut p = parsed("a.md", "ship it", 0xabc);
         p.line = 42;
-        let after = merge_file(cache, Path::new("a.md"), vec![p]).await.unwrap();
+        let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
 
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, original_id, "id preserved across rescan");
@@ -172,11 +172,11 @@ mod tests {
         // First scan: note says checked.
         let mut p = parsed("a.md", "ship it", 0xabc);
         p.completed = true;
-        merge_file(cache, Path::new("a.md"), vec![p]).await.unwrap();
+        merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
 
         // Second scan: note now says unchecked. Should propagate.
         let p = parsed("a.md", "ship it", 0xabc); // completed = false by default
-        let after = merge_file(cache, Path::new("a.md"), vec![p]).await.unwrap();
+        let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![p]).await.unwrap();
         assert_eq!(after.len(), 1);
         assert!(!after[0].completed, "note un-check should clear completion");
     }
@@ -187,16 +187,16 @@ mod tests {
         let cache = tmp.path();
 
         // Two notes; list ends up [from a, from b].
-        merge_file(cache, Path::new("a.md"), vec![parsed("a.md", "from a", 1)])
+        merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "from a", 1)])
             .await
             .unwrap();
-        merge_file(cache, Path::new("b.md"), vec![parsed("b.md", "from b", 2)])
+        merge_file(cache, &NoteRelPath::from_trusted("b.md".into()), vec![parsed("b.md", "from b", 2)])
             .await
             .unwrap();
 
         // Re-scan a.md (e.g. user ticked it off in the UI, daemon re-parses).
         // This must NOT reorder the list — otherwise the TUI jumps.
-        let after = merge_file(cache, Path::new("a.md"), vec![parsed("a.md", "from a", 1)])
+        let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "from a", 1)])
             .await
             .unwrap();
 
@@ -215,13 +215,13 @@ mod tests {
 
         merge_file(
             cache,
-            Path::new("a.md"),
+            &NoteRelPath::from_trusted("a.md".into()),
             vec![parsed("a.md", "first", 1), parsed("a.md", "second", 2)],
         )
         .await
         .unwrap();
 
-        let after = merge_file(cache, Path::new("a.md"), vec![parsed("a.md", "first", 1)])
+        let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "first", 1)])
             .await
             .unwrap();
 
@@ -234,15 +234,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
 
-        merge_file(cache, Path::new("a.md"), vec![parsed("a.md", "from a", 1)])
+        merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![parsed("a.md", "from a", 1)])
             .await
             .unwrap();
-        merge_file(cache, Path::new("b.md"), vec![parsed("b.md", "from b", 2)])
+        merge_file(cache, &NoteRelPath::from_trusted("b.md".into()), vec![parsed("b.md", "from b", 2)])
             .await
             .unwrap();
 
         // Rescan a.md with empty parsed -> should remove a's entries only.
-        let after = merge_file(cache, Path::new("a.md"), vec![]).await.unwrap();
+        let after = merge_file(cache, &NoteRelPath::from_trusted("a.md".into()), vec![]).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].text, "from b");
     }
@@ -254,13 +254,13 @@ mod tests {
 
         merge_file(
             cache,
-            Path::new("a.md"),
+            &NoteRelPath::from_trusted("a.md".into()),
             vec![parsed("a.md", "x", 1), parsed("a.md", "y", 2)],
         )
         .await
         .unwrap();
 
-        let after = drop_file(cache, Path::new("a.md")).await.unwrap();
+        let after = drop_file(cache, &NoteRelPath::from_trusted("a.md".into())).await.unwrap();
         assert!(after.is_empty());
     }
 }

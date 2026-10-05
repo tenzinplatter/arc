@@ -2,6 +2,8 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::path::NoteRelPath;
+
 use anyhow::Context;
 use chrono::NaiveDate;
 use fs2::FileExt;
@@ -24,7 +26,7 @@ pub enum TodoSource {
     #[default]
     Manual,
     NoteParsed {
-        file: PathBuf,
+        file: NoteRelPath,
         line: u32,
         fingerprint: u64,
     },
@@ -171,11 +173,11 @@ fn normalize_for_match(s: &str) -> String {
 
 fn toggle_note_checkbox_blocking(
     notes_dir: &Path,
-    relative_file: &Path,
+    relative_file: &NoteRelPath,
     todo_text: &str,
     mark_complete: bool,
 ) -> anyhow::Result<()> {
-    let path = notes_dir.join(relative_file);
+    let path = relative_file.abs(notes_dir);
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("read {}", path.display()))?;
 
@@ -218,12 +220,12 @@ fn toggle_note_checkbox_blocking(
 /// stays correct across line moves and across changes to the fingerprint hash.
 pub async fn toggle_note_checkbox(
     notes_dir: &Path,
-    relative_file: &Path,
+    relative_file: &NoteRelPath,
     todo_text: &str,
     mark_complete: bool,
 ) -> anyhow::Result<()> {
     let notes_dir = notes_dir.to_path_buf();
-    let relative_file = relative_file.to_path_buf();
+    let relative_file = relative_file.clone();
     let todo_text = todo_text.to_string();
     tokio::task::spawn_blocking(move || {
         toggle_note_checkbox_blocking(&notes_dir, &relative_file, &todo_text, mark_complete)
@@ -234,7 +236,6 @@ pub async fn toggle_note_checkbox(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn deserializes_legacy_todo_without_source_field() {
@@ -270,7 +271,7 @@ mod tests {
             date: None,
             completed: false,
             source: TodoSource::NoteParsed {
-                file: PathBuf::from("alpha.md"),
+                file: NoteRelPath::from_trusted("alpha.md".into()),
                 line: 12,
                 fingerprint: 0xdead_beef,
             },
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_finds_line_by_text_even_after_move() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = PathBuf::from("note.md");
+        let rel = NoteRelPath::from_trusted("note.md".into());
         let path = tmp.path().join(&rel);
 
         // Simulate the user having moved the line down before toggling.
@@ -380,7 +381,7 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_matches_case_and_whitespace_insensitively() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = PathBuf::from("note.md");
+        let rel = NoteRelPath::from_trusted("note.md".into());
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [ ] Ship It\n").unwrap();
 
@@ -395,7 +396,7 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_noop_when_already_in_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = PathBuf::from("note.md");
+        let rel = NoteRelPath::from_trusted("note.md".into());
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [x] done\n").unwrap();
 
@@ -410,7 +411,7 @@ mod tests {
     #[test]
     fn toggle_note_checkbox_errors_when_text_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let rel = PathBuf::from("note.md");
+        let rel = NoteRelPath::from_trusted("note.md".into());
         let path = tmp.path().join(&rel);
         std::fs::write(&path, "- [ ] something else\n").unwrap();
 
@@ -460,7 +461,7 @@ mod tests {
                 date: None,
                 completed: true,
                 source: TodoSource::NoteParsed {
-                    file: PathBuf::from("stories/a.md"),
+                    file: NoteRelPath::from_trusted("stories/a.md".into()),
                     line: 12,
                     fingerprint: u64::MAX,
                 },

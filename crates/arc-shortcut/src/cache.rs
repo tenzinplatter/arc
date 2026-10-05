@@ -7,10 +7,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::{fs::{self, File}, io::AsyncReadExt};
-use uuid::Uuid;
-
-use crate::api::{ApiClient, epic::EpicSlim, iteration::Iteration, story::Story};
-use arc_core::dbg_file;
+use crate::api::{
+    ApiClient, epic::EpicSlim, iteration::Iteration, story::Story, user::MemberId,
+    workflow::WorkflowStateId,
+};
+use arc_core::{StoryId, dbg_file};
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Cache {
@@ -19,19 +20,19 @@ pub struct Cache {
     pub iteration_stories: Option<Vec<Story>>,
     pub epics: Vec<EpicSlim>,
     pub active_story: Option<Story>,
-    pub user_id: Option<Uuid>,
+    pub user_id: Option<MemberId>,
     #[serde(default)]
     pub user_mention_name: Option<String>,
     pub cache_dir: PathBuf,
     /// Stories fetched individually, e.g. outside the current iteration.
     #[serde(default)]
-    pub stories_by_id: HashMap<i32, Story>,
+    pub stories_by_id: HashMap<StoryId, Story>,
     /// Workflow state id -> name.
     #[serde(default)]
-    pub workflow_states: HashMap<i64, String>,
+    pub workflow_states: HashMap<WorkflowStateId, String>,
     /// Member id -> mention name.
     #[serde(default)]
-    pub members: HashMap<Uuid, String>,
+    pub members: HashMap<MemberId, String>,
 }
 
 impl Default for Cache {
@@ -59,7 +60,7 @@ impl Cache {
 
     /// Looks in iteration_stories, then stories_by_id, then active_story (a
     /// frozen copy, so least likely to be fresh).
-    pub fn find_story(&self, id: i32) -> Option<&Story> {
+    pub fn find_story(&self, id: StoryId) -> Option<&Story> {
         self.iteration_stories
             .as_ref()
             .and_then(|stories| stories.iter().find(|s| s.id == id))
@@ -67,11 +68,11 @@ impl Cache {
             .or_else(|| self.active_story.as_ref().filter(|s| s.id == id))
     }
 
-    pub fn state_name(&self, id: Option<i64>) -> Option<&str> {
+    pub fn state_name(&self, id: Option<WorkflowStateId>) -> Option<&str> {
         self.workflow_states.get(&id?).map(String::as_str)
     }
 
-    pub fn member_name(&self, id: &Uuid) -> Option<&str> {
+    pub fn member_name(&self, id: &MemberId) -> Option<&str> {
         self.members.get(id).map(String::as_str)
     }
 
@@ -173,7 +174,7 @@ impl Cache {
 }
 
 /// Returns the cached story, or fetches it and stores it in `stories_by_id`.
-pub async fn fetch_story(cache: &mut Cache, client: &ApiClient, id: i32) -> anyhow::Result<Story> {
+pub async fn fetch_story(cache: &mut Cache, client: &ApiClient, id: StoryId) -> anyhow::Result<Story> {
     if let Some(story) = cache.find_story(id) {
         return Ok(story.clone());
     }
@@ -234,10 +235,11 @@ async fn read_file(file: &PathBuf) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn story(id: i32, name: &str) -> Story {
         Story {
-            id,
+            id: id.into(),
             name: name.to_string(),
             ..Default::default()
         }
@@ -268,7 +270,7 @@ mod tests {
         assert!(cache.stories_by_id.is_empty());
         assert!(cache.workflow_states.is_empty());
         assert!(cache.members.is_empty());
-        let s = cache.find_story(7).unwrap();
+        let s = cache.find_story(7.into()).unwrap();
         assert_eq!(s.story_type, "");
         assert_eq!(s.workflow_state_id, None);
         assert!(s.owner_ids.is_empty());
@@ -277,14 +279,14 @@ mod tests {
     #[test]
     fn cache_round_trips_new_fields() {
         let mut cache = Cache::default();
-        cache.stories_by_id.insert(5, story(5, "five"));
-        cache.workflow_states.insert(500, "In Progress".into());
-        let id = Uuid::nil();
+        cache.stories_by_id.insert(5.into(), story(5, "five"));
+        cache.workflow_states.insert(500.into(), "In Progress".into());
+        let id = MemberId::from(Uuid::nil());
         cache.members.insert(id, "tenzin".into());
 
         let back: Cache = serde_json::from_str(&serde_json::to_string(&cache).unwrap()).unwrap();
-        assert_eq!(back.find_story(5).unwrap().name, "five");
-        assert_eq!(back.state_name(Some(500)), Some("In Progress"));
+        assert_eq!(back.find_story(5.into()).unwrap().name, "five");
+        assert_eq!(back.state_name(Some(500.into())), Some("In Progress"));
         assert_eq!(back.state_name(None), None);
         assert_eq!(back.member_name(&id), Some("tenzin"));
     }
@@ -296,21 +298,21 @@ mod tests {
             iteration_stories: Some(vec![story(1, "iteration"), story(2, "iteration")]),
             ..Default::default()
         };
-        cache.stories_by_id.insert(1, story(1, "by_id"));
-        cache.stories_by_id.insert(2, story(2, "by_id"));
-        cache.stories_by_id.insert(3, story(3, "by_id"));
+        cache.stories_by_id.insert(1.into(), story(1, "by_id"));
+        cache.stories_by_id.insert(2.into(), story(2, "by_id"));
+        cache.stories_by_id.insert(3.into(), story(3, "by_id"));
 
         cache.active_story = Some(story(9, "active"));
-        cache.stories_by_id.insert(9, story(9, "by_id"));
+        cache.stories_by_id.insert(9.into(), story(9, "by_id"));
 
-        assert_eq!(cache.find_story(1).unwrap().name, "iteration");
-        assert_eq!(cache.find_story(2).unwrap().name, "iteration");
-        assert_eq!(cache.find_story(3).unwrap().name, "by_id");
-        assert_eq!(cache.find_story(9).unwrap().name, "by_id");
-        assert!(cache.find_story(4).is_none());
+        assert_eq!(cache.find_story(1.into()).unwrap().name, "iteration");
+        assert_eq!(cache.find_story(2.into()).unwrap().name, "iteration");
+        assert_eq!(cache.find_story(3.into()).unwrap().name, "by_id");
+        assert_eq!(cache.find_story(9.into()).unwrap().name, "by_id");
+        assert!(cache.find_story(4.into()).is_none());
 
-        cache.stories_by_id.remove(&9);
-        assert_eq!(cache.find_story(9).unwrap().name, "active");
+        cache.stories_by_id.remove(&9.into());
+        assert_eq!(cache.find_story(9.into()).unwrap().name, "active");
     }
 
     fn cache_in(dir: &Path) -> Cache {
@@ -324,11 +326,11 @@ mod tests {
     async fn write_then_read_round_trips_without_leftover_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = cache_in(dir.path());
-        cache.workflow_states.insert(1, "Done".into());
+        cache.workflow_states.insert(1.into(), "Done".into());
         cache.write().await.unwrap();
 
         let back = Cache::read(dir.path().to_path_buf()).await;
-        assert_eq!(back.state_name(Some(1)), Some("Done"));
+        assert_eq!(back.state_name(Some(1.into())), Some("Done"));
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(entries.len(), 1);
     }
@@ -349,31 +351,31 @@ mod tests {
     #[tokio::test]
     async fn write_merges_disk_lookups_and_keeps_writer_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let other_id = Uuid::from_u128(1);
+        let other_id = MemberId::from(Uuid::from_u128(1));
         let mut other = cache_in(dir.path());
         other.active_story = Some(story(1, "other active"));
         other.user_id = Some(other_id);
         other.user_mention_name = Some("other".into());
-        other.stories_by_id.insert(1, story(1, "disk"));
-        other.stories_by_id.insert(2, story(2, "disk"));
-        other.workflow_states.insert(10, "disk state".into());
-        other.workflow_states.insert(11, "only disk".into());
+        other.stories_by_id.insert(1.into(), story(1, "disk"));
+        other.stories_by_id.insert(2.into(), story(2, "disk"));
+        other.workflow_states.insert(10.into(), "disk state".into());
+        other.workflow_states.insert(11.into(), "only disk".into());
         other.members.insert(other_id, "disk member".into());
         other.write().await.unwrap();
 
         let mut stale = cache_in(dir.path());
-        stale.stories_by_id.insert(2, story(2, "mine"));
-        stale.workflow_states.insert(10, "my state".into());
+        stale.stories_by_id.insert(2.into(), story(2, "mine"));
+        stale.workflow_states.insert(10.into(), "my state".into());
         stale.write().await.unwrap();
 
         let back = Cache::read(dir.path().to_path_buf()).await;
         assert!(back.active_story.is_none());
         assert_eq!(back.user_id, Some(other_id));
         assert_eq!(back.user_mention_name.as_deref(), Some("other"));
-        assert_eq!(back.stories_by_id[&1].name, "disk");
-        assert_eq!(back.stories_by_id[&2].name, "mine");
-        assert_eq!(back.state_name(Some(10)), Some("my state"));
-        assert_eq!(back.state_name(Some(11)), Some("only disk"));
+        assert_eq!(back.stories_by_id[&1.into()].name, "disk");
+        assert_eq!(back.stories_by_id[&2.into()].name, "mine");
+        assert_eq!(back.state_name(Some(10.into())), Some("my state"));
+        assert_eq!(back.state_name(Some(11.into())), Some("only disk"));
         assert_eq!(back.member_name(&other_id), Some("disk member"));
     }
 
@@ -458,9 +460,9 @@ mod tests {
     }
 
     fn golden_full_cache() -> Cache {
-        let member = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+        let member = MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
         let iteration = |id: i32, name: &str, start: &str, end: &str, status| Iteration {
-            id,
+            id: id.into(),
             name: name.into(),
             start_date: start.parse().unwrap(),
             end_date: end.parse().unwrap(),
@@ -479,12 +481,12 @@ mod tests {
                 text: Some("hello".into()),
             }],
             description: "desc".into(),
-            epic_id: Some(40),
-            id: 7,
-            iteration_id: Some(3),
+            epic_id: Some(40.into()),
+            id: 7.into(),
+            iteration_id: Some(3.into()),
             name: "story seven".into(),
             app_url: "https://app.shortcut.com/x/story/7".into(),
-            workflow_state_id: Some(500),
+            workflow_state_id: Some(500.into()),
             story_type: "feature".into(),
             owner_ids: vec![member],
             estimate: Some(3),
@@ -499,7 +501,7 @@ mod tests {
                 position: 2,
                 text: None,
             }],
-            id: 5,
+            id: 5.into(),
             name: "five".into(),
             app_url: "https://app.shortcut.com/x/story/5".into(),
             story_type: "bug".into(),
@@ -522,7 +524,7 @@ mod tests {
             )],
             iteration_stories: Some(vec![seven]),
             epics: vec![EpicSlim {
-                id: 40,
+                id: 40.into(),
                 name: "Epic forty".into(),
                 app_url: "https://app.shortcut.com/x/epic/40".into(),
                 owner_ids: vec![member],
@@ -534,8 +536,8 @@ mod tests {
             cache_dir: PathBuf::from("/tmp/arc-golden"),
             ..Default::default()
         };
-        cache.stories_by_id.insert(5, five);
-        cache.workflow_states.insert(500, "In Progress".into());
+        cache.stories_by_id.insert(5.into(), five);
+        cache.workflow_states.insert(500.into(), "In Progress".into());
         cache.members.insert(member, "tenzin".into());
         cache
     }
@@ -547,24 +549,24 @@ mod tests {
 
     #[test]
     fn golden_cache_json_literal_deserializes() {
-        let member = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+        let member = MemberId::from(Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap());
         let cache: Cache = serde_json::from_value(golden_full_cache_json()).unwrap();
         assert_eq!(cache.user_id, Some(member));
         assert_eq!(cache.user_mention_name.as_deref(), Some("tenzin"));
         assert_eq!(cache.cache_dir, PathBuf::from("/tmp/arc-golden"));
-        assert_eq!(cache.current_iterations.as_ref().unwrap()[0].id, 3);
-        assert_eq!(cache.iterations[0].id, 2);
-        assert_eq!(cache.epics[0].id, 40);
+        assert_eq!(cache.current_iterations.as_ref().unwrap()[0].id, 3.into());
+        assert_eq!(cache.iterations[0].id, 2.into());
+        assert_eq!(cache.epics[0].id, 40.into());
         assert_eq!(cache.epics[0].owner_ids, vec![member]);
-        let seven = cache.find_story(7).unwrap();
-        assert_eq!(seven.epic_id, Some(40));
-        assert_eq!(seven.iteration_id, Some(3));
-        assert_eq!(seven.workflow_state_id, Some(500));
+        let seven = cache.find_story(7.into()).unwrap();
+        assert_eq!(seven.epic_id, Some(40.into()));
+        assert_eq!(seven.iteration_id, Some(3.into()));
+        assert_eq!(seven.workflow_state_id, Some(500.into()));
         assert_eq!(seven.owner_ids, vec![member]);
         assert_eq!(seven.comments[0].author_id, Some(member));
         assert_eq!(seven.branches.len(), 1);
-        assert_eq!(cache.find_story(5).unwrap().name, "five");
-        assert_eq!(cache.state_name(Some(500)), Some("In Progress"));
+        assert_eq!(cache.find_story(5.into()).unwrap().name, "five");
+        assert_eq!(cache.state_name(Some(500.into())), Some("In Progress"));
         assert_eq!(cache.member_name(&member), Some("tenzin"));
         assert_eq!(
             serde_json::to_value(&cache).unwrap(),

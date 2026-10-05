@@ -14,7 +14,7 @@ pub struct Note {
 impl Note {
     pub fn new<P: AsRef<Path>>(
         notes_dir: &P,
-        story_id: i32,
+        story_id: arc_core::StoryId,
         story_name: String,
         story_app_url: String,
         iteration_app_url: Option<String>,

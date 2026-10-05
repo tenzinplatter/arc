@@ -96,7 +96,7 @@ impl WidgetRef for TodosListView<'_> {
             let is_selected = context.is_selected;
             let source_label = match &todo.source {
                 crate::todos::TodoSource::NoteParsed { file, line, .. } => {
-                    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    let stem = file.file_stem().unwrap_or("?");
                     Some(format!(" [{}:{}]", stem, line))
                 }
                 crate::todos::TodoSource::Manual => None,

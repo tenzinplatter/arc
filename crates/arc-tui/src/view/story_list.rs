@@ -31,7 +31,7 @@ fn group_stories_by_iteration<'a>(
     show_finished: bool,
 ) -> Vec<IterationSection<'a>> {
     // Build a HashMap grouping stories by iteration_id
-    let mut grouped: HashMap<Option<i32>, Vec<&'a Story>> = HashMap::new();
+    let mut grouped: HashMap<Option<arc_core::IterationId>, Vec<&'a Story>> = HashMap::new();
     for story in stories {
         // Filter out completed stories if show_finished is false
         if !show_finished && story.completed {

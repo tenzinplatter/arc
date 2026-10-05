@@ -1,12 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct StoryComment {
     #[serde(default)]
     pub id: i64,
-    pub author_id: Option<Uuid>,
+    pub author_id: Option<crate::api::user::MemberId>,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     pub deleted: bool,

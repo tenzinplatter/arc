@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::Context;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -8,15 +10,37 @@ use crate::{
     cache::Cache,
 };
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemberId(Uuid);
+
+impl MemberId {
+    pub fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+impl From<Uuid> for MemberId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for MemberId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Member {
-    pub id: Uuid,
+    pub id: MemberId,
     pub mention_name: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct MemberSlim {
-    pub id: Uuid,
+    pub id: MemberId,
     pub mention_name: String,
     pub name: String,
 }
@@ -24,7 +48,7 @@ pub struct MemberSlim {
 // GET /members nests names under `profile`
 #[derive(Deserialize)]
 struct RawMember {
-    id: Uuid,
+    id: MemberId,
     profile: RawProfile,
 }
 
