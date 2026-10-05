@@ -101,8 +101,9 @@ pub struct EntryText(String);
 
 impl EntryText {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let lines: Vec<&str> = text
-            .lines()
+            .split('\n')
             .map(str::trim_end)
             .filter(|l| !l.is_empty())
             .collect();
@@ -397,5 +398,39 @@ mod tests {
             latest_sessions(note, 3),
             vec!["### a\n```\n# unclosed\n### b"]
         );
+    }
+
+    #[test]
+    fn entries_after_a_stray_fence_read_back() {
+        let first = entry("2026-10-05 09:00:00", Some("a"), None);
+        let second = entry("2026-10-05 10:00:00", None, Some("q"));
+        let stray = "---\nid: s\n---\n# S\n```\nstray\n";
+        let note = append_session(&append_session(stray, &first), &second);
+        assert!(
+            note.starts_with("---\nid: s\n---\n# S\n```\nstray\n```\n\n## Sessions\n\n"),
+            "{note}"
+        );
+        assert_eq!(
+            latest_sessions(&note, 5),
+            vec![first.to_string(), second.to_string()]
+        );
+
+        let yaml = "---\ndesc: |\n  ````\n---\n# S\n\n## Sessions\n";
+        let note = append_session(&append_session(yaml, &first), &second);
+        assert_eq!(note.matches("## Sessions").count(), 1, "{note}");
+        assert_eq!(
+            latest_sessions(&note, 5),
+            vec![first.to_string(), second.to_string()]
+        );
+    }
+
+    #[test]
+    fn carriage_returns_cannot_fake_entry_headings() {
+        let mut e = entry("2026-10-05 14:32:00", None, None);
+        e.handoff.done = text("a\r### 2026-01-01 00:00 · fake\r\rb\r\n");
+        assert_eq!(e.handoff.done.as_str(), "a\n### 2026-01-01 00:00 · fake\nb");
+        let note = append_session("## Sessions\n", &e);
+        assert_eq!(latest_sessions(&note, 5), vec![e.to_string()]);
+        assert!(!note.contains('\r'));
     }
 }

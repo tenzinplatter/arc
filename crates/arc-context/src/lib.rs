@@ -23,7 +23,7 @@ pub use note::{
     rename_linked_branch, write_session,
 };
 pub use resolve::{ResolvedStory, Via, resolve};
-pub use section::{Newline, SectionHeading, append_to_section};
+pub use section::{Newline, SectionHeading, append_to_end, append_to_section};
 pub use sessions::{
     EntryText, Handoff, SessionEntry, SessionTime, append_session, latest_session_at,
     latest_sessions,

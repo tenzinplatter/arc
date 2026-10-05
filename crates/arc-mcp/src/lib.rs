@@ -657,10 +657,7 @@ fn rewrite_note(
 }
 
 fn append_note(conn: &Connection, notes_dir: &Path, rel: &NoteRelPath, content: &str) -> Result<()> {
-    rewrite_note(conn, notes_dir, rel, |existing| {
-        let separator = if existing.ends_with('\n') { "\n" } else { "\n\n" };
-        format!("{existing}{separator}{}\n", content.trim_end())
-    })
+    rewrite_note(conn, notes_dir, rel, |existing| arc_context::append_to_end(existing, content))
 }
 
 fn append_note_section(
