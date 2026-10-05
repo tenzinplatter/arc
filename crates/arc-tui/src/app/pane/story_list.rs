@@ -7,7 +7,7 @@ use crate::{
         iteration::Iteration,
         story::{Story, get_story_associated_iteration},
     },
-    app::{cmd::Cmd, msg::StoryListMsg, pane::nav},
+    app::{cmd::{Cmd, NoteToOpen}, msg::StoryListMsg, pane::nav},
     keybindings::Key,
 };
 use arc_core::{IterationId, StoryId, dbg_file};
@@ -141,12 +141,7 @@ pub fn update(
                     })
                     .map(|it| it.app_url.clone());
 
-                return vec![Cmd::OpenNote {
-                    story_id: story.id,
-                    story_name: story.name.clone(),
-                    story_app_url: story.app_url.clone(),
-                    iteration_app_url,
-                }];
+                return vec![Cmd::OpenNote(NoteToOpen::story(&story, iteration_app_url))];
             }
             vec![Cmd::None]
         }

@@ -1,21 +1,20 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::Line,
     widgets::{Block, BorderType, Paragraph, Widget, WidgetRef},
 };
 
-use crate::app::model::CreateNoteModalState;
 use crate::view::description_modal::centered_rect;
 
 pub struct CreateNoteModal<'a> {
-    state: &'a CreateNoteModalState,
+    input: &'a str,
 }
 
 impl<'a> CreateNoteModal<'a> {
-    pub fn new(state: &'a CreateNoteModalState) -> Self {
-        Self { state }
+    pub fn new(input: &'a str) -> Self {
+        Self { input }
     }
 }
 
@@ -30,26 +29,17 @@ impl WidgetRef for CreateNoteModal<'_> {
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // label
-                Constraint::Length(1), // input
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // hint
-            ])
-            .split(inner);
+        let [_, label_area, input_area, _, hint_area] =
+            Layout::vertical([Constraint::Length(1); 5]).areas(inner);
 
         let label = Line::from("Note name:").style(Style::default().add_modifier(Modifier::BOLD));
-        buf.set_line(chunks[1].x, chunks[1].y, &label, chunks[1].width);
+        buf.set_line(label_area.x, label_area.y, &label, label_area.width);
 
-        let input_text = format!("{}_", self.state.input);
-        let input_line = Line::from(input_text);
-        buf.set_line(chunks[2].x, chunks[2].y, &input_line, chunks[2].width);
+        let input_line = Line::from(format!("{}_", self.input));
+        buf.set_line(input_area.x, input_area.y, &input_line, input_area.width);
 
         let hint =
             Paragraph::new("Enter to create  Esc to cancel").style(Style::default().dark_gray());
-        hint.render(chunks[4], buf);
+        hint.render(hint_area, buf);
     }
 }

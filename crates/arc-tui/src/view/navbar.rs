@@ -70,11 +70,10 @@ impl WidgetRef for NavBar {
         let paragraph = Paragraph::new(line);
         paragraph.render(inner, buf);
 
-        // Show spinner on right when loading AND we have cached stories displayed
         if self.loading.is_loading() && self.has_stories {
             let loading_text = format!("{} {}", self.spinner_char(), self.loading.label());
             let loading_span = Span::styled(loading_text.clone(), Style::default().gray());
-            // Char count, not byte len: the spinner glyph is 3 bytes / 1 column.
+            // Char count, not byte len: the spinner glyph is multi-byte.
             let loading_width = loading_text.chars().count() as u16;
 
             if inner.width > loading_width {

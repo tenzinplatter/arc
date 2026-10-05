@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect, Size},
+    layout::{Constraint, Layout, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Text},
     widgets::{Block, BorderType, Paragraph, StatefulWidget, Widget, Wrap},
@@ -23,37 +23,30 @@ impl StatefulWidget for DescriptionModal<'_> {
     type State = ScrollViewState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        // Layout: title bar, divider, content, divider, footer
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Title
-                Constraint::Length(1), // Divider
-                Constraint::Min(1),    // Content
-                Constraint::Length(1), // Divider
-                Constraint::Length(1), // Footer
+        let [title_area, top_divider_area, content_area, bottom_divider_area, _footer_area] =
+            Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .margin(1)
-            .split(area);
+            .areas(area);
 
-        // Outer block with border
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .title_bottom(" j/k scroll • g/G top/bottom • q close ");
 
         block.render(area, buf);
 
-        // Title (story name)
         let title = Line::from(self.story.name.as_str())
             .style(Style::default().add_modifier(Modifier::BOLD));
-        buf.set_line(chunks[0].x, chunks[0].y, &title, chunks[0].width);
+        buf.set_line(title_area.x, title_area.y, &title, title_area.width);
 
-        // Top divider
-        let divider = "─".repeat(chunks[1].width as usize);
-        buf.set_string(chunks[1].x, chunks[1].y, &divider, Style::default());
+        let divider = "─".repeat(top_divider_area.width as usize);
+        buf.set_string(top_divider_area.x, top_divider_area.y, &divider, Style::default());
 
-        // Description content with word wrap via ScrollView
-        let content_area = chunks[2];
         let trimmed = self.story.description.trim();
         let description = if trimmed.is_empty() {
             "No description".to_string()
@@ -70,12 +63,10 @@ impl StatefulWidget for DescriptionModal<'_> {
         scroll_view.render_widget(paragraph, Rect::new(0, 0, content_width, total_lines));
         scroll_view.render(content_area, buf, state);
 
-        // Bottom divider
-        buf.set_string(chunks[3].x, chunks[3].y, &divider, Style::default());
+        buf.set_string(bottom_divider_area.x, bottom_divider_area.y, &divider, Style::default());
     }
 }
 
-/// Calculate a centered rectangle with percentage-based sizing
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     // u32 math: `area.width * percent_x` overflows u16 past ~820 cols.
     let width = (area.width as u32 * percent_x as u32 / 100) as u16;

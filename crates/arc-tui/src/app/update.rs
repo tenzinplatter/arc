@@ -4,8 +4,8 @@ use crate::{
     api::story::get_story_associated_iteration,
     app::{
         App,
-        cmd::Cmd,
-        model::{LoadingState, ViewType},
+        cmd::{Cmd, NotePath, NoteToOpen},
+        model::{LoadingState, Overlay, ViewType},
         msg::{AddTodoModalMsg, CreateNoteModalMsg, EpicListMsg, IterationListMsg, Msg},
         pane::{action_menu, add_todo_modal, create_note_modal, description_modal, epic_list, iteration_list, notes_list, searchable_list, story_list, todos_list},
     },
@@ -29,7 +29,6 @@ impl App {
                         handle.abort();
                     }
                 }
-                // Clean up completed todos on exit
                 self.model.data.todos.retain(|t| !t.completed);
                 vec![Cmd::WriteTodos]
             }
@@ -58,10 +57,7 @@ impl App {
                 epic_list::update(&mut self.model.ui.epic_list, &self.model.data.epics, msg)
             }
 
-            Msg::StoriesLoaded {
-                stories,
-                from_cache,
-            } => self.on_stories_loaded(stories, from_cache),
+            Msg::StoriesLoaded(stories) => self.on_stories_loaded(stories),
 
             Msg::EpicsLoaded(epics) => self.on_epics_loaded(epics),
 
@@ -133,13 +129,10 @@ impl App {
             Msg::TodosReloaded(todos) => {
                 let prev_selected = self.model.ui.todos_list.selected_id;
                 self.model.data.todos = todos;
-                // Keep already-shown todos visible and pick up any new incomplete
-                // ones; completed todos we've never shown stay hidden.
                 self.model
                     .ui
                     .todos_list
                     .refresh_visible(&self.model.data.todos);
-                // Preserve selection if the UUID still exists; else clear it.
                 if let Some(id) = prev_selected
                     && !self.model.data.todos.iter().any(|t| t.id == id)
                 {
@@ -150,53 +143,49 @@ impl App {
 
             Msg::Error(e) => {
                 self.model.ui.errors.push(e);
-                // Stop loading spinner on error
                 self.model.ui.loading = LoadingState::Loaded;
                 vec![Cmd::None]
             }
 
             Msg::ActionMenu(menu_msg) => {
-                let story = self
-                    .model
-                    .ui
-                    .action_menu
-                    .target_story_id
-                    .and_then(|id| self.model.data.stories.iter().find(|s| s.id == id));
-
-                if let Some(hovered_story) = story {
-                    action_menu::update(
-                        &mut self.model.ui,
+                let ui = &mut self.model.ui;
+                let Overlay::ActionMenu { target, list } = &mut ui.overlay else {
+                    return vec![Cmd::None];
+                };
+                match self.model.data.stories.iter().find(|s| s.id == *target) {
+                    Some(story) => action_menu::update(
+                        list,
+                        &mut ui.errors,
                         &self.model.data,
                         menu_msg,
-                        hovered_story,
-                    )
-                } else {
-                    // Target story no longer exists, close menu
-                    self.model.ui.action_menu.is_showing = false;
-                    vec![Cmd::None]
+                        story,
+                    ),
+                    None => {
+                        ui.overlay = Overlay::None;
+                        vec![Cmd::None]
+                    }
                 }
             }
 
-            Msg::ToggleActionMenu => {
-                vec![Cmd::ActionMenuVisibility(
-                    !self.model.ui.action_menu.is_showing,
-                )]
+            Msg::OpenActionMenu => {
+                if let Some(target) = self.model.ui.story_list.selected_story_id {
+                    self.model.ui.overlay = Overlay::action_menu(target);
+                }
+                vec![Cmd::None]
             }
 
-            Msg::ToggleKeybindsPanel => {
-                self.model.ui.show_keybinds_panel = !self.model.ui.show_keybinds_panel;
+            Msg::OpenKeybindsPanel => {
+                self.model.ui.overlay = Overlay::Keybinds;
                 vec![Cmd::None]
             }
 
             Msg::DescriptionModal(modal_msg) => {
-                description_modal::update(&mut self.model.ui.description_modal, modal_msg)
+                description_modal::update(&mut self.model.ui.overlay, modal_msg)
             }
 
-            Msg::CreateNoteModal(modal_msg) => create_note_modal::update(
-                &mut self.model.ui.create_note_modal,
-                &self.model.config,
-                modal_msg,
-            ),
+            Msg::CreateNoteModal(modal_msg) => {
+                create_note_modal::update(&mut self.model.ui.overlay, modal_msg)
+            }
 
             Msg::TodosList(msg) => todos_list::update(
                 &mut self.model.ui.todos_list,
@@ -205,20 +194,13 @@ impl App {
             ),
 
             Msg::AddTodoModal(msg) => add_todo_modal::update(
-                &mut self.model.ui.add_todo_modal,
+                &mut self.model.ui.overlay,
                 &mut self.model.data.todos,
                 msg,
             ),
         }
     }
 
-    /// Intercepts keys for search state in Iteration/Epic views.
-    ///
-    /// Two modes:
-    /// - **Active** (`search_active = true`): typing mode. j/k are consumed (not
-    ///   navigation), Enter passes through, Esc deactivates but keeps the query.
-    /// - **Inactive with query** (`search_active = false`, query non-empty): list is
-    ///   filtered but navigation works normally. Esc clears the query entirely.
     fn try_handle_search_key(&mut self, key: KeyEvent) -> Option<Vec<Cmd>> {
         let (search_active, has_query) = match self.model.ui.active_view {
             ViewType::Iterations => {
@@ -246,63 +228,45 @@ impl App {
         }
     }
 
-    fn handle_key_input(&mut self, key: KeyEvent) -> Vec<Cmd> {
-        // Keybinds panel takes highest priority
-        if self.model.ui.show_keybinds_panel {
-            if matches!(key.code, KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc) {
-                self.model.ui.show_keybinds_panel = false;
+    fn handle_overlay_key(&mut self, key: KeyEvent) -> Vec<Cmd> {
+        let msg = match &self.model.ui.overlay {
+            Overlay::None => None,
+            Overlay::Keybinds => {
+                if matches!(key.code, KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc) {
+                    self.model.ui.overlay = Overlay::None;
+                }
+                None
             }
-            return vec![Cmd::None];
+            Overlay::Description { .. } => {
+                description_modal::key_to_msg(key).map(Msg::DescriptionModal)
+            }
+            Overlay::ActionMenu { .. } => action_menu::key_to_msg(key).map(Msg::ActionMenu),
+            Overlay::CreateNote { .. } => {
+                create_note_modal::key_to_msg(key).map(Msg::CreateNoteModal)
+            }
+            Overlay::AddTodo { .. } => add_todo_modal::key_to_msg(key).map(Msg::AddTodoModal),
+        };
+        match msg {
+            Some(msg) => self.update(msg),
+            None => vec![Cmd::None],
+        }
+    }
+
+    fn handle_key_input(&mut self, key: KeyEvent) -> Vec<Cmd> {
+        if !matches!(self.model.ui.overlay, Overlay::None) {
+            return self.handle_overlay_key(key);
         }
 
-        // Description modal takes priority (rendered on top of everything)
-        if self.model.ui.description_modal.is_showing {
-            return if let Some(msg) = description_modal::key_to_msg(key) {
-                self.update(Msg::DescriptionModal(msg))
-            } else {
-                vec![Cmd::None]
-            };
-        }
-
-        // action menu is rendered as an overlay, so swallows all keybinds when showing
-        if self.model.ui.action_menu.is_showing {
-            return if let Some(msg) = action_menu::key_to_msg(key) {
-                self.update(Msg::ActionMenu(msg))
-            } else {
-                vec![Cmd::None]
-            };
-        }
-
-        // Create note modal intercepts all keys when showing
-        if self.model.ui.create_note_modal.is_showing {
-            return if let Some(modal_msg) = create_note_modal::key_to_msg(key) {
-                self.update(Msg::CreateNoteModal(modal_msg))
-            } else {
-                vec![Cmd::None]
-            };
-        }
-
-        // Add todo modal intercepts all keys when showing
-        if self.model.ui.add_todo_modal.is_showing {
-            return if let Some(msg) = add_todo_modal::key_to_msg(key) {
-                self.update(Msg::AddTodoModal(msg))
-            } else {
-                vec![Cmd::None]
-            };
-        }
-
-        // Search bar intercepts most keys when active in Iteration/Epic views
         if let Some(cmds) = self.try_handle_search_key(key) {
             return cmds;
         }
 
         let app_key = Key::from_key_event(key);
 
-        // Global keys
         if let Some(app_key) = app_key {
             match app_key {
                 Key::Quit => return self.update(Msg::Quit),
-                Key::HelpPanel => return self.update(Msg::ToggleKeybindsPanel),
+                Key::HelpPanel => return self.update(Msg::OpenKeybindsPanel),
                 Key::ViewNext => {
                     let next = self.model.ui.active_view.next();
                     return self.update(Msg::SwitchToView(next));
@@ -312,15 +276,12 @@ impl App {
                     return self.update(Msg::SwitchToView(prev));
                 }
                 Key::DailyNote => {
-                    let today = arc_core::time::today();
-                    let path = self.config.notes_dir.join("daily").join(format!("{}.md", today));
-                    return vec![Cmd::OpenDailyNote { path }];
+                    return vec![Cmd::OpenNote(NoteToOpen::daily(arc_core::time::today()))];
                 }
                 _ => {}
             }
         }
 
-        // Route to active view's key handler
         match self.model.ui.active_view {
             ViewType::Iterations => {
                 if key.code == KeyCode::Char('/') {
@@ -340,7 +301,7 @@ impl App {
             }
             ViewType::Stories => {
                 if key.code == KeyCode::Enter {
-                    return self.update(Msg::ToggleActionMenu);
+                    return self.update(Msg::OpenActionMenu);
                 }
 
                 if let Some(app_key) = app_key {
@@ -354,10 +315,7 @@ impl App {
                                 .and_then(|id| self.model.data.stories.iter().find(|s| s.id == id));
 
                             if let Some(story) = story {
-                                description_modal::open(
-                                    &mut self.model.ui.description_modal,
-                                    story.clone(),
-                                );
+                                self.model.ui.overlay = Overlay::description(story.clone());
                             }
                             return vec![Cmd::None];
                         }
@@ -379,11 +337,7 @@ impl App {
                                     });
 
                                 return match iteration {
-                                    Some(it) => vec![Cmd::OpenIterationNote {
-                                        iteration_id: it.id,
-                                        iteration_name: it.name.clone(),
-                                        iteration_app_url: it.app_url.clone(),
-                                    }],
+                                    Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
                                     None => {
                                         self.model.ui.errors.push(ErrorInfo::new(
                                             "No iteration",
@@ -413,7 +367,6 @@ impl App {
             }
             ViewType::Todos => {
                 if key.code == KeyCode::Char('n') {
-                    // On a note-parsed todo, open its source note; otherwise add a todo.
                     let source = self
                         .model
                         .ui
@@ -422,8 +375,8 @@ impl App {
                         .and_then(|id| self.model.data.todos.iter().find(|t| t.id == id))
                         .map(|t| &t.source);
                     if let Some(crate::todos::TodoSource::NoteParsed { file, .. }) = source {
-                        let path = self.config.notes_dir.join(file);
-                        return vec![Cmd::OpenDailyNote { path }];
+                        let path = NotePath::InNotesDir(file.clone());
+                        return vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(path))];
                     }
                     return self.update(Msg::AddTodoModal(AddTodoModalMsg::Open));
                 }
@@ -437,66 +390,27 @@ impl App {
         vec![Cmd::None]
     }
 
-    /// Reconcile freshly-loaded stories against UI state (selection, open modals,
-    /// active story) and persist. Returns the follow-up commands.
-    fn on_stories_loaded(&mut self, stories: Vec<crate::api::story::Story>, from_cache: bool) -> Vec<Cmd> {
-        // Only transition to Loaded on fresh API data, not cached — this keeps the
-        // spinner showing during a background refresh.
-        if !from_cache {
-            self.model.ui.loading = LoadingState::Loaded;
-        }
+    fn on_stories_loaded(&mut self, stories: Vec<crate::api::story::Story>) -> Vec<Cmd> {
+        self.model.ui.loading = LoadingState::Loaded;
 
         if self.model.ui.story_list.selected_story_id.is_none() && !stories.is_empty() {
             self.model.ui.story_list.selected_story_id = stories.first().map(|s| s.id);
         }
 
-        if !from_cache && id_set_unchanged(&self.model.data.stories, &stories, |s| s.id) {
+        if id_set_unchanged(&self.model.data.stories, &stories, |s| s.id) {
             return vec![Cmd::None];
         }
 
         self.model.data.stories = stories.clone();
 
-        // Reconcile selection: if selected story no longer exists, select first.
         if let Some(selected_id) = self.model.ui.story_list.selected_story_id
             && !stories.iter().any(|s| s.id == selected_id)
         {
             self.model.ui.story_list.selected_story_id = stories.first().map(|s| s.id);
         }
 
-        // Reconcile description modal against fresh data.
-        if self.model.ui.description_modal.is_showing
-            && let Some(ref modal_story) = self.model.ui.description_modal.story
-        {
-            match stories.iter().find(|s| s.id == modal_story.id) {
-                Some(fresh_story) => {
-                    self.model.ui.description_modal.story = Some(fresh_story.clone());
-                }
-                None => {
-                    self.model.ui.description_modal.is_showing = false;
-                    self.model.ui.description_modal.scroll_view_state = Default::default();
-                    self.model.ui.description_modal.story = None;
-                    self.model.ui.errors.push(ErrorInfo::new(
-                        "Story no longer available".to_string(),
-                        "The story was removed or moved out of this iteration".to_string(),
-                    ));
-                }
-            }
-        }
+        self.reconcile_overlay(&stories);
 
-        // Reconcile action menu.
-        if self.model.ui.action_menu.is_showing
-            && let Some(target_id) = self.model.ui.action_menu.target_story_id
-            && !stories.iter().any(|s| s.id == target_id)
-        {
-            self.model.ui.action_menu.is_showing = false;
-            self.model.ui.action_menu.target_story_id = None;
-            self.model.ui.errors.push(ErrorInfo::new(
-                "Story no longer available".to_string(),
-                "The story was removed or moved out of this iteration".to_string(),
-            ));
-        }
-
-        // Reconcile active story.
         if let Some(ref active) = self.model.data.active_story
             && active_story_left_iteration(
                 active,
@@ -517,6 +431,28 @@ impl App {
         vec![Cmd::WriteCache]
     }
 
+    fn reconcile_overlay(&mut self, stories: &[crate::api::story::Story]) {
+        let overlay_story = match &mut self.model.ui.overlay {
+            Overlay::Description { story, .. } => story.id,
+            Overlay::ActionMenu { target, .. } => *target,
+            _ => return,
+        };
+        match stories.iter().find(|s| s.id == overlay_story) {
+            Some(fresh) => {
+                if let Overlay::Description { story, .. } = &mut self.model.ui.overlay {
+                    *story = fresh.clone();
+                }
+            }
+            None => {
+                self.model.ui.overlay = Overlay::None;
+                self.model.ui.errors.push(ErrorInfo::new(
+                    "Story no longer available".to_string(),
+                    "The story was removed or moved out of this iteration".to_string(),
+                ));
+            }
+        }
+    }
+
     fn on_epics_loaded(&mut self, mut epics: Vec<crate::api::epic::EpicSlim>) -> Vec<Cmd> {
         epics.sort_by_key(|e| std::cmp::Reverse(e.created_at));
 
@@ -533,9 +469,6 @@ impl App {
     }
 }
 
-/// True only when the active story was one of our owned current-iteration
-/// stories and no longer shows up in that list. Stories set from outside the
-/// iteration (or owned by someone else) are left alone.
 fn active_story_left_iteration(
     active: &crate::api::story::Story,
     stories: &[crate::api::story::Story],
@@ -549,8 +482,6 @@ fn active_story_left_iteration(
         && user_id.is_some_and(|uid| active.owner_ids.contains(&uid))
 }
 
-/// True when both slices hold the same ids in the same order — used to skip a
-/// re-render/cache-write when a refresh returned an unchanged list.
 fn id_set_unchanged<T, Id: PartialEq>(old: &[T], new: &[T], id: impl Fn(&T) -> Id) -> bool {
     old.len() == new.len() && old.iter().zip(new).all(|(a, b)| id(a) == id(b))
 }

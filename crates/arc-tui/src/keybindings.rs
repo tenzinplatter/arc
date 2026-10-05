@@ -4,24 +4,21 @@ use crate::navkey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    // Navigation
     FocusNext,
     FocusPrev,
-    // Global
     Quit,
     HelpPanel,
     ViewNext,
     ViewPrev,
     DailyNote,
-    // Story list
-    Description,     // Space
-    IterationNote,   // i
-    OpenNote,        // n
-    OpenBrowser,     // o
-    EditDescription, // e
-    Tmux,            // t
-    SelectStory,     // a
-    ToggleFinished,  // f
+    Description,
+    IterationNote,
+    OpenNote,
+    OpenBrowser,
+    EditDescription,
+    Tmux,
+    SelectStory,
+    ToggleFinished,
 }
 
 impl Key {

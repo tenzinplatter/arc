@@ -1,6 +1,7 @@
 use throbber_widgets_tui::ThrobberState;
 use tokio::task::JoinHandle;
 use tui_scrollview::ScrollViewState;
+use tui_widget_list::ListState;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -11,7 +12,6 @@ use uuid::Uuid;
 
 use crate::{
     api::{epic::EpicSlim, iteration::Iteration, story::Story},
-    app::pane::action_menu::ActionMenuState,
     cache::Cache,
     error::ErrorInfo,
     todos::Todo,
@@ -52,7 +52,6 @@ pub enum ViewType {
 }
 
 impl ViewType {
-    // NOTE: keep the ordering of the below three items consistent with eachother
     pub const ALL: &[Self] = &[
         ViewType::Stories,
         ViewType::Iterations,
@@ -63,25 +62,18 @@ impl ViewType {
     ];
 
     pub fn next(self) -> Self {
-        match self {
-            ViewType::Stories => ViewType::Iterations,
-            ViewType::Iterations => ViewType::Notes,
-            ViewType::Notes => ViewType::Todos,
-            ViewType::Todos => ViewType::Epics,
-            ViewType::Epics => ViewType::Search,
-            ViewType::Search => ViewType::Stories,
-        }
+        Self::ALL[(self.position() + 1) % Self::ALL.len()]
     }
 
     pub fn prev(self) -> Self {
-        match self {
-            ViewType::Stories => ViewType::Search,
-            ViewType::Search => ViewType::Epics,
-            ViewType::Epics => ViewType::Todos,
-            ViewType::Todos => ViewType::Notes,
-            ViewType::Notes => ViewType::Iterations,
-            ViewType::Iterations => ViewType::Stories,
-        }
+        Self::ALL[(self.position() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn position(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|&v| v == self)
+            .expect("every ViewType is listed in ALL")
     }
 
     pub fn label(&self) -> &'static str {
@@ -115,11 +107,40 @@ pub struct DataState {
     pub todos: Vec<Todo>,
 }
 
-#[derive(Default, Debug)]
-pub struct DescriptionModalState {
-    pub is_showing: bool,
-    pub scroll_view_state: ScrollViewState,
-    pub story: Option<Story>,
+#[derive(Debug, Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    Keybinds,
+    Description {
+        story: Story,
+        scroll: ScrollViewState,
+    },
+    ActionMenu {
+        target: StoryId,
+        list: ListState,
+    },
+    CreateNote {
+        input: String,
+    },
+    AddTodo {
+        input: String,
+    },
+}
+
+impl Overlay {
+    pub fn description(story: Story) -> Self {
+        Overlay::Description {
+            story,
+            scroll: ScrollViewState::default(),
+        }
+    }
+
+    pub fn action_menu(target: StoryId) -> Self {
+        let mut list = ListState::default();
+        list.select(Some(0));
+        Overlay::ActionMenu { target, list }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -130,17 +151,12 @@ pub struct UiState {
     pub iteration_list: IterationListState,
     pub epic_list: EpicListState,
     pub todos_list: TodosListState,
-    pub action_menu: ActionMenuState,
-    pub description_modal: DescriptionModalState,
-    pub create_note_modal: CreateNoteModalState,
-    pub add_todo_modal: AddTodoModalState,
-    pub show_keybinds_panel: bool,
+    pub overlay: Overlay,
     pub errors: Vec<ErrorInfo>,
     pub loading: LoadingState,
     pub throbber_state: ThrobberState,
 }
 
-// Epic and iteration panes share the same fuzzy-searchable list state.
 pub type IterationListState = crate::app::pane::searchable_list::SearchListState<IterationId>;
 pub type EpicListState = crate::app::pane::searchable_list::SearchListState<EpicId>;
 
@@ -167,35 +183,16 @@ pub struct NotesListState {
     pub iteration_notes: Vec<PathBuf>,
     pub epic_notes: Vec<PathBuf>,
     pub scratch_notes: Vec<PathBuf>,
-    /// Saved selection per section (keyed by section index 0–4).
     pub section_selections: HashMap<usize, PathBuf>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct CreateNoteModalState {
-    pub is_showing: bool,
-    pub input: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct AddTodoModalState {
-    pub is_showing: bool,
-    pub input: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TodosListState {
     pub selected_id: Option<Uuid>,
-    /// Ids of todos to keep rendering even once completed: every todo that was
-    /// incomplete when the TUI opened, has appeared since, or was completed
-    /// during this session. Completed todos absent from this set (e.g. note
-    /// checkboxes ticked off in a past session) are hidden. Reset each launch.
     pub visible: HashSet<Uuid>,
 }
 
 impl TodosListState {
-    /// Record every currently-incomplete todo as visible and drop ids that no
-    /// longer exist. Call whenever the todo list is loaded or reloaded.
     pub fn refresh_visible(&mut self, todos: &[Todo]) {
         self.visible.retain(|id| todos.iter().any(|t| &t.id == id));
         for todo in todos.iter().filter(|t| !t.completed) {
@@ -203,7 +200,6 @@ impl TodosListState {
         }
     }
 
-    /// Whether this todo should be rendered and navigable.
     pub fn is_visible(&self, todo: &Todo) -> bool {
         !todo.completed || self.visible.contains(&todo.id)
     }

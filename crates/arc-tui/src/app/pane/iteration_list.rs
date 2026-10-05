@@ -5,7 +5,7 @@ use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::api::iteration::Iteration;
 use arc_core::IterationId;
-use crate::app::cmd::Cmd;
+use crate::app::cmd::{Cmd, NoteToOpen};
 use crate::app::model::IterationListState;
 use crate::app::msg::IterationListMsg;
 use crate::app::pane::searchable_list::{self, Outcome};
@@ -61,11 +61,7 @@ pub fn update(
                 .find(|it| it.id == id)
                 .or_else(|| all_iterations.iter().find(|it| it.id == id));
             match selected {
-                Some(iteration) => vec![Cmd::OpenIterationNote {
-                    iteration_id: iteration.id,
-                    iteration_name: iteration.name.clone(),
-                    iteration_app_url: iteration.app_url.clone(),
-                }],
+                Some(iteration) => vec![Cmd::OpenNote(NoteToOpen::iteration(iteration))],
                 None => vec![Cmd::None],
             }
         }

@@ -2,7 +2,7 @@ use crossterm::event::KeyEvent;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::api::epic::EpicSlim;
-use crate::app::cmd::Cmd;
+use crate::app::cmd::{Cmd, NoteToOpen};
 use crate::app::model::EpicListState;
 use crate::app::msg::EpicListMsg;
 use crate::app::pane::searchable_list::{self, Outcome};
@@ -28,11 +28,7 @@ pub fn update(state: &mut EpicListState, epics: &[EpicSlim], msg: EpicListMsg) -
     );
     match outcome {
         Outcome::Open(id) => match epics.iter().find(|e| e.id == id) {
-            Some(epic) => vec![Cmd::OpenEpicNote {
-                epic_id: epic.id,
-                epic_name: epic.name.clone(),
-                epic_app_url: epic.app_url.clone(),
-            }],
+            Some(epic) => vec![Cmd::OpenNote(NoteToOpen::epic(epic))],
             None => vec![Cmd::None],
         },
         Outcome::Idle => vec![Cmd::None],

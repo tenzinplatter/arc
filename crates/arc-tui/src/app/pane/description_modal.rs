@@ -1,61 +1,24 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tui_scrollview::ScrollViewState;
 
 use crate::{
-    api::story::Story,
-    app::{cmd::Cmd, model::DescriptionModalState, msg::DescriptionModalMsg},
+    app::{cmd::Cmd, model::Overlay, msg::DescriptionModalMsg},
     navkey,
 };
 
-pub fn update(state: &mut DescriptionModalState, msg: DescriptionModalMsg) -> Vec<Cmd> {
+pub fn update(overlay: &mut Overlay, msg: DescriptionModalMsg) -> Vec<Cmd> {
+    let Overlay::Description { scroll, .. } = overlay else {
+        return vec![Cmd::None];
+    };
     match msg {
-        DescriptionModalMsg::Open => {
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::Close => {
-            state.is_showing = false;
-            state.scroll_view_state = ScrollViewState::default();
-            state.story = None;
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollUp => {
-            state.scroll_view_state.scroll_up();
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollDown => {
-            state.scroll_view_state.scroll_down();
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollPageUp => {
-            state.scroll_view_state.scroll_page_up();
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollPageDown => {
-            state.scroll_view_state.scroll_page_down();
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollToTop => {
-            state.scroll_view_state.scroll_to_top();
-            vec![Cmd::None]
-        }
-
-        DescriptionModalMsg::ScrollToBottom => {
-            state.scroll_view_state.scroll_to_bottom();
-            vec![Cmd::None]
-        }
+        DescriptionModalMsg::Close => *overlay = Overlay::None,
+        DescriptionModalMsg::ScrollUp => scroll.scroll_up(),
+        DescriptionModalMsg::ScrollDown => scroll.scroll_down(),
+        DescriptionModalMsg::ScrollPageUp => scroll.scroll_page_up(),
+        DescriptionModalMsg::ScrollPageDown => scroll.scroll_page_down(),
+        DescriptionModalMsg::ScrollToTop => scroll.scroll_to_top(),
+        DescriptionModalMsg::ScrollToBottom => scroll.scroll_to_bottom(),
     }
-}
-
-pub fn open(state: &mut DescriptionModalState, story: Story) {
-    state.is_showing = true;
-    state.scroll_view_state = ScrollViewState::default();
-    state.story = Some(story);
+    vec![Cmd::None]
 }
 
 pub fn key_to_msg(key: KeyEvent) -> Option<DescriptionModalMsg> {
@@ -80,6 +43,7 @@ pub fn key_to_msg(key: KeyEvent) -> Option<DescriptionModalMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::story::Story;
     use crossterm::event::{KeyEventKind, KeyEventState};
 
     fn create_test_story() -> Story {
@@ -98,28 +62,22 @@ mod tests {
     }
 
     #[test]
-    fn test_open_sets_state() {
-        let mut state = DescriptionModalState::default();
+    fn scrolling_keeps_description_open() {
         let story = create_test_story();
+        let mut overlay = Overlay::description(story.clone());
 
-        open(&mut state, story.clone());
+        update(&mut overlay, DescriptionModalMsg::ScrollDown);
 
-        assert!(state.is_showing);
-        assert_eq!(state.story.as_ref().unwrap().id, story.id);
+        assert!(matches!(overlay, Overlay::Description { story: ref s, .. } if s.id == story.id));
     }
 
     #[test]
-    fn test_close_resets_state() {
-        let mut state = DescriptionModalState {
-            is_showing: true,
-            scroll_view_state: ScrollViewState::default(),
-            story: Some(create_test_story()),
-        };
+    fn close_dismisses_overlay() {
+        let mut overlay = Overlay::description(create_test_story());
 
-        update(&mut state, DescriptionModalMsg::Close);
+        update(&mut overlay, DescriptionModalMsg::Close);
 
-        assert!(!state.is_showing);
-        assert!(state.story.is_none());
+        assert!(matches!(overlay, Overlay::None));
     }
 
     #[test]

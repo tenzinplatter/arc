@@ -10,7 +10,7 @@ use crate::{
     },
     app::{
         App,
-        cmd::{open_mux_session, open_note_in_editor},
+        cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
     cli::{Commands, DaemonCommands},
@@ -65,15 +65,7 @@ pub async fn handle_command(
                     })
                     .map(|it| it.app_url.clone());
 
-                open_note_in_editor(
-                    story.id,
-                    story.name.clone(),
-                    story.app_url.clone(),
-                    iteration_app_url,
-                    config,
-                )?;
-
-                Ok(())
+                NoteToOpen::story(story, iteration_app_url).open(config)
             } else {
                 no_active_story!();
             }
@@ -124,7 +116,7 @@ pub async fn handle_command(
                 let status = Command::new("cat").arg(note.path).status()?;
 
                 if !status.success() {
-                    anyhow::bail!("Failed to cat not for story {}", &story.name);
+                    anyhow::bail!("Failed to cat not for story {}", story.name);
                 }
 
                 Ok(())

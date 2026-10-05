@@ -9,21 +9,16 @@ use slugify::slugify;
 use arc_notes::NoteRelPath;
 
 use crate::{
-    api::story::Story,
-    note::{Note, frontmatter::Frontmatter},
+    api::{epic::EpicSlim, iteration::Iteration, story::Story},
+    note::frontmatter::Frontmatter,
     tmux, zellij,
 };
-use arc_core::{Config, EpicId, IterationId, Mux, StoryId, dbg_file};
+use arc_core::{Config, IterationId, Mux, StoryId, dbg_file};
 
 #[derive(Debug, Clone)]
 pub enum Cmd {
     None,
-    OpenNote {
-        story_id: StoryId,
-        story_name: String,
-        story_app_url: String,
-        iteration_app_url: Option<String>,
-    },
+    OpenNote(NoteToOpen),
     WriteCache,
     FetchStories {
         iteration_ids: Vec<IterationId>,
@@ -34,7 +29,7 @@ pub enum Cmd {
     },
     FetchEpics,
     SelectStory(Option<Story>),
-    ActionMenuVisibility(bool),
+    CloseActionMenu,
     CreateGitWorktree {
         branch_name: String,
     },
@@ -44,23 +39,6 @@ pub enum Cmd {
     Batch(Vec<Cmd>),
     OpenInBrowser {
         app_url: String,
-    },
-    OpenIterationNote {
-        iteration_id: IterationId,
-        iteration_name: String,
-        iteration_app_url: String,
-    },
-    OpenEpicNote {
-        epic_id: EpicId,
-        epic_name: String,
-        epic_app_url: String,
-    },
-    OpenDailyNote {
-        path: PathBuf,
-    },
-    OpenScratchNote {
-        path: PathBuf,
-        name: String,
     },
     WriteTodos,
     SyncNoteCheckbox {
@@ -94,81 +72,101 @@ pub fn open_in_editor(config: &Config, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write `fm`'s frontmatter block iff the note is new or empty, then open it in
-/// the editor. Single write path for every note type.
-fn open_with_frontmatter(config: &Config, path: &Path, fm: Frontmatter) -> anyhow::Result<()> {
-    if let Some(p) = path.parent() {
-        create_dir_all(p)?;
+#[derive(Debug, Clone)]
+pub enum NotePath {
+    InNotesDir(NoteRelPath),
+    Absolute(PathBuf),
+}
+
+impl NotePath {
+    fn in_notes_dir(rel: String) -> Self {
+        NotePath::InNotesDir(NoteRelPath::from_trusted(rel))
     }
-    let empty = !path.is_file() || read_to_string(path)?.is_empty();
-    if empty {
-        std::fs::write(path, fm.to_block()?)?;
+
+    fn resolve(&self, notes_dir: &Path) -> PathBuf {
+        match self {
+            NotePath::InNotesDir(rel) => rel.abs(notes_dir),
+            NotePath::Absolute(abs) => abs.clone(),
+        }
     }
-    open_in_editor(config, path)
+
+    fn obsidian_id(&self) -> String {
+        let stem = match self {
+            NotePath::InNotesDir(rel) => rel.file_stem(),
+            NotePath::Absolute(abs) => abs.file_stem().and_then(|s| s.to_str()),
+        };
+        stem.unwrap_or_default().to_string()
+    }
 }
 
-pub fn open_note_in_editor(
-    story_id: StoryId,
-    story_name: String,
-    story_app_url: String,
-    iteration_app_url: Option<String>,
-    config: &Config,
-) -> anyhow::Result<()> {
-    let note = Note::new(
-        &config.notes_dir,
-        story_id,
-        story_name,
-        story_app_url,
-        iteration_app_url,
-    );
-    open_with_frontmatter(config, &note.path, note.frontmatter)
+#[derive(Debug, Clone)]
+pub struct NoteToOpen {
+    pub path: NotePath,
+    pub template: Frontmatter,
 }
 
-pub fn open_iteration_note_in_editor(
-    iteration_id: IterationId,
-    iteration_name: String,
-    iteration_app_url: String,
-    config: &Config,
-) -> anyhow::Result<()> {
-    let slug = slugify!(&iteration_name);
-    let mut path = config.notes_dir.clone();
-    path.push("iterations");
-    path.push(format!("{slug}.md"));
-    let fm = Frontmatter::iteration(slug, iteration_id, iteration_name, iteration_app_url);
-    open_with_frontmatter(config, &path, fm)
-}
+impl NoteToOpen {
+    pub fn story(story: &Story, iteration_app_url: Option<String>) -> Self {
+        let slug = slugify!(&story.name);
+        Self {
+            path: NotePath::in_notes_dir(format!("stories/{slug}.md")),
+            template: Frontmatter::story(
+                slug,
+                story.id,
+                story.name.clone(),
+                story.app_url.clone(),
+                iteration_app_url,
+            ),
+        }
+    }
 
-pub fn open_epic_note_in_editor(
-    epic_id: EpicId,
-    epic_name: String,
-    epic_app_url: String,
-    config: &Config,
-) -> anyhow::Result<()> {
-    let slug = slugify!(&epic_name);
-    let mut path = config.notes_dir.clone();
-    path.push("epics");
-    path.push(format!("{slug}.md"));
-    let fm = Frontmatter::epic(slug, epic_id, epic_name, epic_app_url);
-    open_with_frontmatter(config, &path, fm)
-}
+    pub fn iteration(iteration: &Iteration) -> Self {
+        let slug = slugify!(&iteration.name);
+        Self {
+            path: NotePath::in_notes_dir(format!("iterations/{slug}.md")),
+            template: Frontmatter::iteration(
+                slug,
+                iteration.id,
+                iteration.name.clone(),
+                iteration.app_url.clone(),
+            ),
+        }
+    }
 
-pub fn open_daily_note_with_frontmatter(config: &Config, path: &Path) -> anyhow::Result<()> {
-    dbg_file!("Opening daily note in editor: {}", path.display());
-    let slug = file_stem(path);
-    open_with_frontmatter(config, path, Frontmatter::daily(slug))
-}
+    pub fn epic(epic: &EpicSlim) -> Self {
+        let slug = slugify!(&epic.name);
+        Self {
+            path: NotePath::in_notes_dir(format!("epics/{slug}.md")),
+            template: Frontmatter::epic(slug, epic.id, epic.name.clone(), epic.app_url.clone()),
+        }
+    }
 
-pub fn open_scratch_note_in_editor(_name: &str, path: &Path, config: &Config) -> anyhow::Result<()> {
-    let slug = file_stem(path);
-    open_with_frontmatter(config, path, Frontmatter::scratch(slug))
-}
+    pub fn daily(date: chrono::NaiveDate) -> Self {
+        Self::existing_or_daily_template(NotePath::in_notes_dir(format!("daily/{date}.md")))
+    }
 
-/// Obsidian's `id` is the filename stem.
-fn file_stem(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string()
+    pub fn scratch(name: &str) -> Self {
+        let path = NotePath::in_notes_dir(format!("scratch/{}.md", slugify!(name)));
+        let template = Frontmatter::scratch(path.obsidian_id());
+        Self { path, template }
+    }
+
+    pub fn existing_or_daily_template(path: NotePath) -> Self {
+        let template = Frontmatter::daily(path.obsidian_id());
+        Self { path, template }
+    }
+
+    pub fn open(self, config: &Config) -> anyhow::Result<()> {
+        let path = self.path.resolve(&config.notes_dir);
+        if let Some(p) = path.parent() {
+            create_dir_all(p)?;
+        }
+        let empty = !path.is_file() || read_to_string(&path)?.is_empty();
+        if empty {
+            std::fs::write(&path, self.template.to_block()?)?;
+        }
+        open_in_editor(config, &path)
+    }
 }
 
 pub async fn open_mux_session(name: &str, mux: &Mux) -> anyhow::Result<()> {
@@ -236,4 +234,58 @@ pub fn open_mux_session_sync(name: &str, mux: &Mux) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved(note: &NoteToOpen) -> PathBuf {
+        note.path.resolve(Path::new("/notes"))
+    }
+
+    fn block(fm: &Frontmatter) -> String {
+        fm.to_block().unwrap()
+    }
+
+    #[test]
+    fn entity_notes_live_in_their_slugged_dirs() {
+        let story = Story {
+            id: 7.into(),
+            name: "Fix The Thing".into(),
+            app_url: "s-url".into(),
+            ..Default::default()
+        };
+        let note = NoteToOpen::story(&story, Some("it-url".into()));
+        assert_eq!(resolved(&note), Path::new("/notes/stories/fix-the-thing.md"));
+        let expected = Frontmatter::story(
+            "fix-the-thing".into(),
+            7.into(),
+            "Fix The Thing".into(),
+            "s-url".into(),
+            Some("it-url".into()),
+        );
+        assert_eq!(block(&note.template), block(&expected));
+    }
+
+    #[test]
+    fn daily_and_scratch_templates_use_file_stem_as_id() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        let daily = NoteToOpen::daily(date);
+        assert_eq!(resolved(&daily), Path::new("/notes/daily/2026-01-02.md"));
+        assert_eq!(block(&daily.template), block(&Frontmatter::daily("2026-01-02".into())));
+
+        let scratch = NoteToOpen::scratch("My Idea");
+        assert_eq!(resolved(&scratch), Path::new("/notes/scratch/my-idea.md"));
+        assert_eq!(block(&scratch.template), block(&Frontmatter::scratch("my-idea".into())));
+    }
+
+    #[test]
+    fn existing_note_seeds_daily_template_from_its_stem() {
+        let note = NoteToOpen::existing_or_daily_template(NotePath::Absolute(
+            "/elsewhere/stories/foo.md".into(),
+        ));
+        assert_eq!(resolved(&note), Path::new("/elsewhere/stories/foo.md"));
+        assert_eq!(block(&note.template), block(&Frontmatter::daily("foo".into())));
+    }
 }

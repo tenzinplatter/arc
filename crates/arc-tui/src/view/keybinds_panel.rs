@@ -32,13 +32,11 @@ const LINES: &[&str] = &[
 ];
 
 const PANEL_WIDTH: u16 = 43;
+const BORDERS: u16 = 2;
 
 impl Widget for KeybindsPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let content_height = LINES.len() as u16;
-        let panel_height = content_height + 2; // borders
-
-        let panel_height = panel_height.min(area.height);
+        let panel_height = (LINES.len() as u16 + BORDERS).min(area.height);
         let panel_width = PANEL_WIDTH.min(area.width);
 
         let x = area.x + (area.width.saturating_sub(panel_width)) / 2;

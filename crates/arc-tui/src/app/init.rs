@@ -97,13 +97,9 @@ impl App {
             cache,
         };
 
-        // Send messages so UI updates as if data loaded normally
         let _ = sender.send(Msg::IterationsLoaded(vec![iteration.clone()]));
         let _ = sender.send(Msg::AllIterationsLoaded(vec![iteration]));
-        let _ = sender.send(Msg::StoriesLoaded {
-            stories,
-            from_cache: false,
-        });
+        let _ = sender.send(Msg::StoriesLoaded(stories));
 
         Ok(App {
             model,
@@ -172,6 +168,8 @@ async fn fetch_info_from_api(api_client: ApiClient, sender: UnboundedSender<Msg>
     vec![current_iteration_handle, epics_handle, all_iterations_handle]
 }
 
+const TODOS_RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn spawn_todos_watcher(
     cache_dir: std::path::PathBuf,
     sender: UnboundedSender<Msg>,
@@ -187,8 +185,7 @@ fn spawn_todos_watcher(
             Err(_) => return,
         };
         let path = cache_dir.join("todos.json");
-        // Watch the cache_dir (not the file) — the file may not exist yet,
-        // and atomic-rename writes replace the inode.
+        // Watch the dir: the file may not exist yet and atomic-rename writes replace its inode.
         let _ = watcher.watch(&cache_dir, RecursiveMode::NonRecursive);
 
         let mut last_emit = std::time::Instant::now()
@@ -205,8 +202,7 @@ fn spawn_todos_watcher(
             ) {
                 continue;
             }
-            // Debounce: at most one reload per 200ms.
-            if last_emit.elapsed() < std::time::Duration::from_millis(200) {
+            if last_emit.elapsed() < TODOS_RELOAD_DEBOUNCE {
                 continue;
             }
             last_emit = std::time::Instant::now();

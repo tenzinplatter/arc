@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    app::{cmd::Cmd, msg::NotesListMsg},
+    app::{cmd::{Cmd, NotePath, NoteToOpen}, msg::NotesListMsg},
     navkey,
 };
 
@@ -171,7 +171,7 @@ pub fn update(state: &mut NotesListState, msg: NotesListMsg) -> Vec<Cmd> {
 
         NotesListMsg::OpenNote => {
             if let Some(ref path) = state.selected_path {
-                vec![Cmd::OpenDailyNote { path: path.clone() }]
+                vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(NotePath::Absolute(path.clone())))]
             } else {
                 vec![Cmd::None]
             }

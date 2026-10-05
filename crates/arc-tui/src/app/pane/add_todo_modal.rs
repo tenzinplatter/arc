@@ -1,49 +1,39 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::{
-    app::{cmd::Cmd, model::AddTodoModalState, msg::AddTodoModalMsg},
+    app::{cmd::Cmd, model::Overlay, msg::AddTodoModalMsg},
     todos::Todo,
 };
 
-pub fn update(
-    state: &mut AddTodoModalState,
-    todos: &mut Vec<Todo>,
-    msg: AddTodoModalMsg,
-) -> Vec<Cmd> {
+pub fn update(overlay: &mut Overlay, todos: &mut Vec<Todo>, msg: AddTodoModalMsg) -> Vec<Cmd> {
     match msg {
         AddTodoModalMsg::Open => {
-            state.is_showing = true;
-            state.input.clear();
-            vec![Cmd::None]
-        }
-
-        AddTodoModalMsg::Close => {
-            state.is_showing = false;
-            vec![Cmd::None]
-        }
-
-        AddTodoModalMsg::TextInput(c) => {
-            state.input.push(c);
-            vec![Cmd::None]
-        }
-
-        AddTodoModalMsg::TextBackspace => {
-            state.input.pop();
-            vec![Cmd::None]
-        }
-
-        AddTodoModalMsg::Accept => {
-            if state.input.is_empty() {
-                return vec![Cmd::None];
+            *overlay = Overlay::AddTodo {
+                input: String::new(),
             }
-            let text = state.input.clone();
-            let today = arc_core::time::today();
-            todos.push(Todo::new_manual(text, today));
-            state.is_showing = false;
-            state.input.clear();
-            vec![Cmd::WriteTodos]
+        }
+        AddTodoModalMsg::Close => *overlay = Overlay::None,
+        AddTodoModalMsg::TextInput(c) => {
+            if let Overlay::AddTodo { input } = overlay {
+                input.push(c);
+            }
+        }
+        AddTodoModalMsg::TextBackspace => {
+            if let Overlay::AddTodo { input } = overlay {
+                input.pop();
+            }
+        }
+        AddTodoModalMsg::Accept => {
+            if let Overlay::AddTodo { input } = overlay
+                && !input.is_empty()
+            {
+                todos.push(Todo::new_manual(input.clone(), arc_core::time::today()));
+                *overlay = Overlay::None;
+                return vec![Cmd::WriteTodos];
+            }
         }
     }
+    vec![Cmd::None]
 }
 
 pub fn key_to_msg(key: KeyEvent) -> Option<AddTodoModalMsg> {

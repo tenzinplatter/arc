@@ -1,54 +1,40 @@
-use std::path::PathBuf;
-
 use crossterm::event::{KeyCode, KeyEvent};
-use slugify::slugify;
 
-use crate::{
-    app::{cmd::Cmd, model::CreateNoteModalState, msg::CreateNoteModalMsg},
+use crate::app::{
+    cmd::{Cmd, NoteToOpen},
+    model::Overlay,
+    msg::CreateNoteModalMsg,
 };
-use arc_core::Config;
 
-pub fn update(
-    state: &mut CreateNoteModalState,
-    config: &Config,
-    msg: CreateNoteModalMsg,
-) -> Vec<Cmd> {
+pub fn update(overlay: &mut Overlay, msg: CreateNoteModalMsg) -> Vec<Cmd> {
     match msg {
         CreateNoteModalMsg::Open => {
-            state.is_showing = true;
-            state.input.clear();
-            vec![Cmd::None]
-        }
-
-        CreateNoteModalMsg::Close => {
-            state.is_showing = false;
-            vec![Cmd::None]
-        }
-
-        CreateNoteModalMsg::TextInput(c) => {
-            state.input.push(c);
-            vec![Cmd::None]
-        }
-
-        CreateNoteModalMsg::TextBackspace => {
-            state.input.pop();
-            vec![Cmd::None]
-        }
-
-        CreateNoteModalMsg::Accept => {
-            if state.input.is_empty() {
-                return vec![Cmd::None];
+            *overlay = Overlay::CreateNote {
+                input: String::new(),
             }
-            let name = state.input.clone();
-            let slug = slugify!(&name);
-            let path: PathBuf = config
-                .notes_dir
-                .join("scratch")
-                .join(format!("{}.md", slug));
-            state.is_showing = false;
-            vec![Cmd::OpenScratchNote { path, name }]
+        }
+        CreateNoteModalMsg::Close => *overlay = Overlay::None,
+        CreateNoteModalMsg::TextInput(c) => {
+            if let Overlay::CreateNote { input } = overlay {
+                input.push(c);
+            }
+        }
+        CreateNoteModalMsg::TextBackspace => {
+            if let Overlay::CreateNote { input } = overlay {
+                input.pop();
+            }
+        }
+        CreateNoteModalMsg::Accept => {
+            if let Overlay::CreateNote { input } = overlay
+                && !input.is_empty()
+            {
+                let note = NoteToOpen::scratch(input);
+                *overlay = Overlay::None;
+                return vec![Cmd::OpenNote(note)];
+            }
         }
     }
+    vec![Cmd::None]
 }
 
 pub fn key_to_msg(key: KeyEvent) -> Option<CreateNoteModalMsg> {

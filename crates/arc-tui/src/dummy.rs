@@ -1,5 +1,3 @@
-//! Dummy data for development/testing. Enable with DUMMY_DATA=1 env var.
-
 use arc_core::time;
 
 use crate::api::{

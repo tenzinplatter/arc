@@ -17,17 +17,14 @@ pub enum Msg {
     DescriptionModal(DescriptionModalMsg),
     CreateNoteModal(CreateNoteModalMsg),
     AddTodoModal(AddTodoModalMsg),
-    StoriesLoaded {
-        stories: Vec<Story>,
-        from_cache: bool,
-    },
+    StoriesLoaded(Vec<Story>),
     EpicsLoaded(Vec<EpicSlim>),
     IterationsLoaded(Vec<Iteration>),
     AllIterationsLoaded(Vec<Iteration>),
     SwitchToView(ViewType),
     NoteOpened,
-    ToggleActionMenu,
-    ToggleKeybindsPanel,
+    OpenActionMenu,
+    OpenKeybindsPanel,
     CacheWritten,
     TodosReloaded(Vec<Todo>),
     Error(ErrorInfo),
@@ -63,13 +60,11 @@ pub enum NotesListMsg {
     OpenNote,
 }
 
-// Epic and iteration panes share one message type (searchable list).
 pub use crate::app::pane::searchable_list::SearchListMsg as IterationListMsg;
 pub use crate::app::pane::searchable_list::SearchListMsg as EpicListMsg;
 
 #[derive(Debug, Clone)]
 pub enum DescriptionModalMsg {
-    Open,
     Close,
     ScrollUp,
     ScrollDown,

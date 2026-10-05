@@ -21,14 +21,13 @@ pub async fn session_exists(name: &str) -> anyhow::Result<bool> {
         .output()
         .await?;
 
-    // zellij list-sessions exits non-zero when no sessions exist; treat that as no sessions
+    // zellij list-sessions exits non-zero when there are no sessions.
     if !output.status.success() {
         return Ok(false);
     }
 
     let output = String::from_utf8_lossy(&output.stdout);
 
-    // Each line is like: "session-name [Created ...] (current)" — match on first word
     let exists = output
         .lines()
         .any(|line| line.split_whitespace().next() == Some(name));
@@ -51,7 +50,6 @@ pub async fn session_attach(name: &str) -> anyhow::Result<()> {
 }
 
 pub async fn session_create(name: &str) -> anyhow::Result<()> {
-    // `--create-background` creates a detached session without attaching (equivalent to `tmux new-session -d`)
     let output = Command::new("zellij")
         .arg("attach")
         .arg("--create-background")

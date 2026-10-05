@@ -17,7 +17,6 @@ pub fn check_worktree_dependencies() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Finds repos that have a .git directory (regular repos).
 async fn find_standard_repos(repos_dir: &str) -> anyhow::Result<Vec<String>> {
     let output = TokioCommand::new("fd")
         .args(["-t", "d", "-I", "-H", "^\\.git$", repos_dir, "-x", "dirname", "{}"])
@@ -36,8 +35,6 @@ async fn find_standard_repos(repos_dir: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-/// Finds repos that have a .git file pointing to a modules dir (submodules).
-/// Excludes worktree .git files, which point to a worktrees dir instead.
 async fn find_submodule_repos(repos_dir: &str) -> anyhow::Result<Vec<String>> {
     let output = TokioCommand::new("fd")
         .args(["-t", "f", "-I", "-H", "^\\.git$", repos_dir])
@@ -64,7 +61,7 @@ async fn find_submodule_repos(repos_dir: &str) -> anyhow::Result<Vec<String>> {
     Ok(contents
         .into_iter()
         .flatten()
-        .filter(|(_, content)| !content.contains("worktrees"))
+        .filter(|(_, gitfile_target)| !is_worktree_gitfile(gitfile_target))
         .map(|(git_file, _)| {
             Path::new(&git_file)
                 .parent()
@@ -76,7 +73,10 @@ async fn find_submodule_repos(repos_dir: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-/// Returns a string with newline seperated repo names
+fn is_worktree_gitfile(gitfile_target: &str) -> bool {
+    gitfile_target.contains("worktrees")
+}
+
 pub async fn get_repo_list(config: &Config) -> anyhow::Result<String> {
     let repos_dir = config.repositories_directory.to_str().unwrap();
 

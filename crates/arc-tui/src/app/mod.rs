@@ -2,13 +2,14 @@ use std::fs::read_to_string;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, WidgetRef, Widget};
 use ratatui::{DefaultTerminal, Frame};
 use tempfile::NamedTempFile;
@@ -24,7 +25,10 @@ use crate::view::todos_list::TodosListView;
 use crate::view::{EpicListView, IterationListView};
 use crate::view::{navbar::NavBar, notes_list::NotesListView, story_list::StoryListView};
 use crate::worktree::{create_worktree, get_repo_list, select_repo_with_fzf};
-use crate::{api::{ApiClient, story::Story}, app::model::ViewType};
+use crate::{
+    api::{ApiClient, story::Story},
+    app::model::{Overlay, ViewType},
+};
 use arc_core::Config;
 
 pub mod cmd;
@@ -34,6 +38,12 @@ pub mod msg;
 pub mod pane;
 pub mod update;
 
+const NAVBAR_HEIGHT: u16 = 3;
+const KEY_READER_POLL: Duration = Duration::from_millis(100);
+const KEY_READER_PAUSED_SLEEP: Duration = Duration::from_millis(20);
+const SUSPEND_GRACE: Duration = Duration::from_millis(20);
+const INPUT_DRAIN_WINDOW: Duration = Duration::from_millis(50);
+
 pub struct App {
     pub model: model::Model,
     pub exit: bool,
@@ -41,9 +51,6 @@ pub struct App {
     pub sender: mpsc::UnboundedSender<msg::Msg>,
     pub api_client: ApiClient,
     pub config: Config,
-    /// When set, the key-reader thread stops consuming terminal input so an
-    /// external program (editor, fzf) launched via `with_suspended_tui` can own
-    /// the terminal.
     pub key_reader_paused: Arc<AtomicBool>,
 }
 
@@ -64,9 +71,6 @@ impl App {
         Ok(())
     }
 
-    /// Single interpreter for every `Cmd`. Async/data commands run inline (some
-    /// spawn background tasks that report back via `Msg`); TUI-suspending commands
-    /// hand the terminal to an external program via `with_suspended_tui`.
     async fn execute_cmd(
         &mut self,
         cmd: cmd::Cmd,
@@ -93,12 +97,7 @@ impl App {
                 let handle = tokio::spawn(async move {
                     match api_client.get_owned_iteration_stories(iteration_ids).await {
                         Ok(stories) => {
-                            sender
-                                .send(Msg::StoriesLoaded {
-                                    stories,
-                                    from_cache: false,
-                                })
-                                .ok();
+                            sender.send(Msg::StoriesLoaded(stories)).ok();
                         }
                         Err(e) => {
                             let info = ErrorInfo::new(
@@ -143,14 +142,9 @@ impl App {
                 }
             }
 
-            cmd::Cmd::ActionMenuVisibility(enabled) => {
-                self.model.ui.action_menu.is_showing = enabled;
-                if enabled {
-                    self.model.ui.action_menu.target_story_id =
-                        self.model.ui.story_list.selected_story_id;
-                } else {
-                    self.model.ui.action_menu.list_state.select(Some(0));
-                    self.model.ui.action_menu.target_story_id = None;
+            cmd::Cmd::CloseActionMenu => {
+                if let Overlay::ActionMenu { .. } = self.model.ui.overlay {
+                    self.model.ui.overlay = Overlay::None;
                 }
             }
 
@@ -187,36 +181,9 @@ impl App {
                     .with_context(|| format!("Failed to open {} in browser", app_url))?;
             }
 
-            cmd::Cmd::OpenNote {
-                story_id,
-                story_name,
-                story_app_url,
-                iteration_app_url,
-            } => {
-                with_suspended_tui(&self.key_reader_paused, terminal,|| {
-                    cmd::open_note_in_editor(
-                        story_id,
-                        story_name,
-                        story_app_url,
-                        iteration_app_url,
-                        &self.model.config,
-                    )
-                })?;
-                self.sender.send(msg::Msg::NoteOpened).ok();
-            }
-
-            cmd::Cmd::OpenIterationNote {
-                iteration_id,
-                iteration_name,
-                iteration_app_url,
-            } => {
-                with_suspended_tui(&self.key_reader_paused, terminal,|| {
-                    cmd::open_iteration_note_in_editor(
-                        iteration_id,
-                        iteration_name,
-                        iteration_app_url,
-                        &self.model.config,
-                    )
+            cmd::Cmd::OpenNote(note) => {
+                with_suspended_tui(&self.key_reader_paused, terminal, || {
+                    note.open(&self.model.config)
                 })?;
                 self.sender.send(msg::Msg::NoteOpened).ok();
             }
@@ -263,36 +230,6 @@ impl App {
                 create_worktree(&path, &branch_name).await?;
             }
 
-            cmd::Cmd::OpenEpicNote {
-                epic_id,
-                epic_name,
-                epic_app_url,
-            } => {
-                with_suspended_tui(&self.key_reader_paused, terminal,|| {
-                    cmd::open_epic_note_in_editor(
-                        epic_id,
-                        epic_name,
-                        epic_app_url,
-                        &self.model.config,
-                    )
-                })?;
-                self.sender.send(msg::Msg::NoteOpened).ok();
-            }
-
-            cmd::Cmd::OpenDailyNote { path } => {
-                with_suspended_tui(&self.key_reader_paused, terminal,|| {
-                    cmd::open_daily_note_with_frontmatter(&self.model.config, &path)
-                })?;
-                self.sender.send(msg::Msg::NoteOpened).ok();
-            }
-
-            cmd::Cmd::OpenScratchNote { path, name } => {
-                with_suspended_tui(&self.key_reader_paused, terminal,|| {
-                    cmd::open_scratch_note_in_editor(&name, &path, &self.model.config)
-                })?;
-                self.sender.send(msg::Msg::NoteOpened).ok();
-            }
-
             cmd::Cmd::OpenTmuxSession { story_name } => {
                 let session_name = Story::tmux_session_name(&story_name);
                 let mux = self.model.config.mux.clone();
@@ -306,27 +243,17 @@ impl App {
     }
 
     async fn poll_for_message(&mut self) -> Result<Option<msg::Msg>> {
-        // Key events and async messages all arrive on the one channel, in order.
-        // Terminal input is read on a dedicated thread (see `spawn_key_reader`),
-        // so nothing is lost to select-cancellation here.
         Ok(self.receiver.recv().await)
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        // Advance spinner animation
         self.model.ui.throbber_state.calc_next();
         let tick = self.model.ui.throbber_state.index().unsigned_abs() as usize;
 
-        // Split screen: navbar at top, main view below
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Navbar: border + content + border
-                Constraint::Min(0),    // Main view: everything else
-            ])
-            .split(frame.area());
+        let [navbar_area, main_area] =
+            Layout::vertical([Constraint::Length(NAVBAR_HEIGHT), Constraint::Min(0)])
+                .areas(frame.area());
 
-        // Render navbar
         let has_stories = !self.model.data.stories.is_empty();
         let navbar = NavBar::new(
             self.model.ui.active_view,
@@ -335,9 +262,8 @@ impl App {
             tick,
         );
 
-        navbar.render_ref(chunks[0], frame.buffer_mut());
+        navbar.render_ref(navbar_area, frame.buffer_mut());
 
-        // Render main view based on active_view
         match self.model.ui.active_view {
             ViewType::Stories => {
                 let story_list_view = StoryListView::new(
@@ -349,12 +275,12 @@ impl App {
                     tick,
                 );
 
-                story_list_view.render_ref(chunks[1], frame.buffer_mut());
+                story_list_view.render_ref(main_area, frame.buffer_mut());
             }
 
             ViewType::Notes => {
                 let notes_view = NotesListView::new(&self.model.ui.notes_list);
-                notes_view.render_ref(chunks[1], frame.buffer_mut());
+                notes_view.render_ref(main_area, frame.buffer_mut());
             }
 
             ViewType::Iterations => {
@@ -364,13 +290,13 @@ impl App {
                     &self.model.data.iterations,
                     &self.model.ui.iteration_list,
                 );
-                iteration_list.render_ref(chunks[1], frame.buffer_mut());
+                iteration_list.render_ref(main_area, frame.buffer_mut());
             }
 
             ViewType::Epics => {
                 let epic_list =
                     EpicListView::new(&self.model.data.epics, &self.model.ui.epic_list);
-                epic_list.render_ref(chunks[1], frame.buffer_mut());
+                epic_list.render_ref(main_area, frame.buffer_mut());
             }
 
             ViewType::Todos => {
@@ -378,71 +304,46 @@ impl App {
                     &self.model.data.todos,
                     &self.model.ui.todos_list,
                 );
-                todos_view.render_ref(chunks[1], frame.buffer_mut());
+                todos_view.render_ref(main_area, frame.buffer_mut());
             }
 
             ViewType::Search => {
-                // Placeholder for future views
                 let placeholder = Paragraph::new("Coming soon...").block(Block::bordered());
-                placeholder.render(chunks[1], frame.buffer_mut());
+                placeholder.render(main_area, frame.buffer_mut());
             }
         }
 
-        if self.model.ui.action_menu.is_showing {
-            let (width, height) = ActionMenu::window_dimensions();
-            let area = frame.area();
-            // Clamp to the frame so the centering subtraction can't underflow
-            // on a terminal smaller than the menu.
-            let width = (width as u16).min(area.width);
-            let height = (height as u16).min(area.height);
-            let x = (area.width - width) / 2;
-            let y = (area.height - height) / 2;
-
-            let rect = Rect::new(x, y, width, height);
-            ActionMenu.render(
-                rect,
-                frame.buffer_mut(),
-                &mut self.model.ui.action_menu.list_state,
-            );
-        }
-
-        // Render description modal (highest priority overlay before errors)
-        if self.model.ui.description_modal.is_showing
-            && let Some(story) = &self.model.ui.description_modal.story
-        {
-            let area = centered_rect(80, 80, frame.area());
-            Clear.render(area, frame.buffer_mut());
-
-            let modal = DescriptionModal::new(story);
-            modal.render(
-                area,
-                frame.buffer_mut(),
-                &mut self.model.ui.description_modal.scroll_view_state,
-            );
-        }
-
-        // Render create note modal on top when showing
-        if self.model.ui.create_note_modal.is_showing {
-            let area = frame.area();
-            Clear.render(centered_rect(50, 30, area), frame.buffer_mut());
-            let modal = CreateNoteModal::new(&self.model.ui.create_note_modal);
-            modal.render_ref(area, frame.buffer_mut());
-        }
-
-        // Render add todo modal on top when showing
-        if self.model.ui.add_todo_modal.is_showing {
-            let area = frame.area();
-            Clear.render(centered_rect(50, 30, area), frame.buffer_mut());
-            let modal = AddTodoModal::new(&self.model.ui.add_todo_modal);
-            modal.render_ref(area, frame.buffer_mut());
-        }
-
-        // Render keybinds panel (above description modal, below errors)
-        if self.model.ui.show_keybinds_panel {
-            KeybindsPanel.render(frame.area(), frame.buffer_mut());
-        }
-
+        self.draw_overlay(frame);
         self.draw_error(frame);
+    }
+
+    fn draw_overlay(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        match &mut self.model.ui.overlay {
+            Overlay::None => {}
+            Overlay::Keybinds => KeybindsPanel.render(area, frame.buffer_mut()),
+            Overlay::Description { story, scroll } => {
+                let modal_area = centered_rect(80, 80, area);
+                Clear.render(modal_area, frame.buffer_mut());
+                DescriptionModal::new(story).render(modal_area, frame.buffer_mut(), scroll);
+            }
+            Overlay::ActionMenu { list, .. } => {
+                let (width, height) = ActionMenu::window_dimensions();
+                let width = (width as u16).min(area.width);
+                let height = (height as u16).min(area.height);
+                let x = (area.width - width) / 2;
+                let y = (area.height - height) / 2;
+                ActionMenu.render(Rect::new(x, y, width, height), frame.buffer_mut(), list);
+            }
+            Overlay::CreateNote { input } => {
+                Clear.render(centered_rect(50, 30, area), frame.buffer_mut());
+                CreateNoteModal::new(input).render_ref(area, frame.buffer_mut());
+            }
+            Overlay::AddTodo { input } => {
+                Clear.render(centered_rect(50, 30, area), frame.buffer_mut());
+                AddTodoModal::new(input).render_ref(area, frame.buffer_mut());
+            }
+        }
     }
 
     fn draw_error(&self, frame: &mut Frame) {
@@ -460,7 +361,6 @@ impl App {
 
             used_height += height;
 
-            // clear terminal area, stops characters behind empty space from being visible
             Clear.render(area, frame.buffer_mut());
 
             error.render_ref(area, frame.buffer_mut());
@@ -476,54 +376,40 @@ fn with_suspended_tui<F, T>(
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    // Stop the key-reader thread from consuming input while the external program
-    // owns the terminal.
     key_reader_paused.store(true, Ordering::SeqCst);
-    // The reader may already be inside a 100ms `poll`, holding crossterm's global
-    // reader lock. Wait it out so it isn't racing us across the raw-mode toggle.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    // An in-flight poll holds crossterm's reader lock; let it finish before toggling raw mode.
+    std::thread::sleep(KEY_READER_POLL + SUSPEND_GRACE);
     std::io::stdout().execute(LeaveAlternateScreen)?;
     disable_raw_mode()?;
     let result = f();
     std::io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     terminal.clear()?;
-    // Drop anything the external program left in the input buffer — otherwise
-    // keys typed inside the editor get replayed as TUI keybinds (an `e` there
-    // reopens the editor forever).
-    // ponytail: 50ms window is plenty for buffered bytes, and bounds the loop —
-    // a tty at EOF makes crossterm report "ready" forever without yielding an event.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    // Discard keys typed in the external program; bounded since a tty at EOF polls ready forever.
+    let deadline = std::time::Instant::now() + INPUT_DRAIN_WINDOW;
     while std::time::Instant::now() < deadline
-        && crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false)
+        && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
         && crossterm::event::read().is_ok()
     {}
     key_reader_paused.store(false, Ordering::SeqCst);
     result
 }
 
-/// Spawn a dedicated OS thread that reads terminal input and forwards key-press
-/// events into the unified `Msg` channel. Reading continuously on its own thread
-/// means crossterm's input buffer is always drained, so fast keystrokes are never
-/// dropped (the previous async-`select!` approach could cancel a pending read).
 fn spawn_key_reader(sender: mpsc::UnboundedSender<msg::Msg>, paused: Arc<AtomicBool>) {
     use crossterm::event::{self, Event, KeyEventKind};
-    use std::time::Duration;
 
     std::thread::spawn(move || {
         loop {
             if paused.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(KEY_READER_PAUSED_SLEEP);
                 continue;
             }
 
-            // Short poll timeout so the pause flag is observed promptly instead
-            // of blocking indefinitely in `read()`.
-            match event::poll(Duration::from_millis(100)) {
+            match event::poll(KEY_READER_POLL) {
                 Ok(true) => match event::read() {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                         if sender.send(msg::Msg::KeyPressed(key)).is_err() {
-                            break; // receiver dropped — app is exiting
+                            break;
                         }
                     }
                     Ok(_) => {}

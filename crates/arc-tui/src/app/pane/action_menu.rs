@@ -11,8 +11,8 @@ use tui_widget_list::{ListBuilder, ListState, ListView};
 use crate::{
     api::story::{get_story_associated_iteration, Story},
     app::{
-        cmd::Cmd,
-        model::{DataState, UiState},
+        cmd::{Cmd, NoteToOpen},
+        model::DataState,
         msg::ActionMenuMsg,
     },
     error::ErrorInfo,
@@ -20,25 +20,7 @@ use crate::{
     view::ActionItemWidget,
 };
 
-#[derive(Debug)]
-pub struct ActionMenuState {
-    pub list_state: ListState,
-    pub is_showing: bool,
-    pub target_story_id: Option<arc_core::StoryId>,
-}
-
-impl Default for ActionMenuState {
-    fn default() -> Self {
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
-
-        Self {
-            list_state,
-            is_showing: false,
-            target_story_id: None,
-        }
-    }
-}
+const PLACEHOLDER_WORKTREE_BRANCH: &str = "feat/branchname";
 
 pub struct ActionMenu;
 
@@ -71,7 +53,6 @@ impl StatefulWidget for ActionMenu {
 
         let highlight_style = Style::default().reversed();
 
-        // Create the list builder
         let builder = ListBuilder::new(move |context| {
             let item = ActionMenuItem::ALL[context.index];
             let widget = ActionItemWidget::new(item.label(), context.is_selected, highlight_style);
@@ -80,7 +61,6 @@ impl StatefulWidget for ActionMenu {
             (widget, height)
         });
 
-        // Create the ListView
         let list = ListView::new(builder, ActionMenuItem::ALL.len());
 
         let line_len = area.width - 2;
@@ -138,58 +118,37 @@ impl ActionMenuItem {
 }
 
 pub fn update(
-    ui_state: &mut UiState,
+    list: &mut ListState,
+    errors: &mut Vec<ErrorInfo>,
     data_state: &DataState,
     msg: ActionMenuMsg,
     story: &Story,
 ) -> Vec<Cmd> {
     let item_count = ActionMenuItem::ALL.len();
-    let state = &mut ui_state.action_menu.list_state;
+    let current = list.selected.unwrap_or(0);
 
     match msg {
         ActionMenuMsg::FocusNext => {
-            if item_count == 0 {
-                return vec![Cmd::None];
-            }
-            let current = state.selected.unwrap_or(0);
-            let next = if current >= item_count - 1 {
-                0 // Wrap to start
-            } else {
-                current + 1
-            };
-            state.select(Some(next));
+            list.select(Some((current + 1) % item_count));
             vec![Cmd::None]
         }
 
         ActionMenuMsg::FocusPrev => {
-            if item_count == 0 {
-                return vec![Cmd::None];
-            }
-            let current = state.selected.unwrap_or(0);
-            let prev = if current == 0 {
-                item_count - 1 // Wrap to end
-            } else {
-                current - 1
-            };
-            state.select(Some(prev));
+            list.select(Some((current + item_count - 1) % item_count));
             vec![Cmd::None]
         }
 
         ActionMenuMsg::Accept => {
-            let mut actions = match ActionMenuItem::from_idx(state.selected.unwrap_or(0)) {
+            let mut actions = match ActionMenuItem::from_idx(current) {
                 ActionMenuItem::OpenIterationNote => {
                     let iteration = data_state.current_iterations_ref().and_then(|iterations| {
                         get_story_associated_iteration(story.iteration_id, iterations)
                     });
 
                     match iteration {
-                        Some(it) => vec![Cmd::OpenIterationNote {
-                            iteration_id: it.id,
-                            iteration_name: it.name.clone(),
-                            iteration_app_url: it.app_url.clone(),
-                        }],
+                        Some(it) => vec![Cmd::OpenNote(NoteToOpen::iteration(it))],
                         None => {
-                            ui_state.errors.push(ErrorInfo::new(
+                            errors.push(ErrorInfo::new(
                                 "No iteration",
                                 "This story has no associated iteration",
                             ));
@@ -206,12 +165,7 @@ pub fn update(
                         })
                         .map(|it| it.app_url.clone());
 
-                    vec![Cmd::OpenNote {
-                        story_id: story.id,
-                        story_name: story.name.clone(),
-                        story_app_url: story.app_url.clone(),
-                        iteration_app_url,
-                    }]
+                    vec![Cmd::OpenNote(NoteToOpen::story(story, iteration_app_url))]
                 }
 
                 ActionMenuItem::EditDescription => {
@@ -232,9 +186,8 @@ pub fn update(
                 }
 
                 ActionMenuItem::CreateGitWorktree => {
-                    // TODO: figure out how to get actual branch name
                     vec![Cmd::CreateGitWorktree {
-                        branch_name: "feat/branchname".to_string(),
+                        branch_name: PLACEHOLDER_WORKTREE_BRANCH.to_string(),
                     }]
                 }
 
@@ -245,12 +198,12 @@ pub fn update(
                 }
             };
 
-            actions.push(Cmd::ActionMenuVisibility(false));
+            actions.push(Cmd::CloseActionMenu);
             actions
         }
 
         ActionMenuMsg::Close => {
-            vec![Cmd::ActionMenuVisibility(false)]
+            vec![Cmd::CloseActionMenu]
         }
     }
 }

@@ -10,9 +10,13 @@ use unicode_ellipsis::truncate_str;
 use crate::text_utils::{count_wrapped_lines, truncate_to_lines};
 use arc_core::dbg_file;
 
+const BORDERS: u16 = 2;
+const HORIZONTAL_PADDING: u16 = 2;
+const HORIZONTAL_CHROME: u16 = BORDERS + HORIZONTAL_PADDING;
 const ERROR_NOTIFICATION_WINDOW_MAX_WIDTH: u16 = 50;
 const ERROR_NOTIFICATION_MAX_TEXT_HEIGHT: u16 = 3;
-pub const ERROR_NOTIFICATION_MAX_HEIGHT: u16 = ERROR_NOTIFICATION_MAX_TEXT_HEIGHT + 2; // +2 for borders
+const ERROR_TITLE_MAX_WIDTH: u16 = ERROR_NOTIFICATION_WINDOW_MAX_WIDTH - HORIZONTAL_CHROME;
+pub const ERROR_NOTIFICATION_MAX_HEIGHT: u16 = ERROR_NOTIFICATION_MAX_TEXT_HEIGHT + BORDERS;
 
 #[derive(Clone, Debug)]
 pub struct ErrorInfo {
@@ -24,13 +28,11 @@ pub struct ErrorInfo {
 impl ErrorInfo {
     pub fn get_required_width(&self) -> u16 {
         let text_len = u16::max(self.short.len() as u16, self.long.len() as u16);
-
-        // +2 for border chars, +2 for padding
-        u16::min(text_len + 4, ERROR_NOTIFICATION_WINDOW_MAX_WIDTH)
+        u16::min(text_len + HORIZONTAL_CHROME, ERROR_NOTIFICATION_WINDOW_MAX_WIDTH)
     }
 
     pub fn get_required_height(&self, available_width: u16) -> u16 {
-        let inner_width = available_width.saturating_sub(4) as usize; // -2 borders, -2 padding
+        let inner_width = available_width.saturating_sub(HORIZONTAL_CHROME) as usize;
         if inner_width == 0 {
             return ERROR_NOTIFICATION_MAX_HEIGHT;
         }
@@ -38,7 +40,7 @@ impl ErrorInfo {
         let line_count = count_wrapped_lines(&self.long, inner_width);
         let text_height = (line_count as u16).min(ERROR_NOTIFICATION_MAX_TEXT_HEIGHT);
 
-        text_height + 2
+        text_height + BORDERS
     }
 
     pub fn is_expired(&self) -> bool {
@@ -59,14 +61,11 @@ impl ErrorInfo {
 }
 
 impl WidgetRef for ErrorInfo {
-    #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
-    #[doc = " to implement a custom widget."]
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let title_width = (ERROR_NOTIFICATION_WINDOW_MAX_WIDTH as usize) - 4; // -2 corners, -2 padding
-        let truncated_title = truncate_str(&self.short, title_width);
+        let truncated_title = truncate_str(&self.short, ERROR_TITLE_MAX_WIDTH as usize);
         let padded_title = format!(" {} ", truncated_title);
         dbg_file!("{}", truncated_title);
-        let inner_width = area.width.saturating_sub(4) as usize; // -2 borders, -2 padding
+        let inner_width = area.width.saturating_sub(HORIZONTAL_CHROME) as usize;
         let display_text = truncate_to_lines(
             &self.long,
             inner_width,
