@@ -4,7 +4,7 @@ use crate::{
     app::{
         App,
         cmd::{Cmd, NoteToOpen},
-        model::{CacheView, LoadingState, Overlay, ViewType},
+        model::{LoadingState, Overlay, ViewType},
         msg::{AddTodoModalMsg, CreateNoteModalMsg, EpicListMsg, IterationListMsg, Msg},
         pane::{action_menu, add_todo_modal, create_note_modal, description_modal, epic_list, iteration_list, notes_list, searchable_list, story_list, todos_list},
     },

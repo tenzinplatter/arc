@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
-    api::{iteration::Iteration, story::Story},
+    api::story::Story,
     cache::Cache,
     error::ErrorInfo,
     todos::Todo,
@@ -98,21 +98,6 @@ pub struct Model {
 pub struct DataState {
     pub async_handles: Vec<JoinHandle<()>>,
     pub todos: Vec<Todo>,
-}
-
-pub trait CacheView {
-    fn stories(&self) -> &[Story];
-    fn current_iterations(&self) -> &[Iteration];
-}
-
-impl CacheView for Cache {
-    fn stories(&self) -> &[Story] {
-        self.iteration_stories.as_deref().unwrap_or_default()
-    }
-
-    fn current_iterations(&self) -> &[Iteration] {
-        self.current_iterations.as_deref().unwrap_or_default()
-    }
 }
 
 #[derive(Debug, Default)]

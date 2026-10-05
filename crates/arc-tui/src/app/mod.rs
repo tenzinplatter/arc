@@ -27,7 +27,7 @@ use crate::view::{navbar::NavBar, notes_list::NotesListView, story_list::StoryLi
 use crate::worktree::{create_worktree, get_repo_list, select_repo_with_fzf};
 use crate::{
     api::{ApiClient, story::Story},
-    app::model::{CacheView, Overlay, ViewType},
+    app::model::{Overlay, ViewType},
 };
 
 pub mod cmd;
@@ -143,8 +143,8 @@ impl App {
 
             cmd::Cmd::WriteTodos => {
                 let todos_snapshot = self.model.data.todos.clone();
-                crate::todos::modify_with_lock(&self.model.config.cache_dir, move |list| {
-                    *list = todos_snapshot;
+                crate::todos::transform_with_lock(&self.model.config.cache_dir, move |_| {
+                    todos_snapshot
                 })
                 .await?;
             }

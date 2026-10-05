@@ -107,17 +107,6 @@ pub async fn save_todos(cache_dir: &Path, todos: &[Todo]) -> anyhow::Result<()> 
     .await?
 }
 
-pub async fn modify_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
-where
-    F: FnOnce(&mut Vec<Todo>) + Send + 'static,
-{
-    transform_with_lock(cache_dir, move |mut list| {
-        f(&mut list);
-        list
-    })
-    .await
-}
-
 pub async fn transform_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
 where
     F: FnOnce(Vec<Todo>) -> Vec<Todo> + Send + 'static,
@@ -281,22 +270,24 @@ mod tests {
         let h1 = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             for i in 0..20 {
-                rt.block_on(modify_with_lock(&a, move |list| {
+                rt.block_on(transform_with_lock(&a, move |mut list| {
                     list.push(Todo::new_manual(
                         format!("a{}", i),
                         chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                     ));
+                    list
                 })).unwrap();
             }
         });
         let h2 = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             for i in 0..20 {
-                rt.block_on(modify_with_lock(&b, move |list| {
+                rt.block_on(transform_with_lock(&b, move |mut list| {
                     list.push(Todo::new_manual(
                         format!("b{}", i),
                         chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                     ));
+                    list
                 })).unwrap();
             }
         });

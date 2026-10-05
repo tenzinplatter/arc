@@ -55,6 +55,14 @@ impl Default for Cache {
 }
 
 impl Cache {
+    pub fn stories(&self) -> &[Story] {
+        self.iteration_stories.as_deref().unwrap_or_default()
+    }
+
+    pub fn current_iterations(&self) -> &[Iteration] {
+        self.current_iterations.as_deref().unwrap_or_default()
+    }
+
     pub fn iteration_for(&self, story: &Story) -> Option<&Iteration> {
         iteration_of(story, self.current_iterations.as_deref()?)
     }
