@@ -33,33 +33,37 @@ pub struct Edited {
     pub todos: Vec<Todo>,
 }
 
-const TODOS_FILE: &str = "todos.json";
-const TODOS_LOCK_FILE: &str = "todos.json.lock";
+const CACHE_FILE: &str = "todos.v2.json";
+const CACHE_LOCK_FILE: &str = "todos.v2.json.lock";
+const LEGACY_FILE: &str = "todos.json";
+const LEGACY_LOCK_FILE: &str = "todos.json.lock";
+const ADOPTED_LEGACY_FILE: &str = "todos.json.adopted";
 
-fn lock_path(cache_dir: &Path) -> PathBuf {
-    cache_dir.join(TODOS_LOCK_FILE)
+pub fn cache_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(CACHE_FILE)
 }
 
-fn todos_path(cache_dir: &Path) -> PathBuf {
-    cache_dir.join(TODOS_FILE)
-}
-
-fn open_lock(cache_dir: &Path) -> anyhow::Result<std::fs::File> {
-    if !cache_dir.exists() {
-        std::fs::create_dir_all(cache_dir)?;
-    }
-    let path = lock_path(cache_dir);
+fn open_lock(cache_dir: &Path, name: &str) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(cache_dir)?;
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)?;
+        .open(cache_dir.join(name))?;
     Ok(file)
 }
 
+fn with_exclusive_lock<T>(cache_dir: &Path, name: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let lock = open_lock(cache_dir, name)?;
+    FileExt::lock_exclusive(&lock)?;
+    let result = f();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
 fn read_todos_inner(cache_dir: &Path) -> Vec<Todo> {
-    std::fs::read_to_string(todos_path(cache_dir))
+    std::fs::read_to_string(cache_path(cache_dir))
         .ok()
         .and_then(|buf| serde_json::from_str(&buf).ok())
         .unwrap_or_default()
@@ -67,7 +71,7 @@ fn read_todos_inner(cache_dir: &Path) -> Vec<Todo> {
 
 fn write_todos_inner(cache_dir: &Path, todos: &[Todo]) -> anyhow::Result<()> {
     std::fs::create_dir_all(cache_dir)?;
-    let path = todos_path(cache_dir);
+    let path = cache_path(cache_dir);
     let mut tmp = tempfile::NamedTempFile::new_in(cache_dir)?;
     let content = serde_json::to_string_pretty(todos)?;
     tmp.write_all(content.as_bytes())?;
@@ -79,15 +83,11 @@ fn transform_blocking<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
 where
     F: FnOnce(Vec<Todo>) -> Vec<Todo>,
 {
-    let lock = open_lock(cache_dir)?;
-    FileExt::lock_exclusive(&lock)?;
-    let result = (|| {
+    with_exclusive_lock(cache_dir, CACHE_LOCK_FILE, || {
         let list = f(read_todos_inner(cache_dir));
         write_todos_inner(cache_dir, &list)?;
-        Ok::<_, anyhow::Error>(list)
-    })();
-    let _ = FileExt::unlock(&lock);
-    result
+        Ok(list)
+    })
 }
 
 pub async fn load_todos(cache_dir: &Path) -> Vec<Todo> {
@@ -307,23 +307,37 @@ enum LegacySource {
     NoteParsed,
 }
 
-fn adopt_legacy_todos_blocking(notes_dir: &Path, cache_dir: &Path) -> anyhow::Result<usize> {
-    let Ok(raw) = std::fs::read_to_string(todos_path(cache_dir)) else {
-        return Ok(0);
-    };
-    let Ok(legacy) = serde_json::from_str::<Vec<LegacyTodo>>(&raw) else {
-        return Ok(0);
-    };
-    let lines: Vec<String> = legacy
+fn legacy_todo_lines(legacy: &Path) -> Vec<String> {
+    std::fs::read_to_string(legacy)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<LegacyTodo>>(&raw).ok())
+        .unwrap_or_default()
         .iter()
         .filter(|t| matches!(t.source, LegacySource::Manual) && !t.text.trim().is_empty())
         .map(|t| render_todo_line(Checkbox::from_completed(t.completed), &t.text, t.date, None))
-        .collect();
-    match lines.is_empty() {
-        true => transform_blocking(cache_dir, |_| Vec::new()).map(drop)?,
-        false => edit_note(notes_dir, cache_dir, &NoteRelPath::todos(), |content| appended(content, &lines, &Frontmatter::todos())).map(drop)?,
+        .collect()
+}
+
+fn adopt_legacy_todos_blocking(notes_dir: &Path, cache_dir: &Path) -> anyhow::Result<usize> {
+    let (legacy, adopted) = (cache_dir.join(LEGACY_FILE), cache_dir.join(ADOPTED_LEGACY_FILE));
+    if !legacy.exists() {
+        return Ok(0);
     }
-    Ok(lines.len())
+    with_exclusive_lock(cache_dir, LEGACY_LOCK_FILE, || {
+        if adopted.exists() {
+            return Ok(0);
+        }
+        let lines = legacy_todo_lines(&legacy);
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        edit_note(notes_dir, cache_dir, &NoteRelPath::todos(), |content| {
+            appended(content, &lines, &Frontmatter::todos())
+        })?;
+        std::fs::rename(&legacy, &adopted)
+            .with_context(|| format!("rename {} to {}", legacy.display(), adopted.display()))?;
+        Ok(lines.len())
+    })
 }
 
 pub async fn adopt_legacy_todos(notes_dir: &Path, cache_dir: &Path) -> anyhow::Result<usize> {
@@ -660,10 +674,14 @@ mod tests {
   }
 ]"#;
 
+    fn write_legacy(cache: &tempfile::TempDir, raw: &str) {
+        std::fs::write(cache.path().join(LEGACY_FILE), raw).unwrap();
+    }
+
     #[tokio::test]
     async fn legacy_manual_todos_move_into_the_todos_note_once() {
         let (notes, cache) = dirs();
-        std::fs::write(cache.path().join(TODOS_FILE), LEGACY_TODOS_JSON).unwrap();
+        write_legacy(&cache, LEGACY_TODOS_JSON);
 
         assert_eq!(adopt_legacy_todos(notes.path(), cache.path()).await.unwrap(), 2);
         let content = read(&notes, "todos.md");
@@ -673,9 +691,62 @@ mod tests {
         );
         let texts: Vec<String> = load_todos(cache.path()).await.into_iter().map(|t| t.text).collect();
         assert_eq!(texts, ["manual todo", "older manual todo without a source"]);
+        assert!(!cache.path().join(LEGACY_FILE).exists());
+        assert!(cache.path().join(ADOPTED_LEGACY_FILE).exists());
 
         assert_eq!(adopt_legacy_todos(notes.path(), cache.path()).await.unwrap(), 0);
         assert_eq!(read(&notes, "todos.md"), content);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_cache_rewritten_after_adoption_is_not_adopted_again() {
+        let (notes, cache) = dirs();
+        write_legacy(&cache, LEGACY_TODOS_JSON);
+        adopt_legacy_todos(notes.path(), cache.path()).await.unwrap();
+        let content = read(&notes, "todos.md");
+
+        write_legacy(&cache, LEGACY_TODOS_JSON);
+        assert_eq!(adopt_legacy_todos(notes.path(), cache.path()).await.unwrap(), 0);
+        assert_eq!(read(&notes, "todos.md"), content);
+    }
+
+    #[test]
+    fn concurrent_adoption_appends_exactly_once() {
+        let (notes, cache) = dirs();
+        write_legacy(&cache, LEGACY_TODOS_JSON);
+        let adopted: usize = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| adopt_legacy_todos_blocking(notes.path(), cache.path()).unwrap()))
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+        assert_eq!(adopted, 2);
+        assert_eq!(read(&notes, "todos.md").matches("manual todo").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_current_format_todos_json_is_never_adopted_and_the_cache_is_kept() {
+        let (notes, cache) = dirs();
+        write_legacy(&cache, GOLDEN_TODOS_JSON);
+        save_todos(cache.path(), &golden_todos()).await.unwrap();
+
+        assert_eq!(adopt_legacy_todos(notes.path(), cache.path()).await.unwrap(), 0);
+        assert!(!notes.path().join("todos.md").exists());
+        assert_eq!(std::fs::read_to_string(cache.path().join(LEGACY_FILE)).unwrap(), GOLDEN_TODOS_JSON);
+        assert_eq!(load_todos(cache.path()).await, golden_todos());
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_garbled_legacy_file_is_nothing_to_adopt() {
+        for raw in ["", "[]", "{not json"] {
+            let (notes, cache) = dirs();
+            write_legacy(&cache, raw);
+            save_todos(cache.path(), &golden_todos()).await.unwrap();
+
+            assert_eq!(adopt_legacy_todos(notes.path(), cache.path()).await.unwrap(), 0);
+            assert!(!notes.path().join("todos.md").exists());
+            assert_eq!(load_todos(cache.path()).await, golden_todos());
+        }
     }
 
     #[tokio::test]

@@ -174,7 +174,7 @@ fn spawn_todos_watcher(
             Ok(w) => w,
             Err(_) => return,
         };
-        let path = cache_dir.join("todos.json");
+        let path = crate::todos::cache_path(&cache_dir);
         // Watch the dir: the file may not exist yet and atomic-rename writes replace its inode.
         let _ = watcher.watch(&cache_dir, RecursiveMode::NonRecursive);
 
