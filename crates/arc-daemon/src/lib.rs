@@ -10,7 +10,9 @@ use arc_core::config::{Config, NotifierConfig};
 use crate::fired::FiredLog;
 use crate::lock::DaemonLock;
 use crate::ntfy::NtfyNotifier;
-use crate::scheduler::{DBusNotifier, NoNotifier, Notifier, ScheduledTodo, Scheduler, SystemClock};
+use crate::scheduler::{
+    DBusNotifier, NoNotifier, Notifier, Outcome, ScheduledTodo, Scheduler, SystemClock,
+};
 use crate::watcher::WatchEvent;
 use arc_notes::NoteRelPath;
 use arc_notes::todos::Todo;
@@ -40,14 +42,17 @@ pub async fn run(config: Config) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     let _watcher = watcher::spawn(config.notes_dir.clone(), tx)?;
 
-    let fired_log = FiredLog::in_cache_dir(&config.cache_dir);
+    let (fired_log, previously_fired) =
+        FiredLog::open(&config.cache_dir, Local::now().date_naive())?;
+    let (outcome_tx, mut outcomes) = mpsc::unbounded_channel::<Outcome>();
     let mut sched = Scheduler::new(
         Arc::new(SystemClock),
         build_notifier(&config.notifier)?,
-        fired_log.load(),
+        outcome_tx,
+        previously_fired,
     );
     rebuild_schedule(&config.cache_dir, &mut sched).await?;
-    tick(&mut sched, &fired_log);
+    sched.tick();
 
     loop {
         let sleep_for = match sched.next_fire() {
@@ -68,16 +73,15 @@ pub async fn run(config: Config) -> Result<()> {
                     error!("event handling failed: {e:#}");
                 }
             }
+            Some(outcome) = outcomes.recv() => {
+                if let Err(e) = fired_log.record(&sched.settle(outcome)) {
+                    warn!("recording fired reminders failed: {e}");
+                }
+            }
             _ = tokio::time::sleep(sleep_for) => {
-                tick(&mut sched, &fired_log);
+                sched.tick();
             }
         }
-    }
-}
-
-fn tick(sched: &mut Scheduler, fired_log: &FiredLog) {
-    if let Err(e) = fired_log.record(&sched.tick()) {
-        warn!("recording fired reminders failed: {e}");
     }
 }
 
