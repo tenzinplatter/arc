@@ -208,7 +208,8 @@ impl Scheduler {
 
     pub fn upsert(&mut self, todo: ScheduledTodo) {
         let key = todo.key();
-        if self.fired.contains(&key) || self.is_pending(&key) {
+        let forgotten = !crate::fired::is_remembered(key.date, self.clock.now().date_naive());
+        if forgotten || self.fired.contains(&key) || self.is_pending(&key) {
             return;
         }
         self.entries.insert(todo.id, todo);
@@ -455,6 +456,21 @@ mod heap_tests {
         let sent = notifier.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].1.contains("2 overdue todos"));
+    }
+
+    #[test]
+    fn todos_overdue_past_the_fired_log_retention_are_not_scheduled() {
+        let clock = Arc::new(FakeClock::new(at_9am(2026, 7, 31)));
+        let notifier = Arc::new(CapturingNotifier::default());
+        let (mut sched, _outcomes) = scheduler(clock.clone(), notifier.clone(), HashSet::new());
+
+        sched.upsert(todo(1, at_9am(2026, 6, 30)));
+        sched.upsert(todo(2, at_9am(2026, 7, 1)));
+
+        sched.tick();
+        let sent = notifier.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains("1 overdue todos"), "{}", sent[0].1);
     }
 
     #[test]

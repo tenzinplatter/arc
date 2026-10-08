@@ -11,6 +11,10 @@ use crate::scheduler::ReminderKey;
 const FIRED_FILE: &str = "fired-reminders";
 const RETENTION: chrono::Duration = chrono::Duration::days(30);
 
+pub(crate) fn is_remembered(reminder_date: NaiveDate, today: NaiveDate) -> bool {
+    reminder_date >= today - RETENTION
+}
+
 pub struct FiredLog {
     path: PathBuf,
 }
@@ -35,11 +39,10 @@ impl FiredLog {
         if unparseable > 0 {
             warn!("dropping {unparseable} unparseable lines from {}", path.display());
         }
-        let oldest_kept = today - RETENTION;
         let keys: HashSet<ReminderKey> = parsed
             .into_iter()
             .flatten()
-            .filter(|k| k.date >= oldest_kept)
+            .filter(|k| is_remembered(k.date, today))
             .collect();
 
         let log = Self { path };
