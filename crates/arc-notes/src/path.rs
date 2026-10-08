@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::scope::{PathSegment, RepoKey};
@@ -115,6 +115,26 @@ impl NoteRelPath {
         notes_dir.join(&self.0)
     }
 
+    pub fn abs_within(&self, notes_dir: &Path) -> anyhow::Result<PathBuf> {
+        let abs = self.abs(notes_dir);
+        let root = match notes_dir.canonicalize() {
+            Ok(root) => root,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(abs),
+            Err(e) => return Err(e).with_context(|| format!("resolve {}", notes_dir.display())),
+        };
+        let nearest = abs
+            .ancestors()
+            .find(|p| p.symlink_metadata().is_ok())
+            .unwrap_or(notes_dir);
+        let resolved = nearest
+            .canonicalize()
+            .with_context(|| format!("resolve {}", nearest.display()))?;
+        if !resolved.starts_with(&root) {
+            bail!("note '{self}' resolves outside the notes dir");
+        }
+        Ok(abs)
+    }
+
     pub fn file_stem(&self) -> Option<&str> {
         Path::new(&self.0).file_stem().and_then(|s| s.to_str())
     }
@@ -147,6 +167,36 @@ impl AsRef<Path> for NoteRelPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn abs_within_refuses_symlinks_out_of_the_notes_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let (notes, outside) = (tmp.path().join("notes"), tmp.path().join("outside"));
+        std::fs::create_dir_all(notes.join("stories")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "x").unwrap();
+        std::fs::write(notes.join("real.md"), "x").unwrap();
+        symlink(outside.join("secret.md"), notes.join("leak.md")).unwrap();
+        symlink(&outside, notes.join("escape")).unwrap();
+        symlink(notes.join("real.md"), notes.join("alias.md")).unwrap();
+        symlink(tmp.path().join("missing.md"), notes.join("dangling.md")).unwrap();
+        let within = |rel: &str| NoteRelPath::parse(rel).unwrap().abs_within(&notes);
+
+        assert_eq!(within("real.md").unwrap(), notes.join("real.md"));
+        assert_eq!(within("alias.md").unwrap(), notes.join("alias.md"));
+        assert_eq!(within("stories/new.md").unwrap(), notes.join("stories/new.md"));
+        assert_eq!(within("new/dir/note.md").unwrap(), notes.join("new/dir/note.md"));
+        for escaping in ["leak.md", "escape/secret.md", "escape/new.md", "dangling.md"] {
+            assert!(within(escaping).is_err(), "{escaping}");
+        }
+        let missing = tmp.path().join("no-notes");
+        assert_eq!(
+            NoteRelPath::parse("a.md").unwrap().abs_within(&missing).unwrap(),
+            missing.join("a.md")
+        );
+    }
 
     #[test]
     fn parse_normalises_and_rejects_escapes() {

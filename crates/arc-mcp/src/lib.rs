@@ -1443,6 +1443,48 @@ mod tests {
         assert!(mcp.get_info().instructions.unwrap().contains("as `cwd`"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn note_tools_refuse_symlinks_out_of_the_notes_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+        let (notes, outside) = (tmp.path().join("notes"), tmp.path().join("outside"));
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        arc_index::open(&tmp.path().join("cache")).unwrap();
+        std::fs::write(outside.join("secret.md"), "secret\n").unwrap();
+        symlink(outside.join("secret.md"), notes.join("leak.md")).unwrap();
+        symlink(&outside, notes.join("stories")).unwrap();
+
+        let get = mcp
+            .get_note(Parameters(GetNoteArgs { id: None, path: Some("leak.md".into()) }))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&get);
+        assert!(is_error && texts[0].contains("outside the notes dir"), "{texts:?}");
+
+        let append = mcp
+            .append_note(Parameters(AppendNoteArgs {
+                id: None,
+                path: Some("leak.md".into()),
+                content: "pwned".into(),
+                section: None,
+            }))
+            .await
+            .unwrap();
+        assert!(result_texts(&append).0);
+        assert_eq!(std::fs::read_to_string(outside.join("secret.md")).unwrap(), "secret\n");
+
+        let created = mcp
+            .create_story_note(Parameters(CreateStoryNoteArgs { story_id: 7, body: "b".into() }))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&created);
+        assert!(is_error && texts[0].contains("outside the notes dir"), "{texts:?}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
     #[tokio::test]
     async fn append_note_tool_appends_under_a_section() {
         let tmp = tempfile::tempdir().unwrap();

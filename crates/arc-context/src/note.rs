@@ -95,14 +95,14 @@ impl<'a> Vault<'a> {
             arc_index::reindex_note(self.conn, rel, &content)?;
             return Ok(false);
         }
-        arc_notes::write::replace(&rel.abs(self.dir), &updated)?;
+        arc_notes::write::replace(&rel.abs_within(self.dir)?, &updated)?;
         arc_index::reindex_note(self.conn, rel, &updated)?;
         Ok(true)
     }
 
     pub fn create(&self, rel: &NoteRelPath, content: &str) -> anyhow::Result<()> {
         let _lock = self.locks.note(rel)?;
-        arc_notes::write::create(&rel.abs(self.dir), content)?;
+        arc_notes::write::create(&rel.abs_within(self.dir)?, content)?;
         arc_index::reindex_note(self.conn, rel, content)
     }
 }

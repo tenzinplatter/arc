@@ -358,7 +358,7 @@ pub fn story_for_branch(
 }
 
 pub fn read_note(notes_dir: &Path, rel: &NoteRelPath) -> Result<Option<String>> {
-    match std::fs::read_to_string(rel.abs(notes_dir)) {
+    match std::fs::read_to_string(rel.abs_within(notes_dir)?) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read note {rel}")),
