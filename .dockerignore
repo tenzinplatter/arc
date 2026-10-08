@@ -1,0 +1,10 @@
+target
+.git
+.worktrees
+.cargo
+.claude
+.env
+debug.log
+docs
+Dockerfile
+.dockerignore
