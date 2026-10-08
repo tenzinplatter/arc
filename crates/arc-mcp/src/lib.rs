@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
@@ -31,6 +31,7 @@ pub use http::{Auth, HttpBinding, MCP_PATH, Transport};
 
 const QUERY_ROW_CAP: usize = 200;
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
+const LOOKUP_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Deserialize, JsonSchema)]
 struct QueryArgs {
@@ -255,7 +256,7 @@ pub struct ArcMcp {
     config: Config,
     locality: Locality,
     client: Arc<OnceCell<ApiClient>>,
-    lookups_refreshed: Arc<AtomicBool>,
+    last_lookup_refresh: Arc<Mutex<Option<Instant>>>,
 }
 
 macro_rules! tool_try {
@@ -282,7 +283,7 @@ impl ArcMcp {
             config,
             locality,
             client: Arc::new(OnceCell::new()),
-            lookups_refreshed: Arc::new(AtomicBool::new(false)),
+            last_lookup_refresh: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -567,6 +568,18 @@ impl ArcMcp {
 }
 
 impl ArcMcp {
+    fn claim_lookup_refresh(&self, now: Instant) -> bool {
+        let mut last = self
+            .last_lookup_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let due = last.is_none_or(|at| now.duration_since(at) >= LOOKUP_REFRESH_INTERVAL);
+        if due {
+            *last = Some(now);
+        }
+        due
+    }
+
     async fn read_cache(&self) -> Cache {
         // a missing cache file defaults to ~/.cache/arc; writes must go to ours
         Cache::read(self.config.cache_dir.clone())
@@ -588,7 +601,7 @@ impl ArcMcp {
         let res = async {
             let client = self.client(cache).await?;
             timed(arc_shortcut::ensure_lookups(cache, &client)).await?;
-            if missing(cache) && !self.lookups_refreshed.swap(true, Ordering::Relaxed) {
+            if missing(cache) && self.claim_lookup_refresh(Instant::now()) {
                 timed(arc_shortcut::refresh_lookups(cache, &client)).await?;
             }
             anyhow::Ok(())
@@ -1372,6 +1385,17 @@ mod tests {
         assert!(is_error && texts[0].contains("`branch`") && texts[0].contains("`story_id`"), "{texts:?}");
         let instructions = mcp.get_info().instructions.unwrap();
         assert!(instructions.contains("never `cwd`"), "{instructions}");
+    }
+
+    #[test]
+    fn lookup_refreshes_are_claimed_once_per_interval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(config_in(tmp.path()));
+        let start = Instant::now();
+        assert!(mcp.claim_lookup_refresh(start));
+        assert!(!mcp.clone().claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL / 2));
+        assert!(mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
+        assert!(!mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
     }
 
     #[tokio::test]
