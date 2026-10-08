@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use arc_context::EntryText;
-use arc_core::StoryId;
+use arc_core::{BearerToken, StoryId};
 use arc_hooks::install::{DevBuilds, Mode};
 use arc_mcp::{HttpBinding, Transport};
 use arc_notes::SessionId;
@@ -174,8 +174,8 @@ pub enum HookCommands {
 #[derive(Args)]
 pub struct McpArgs {
     /// Serve MCP over streamable HTTP at `http://<ADDR>/mcp` instead of stdio. Binds exactly this
-    /// address (e.g. a Tailscale IP and port). Requires `Authorization: Bearer <mcp_token>` when
-    /// `mcp_token` is set in the config.
+    /// address (e.g. a Tailscale IP and port) and requires `Authorization: Bearer <mcp_token>` from
+    /// the config; only a loopback address may be served without `mcp_token`.
     #[arg(long, value_name = "ADDR")]
     pub http: Option<SocketAddr>,
     /// Extra `Host` header value to accept over HTTP, such as a MagicDNS name. Loopback names and
@@ -185,14 +185,11 @@ pub struct McpArgs {
 }
 
 impl McpArgs {
-    pub fn transport(self) -> Transport {
-        match self.http {
-            Some(addr) => Transport::Http(HttpBinding {
-                addr,
-                extra_hosts: self.allowed_hosts,
-            }),
+    pub fn transport(self, token: Option<BearerToken>) -> anyhow::Result<Transport> {
+        Ok(match self.http {
+            Some(addr) => Transport::Http(HttpBinding::new(addr, self.allowed_hosts, token)?),
             None => Transport::Stdio,
-        }
+        })
     }
 }
 
@@ -294,25 +291,29 @@ mod tests {
         assert!(parse(&["todo", "done", "7"]).is_err());
     }
 
-    fn mcp_transport(args: &[&str]) -> Result<Transport, clap::Error> {
+    fn mcp_transport(args: &[&str], token: Option<&str>) -> anyhow::Result<Transport> {
+        let token = token.map(|t| BearerToken::parse(t).unwrap());
         match parse(args)? {
-            Commands::Mcp(args) => Ok(args.transport()),
+            Commands::Mcp(args) => args.transport(token),
             _ => panic!("not mcp"),
         }
     }
 
     #[test]
     fn mcp_defaults_to_stdio_and_binds_http_exactly() {
-        assert_eq!(mcp_transport(&["mcp"]).unwrap(), Transport::Stdio);
+        assert_eq!(mcp_transport(&["mcp"], None).unwrap(), Transport::Stdio);
+        let addr = "100.114.114.38:8765";
         assert_eq!(
-            mcp_transport(&["mcp", "--http", "100.114.114.38:8765", "--allow-host", "raspi"]).unwrap(),
-            Transport::Http(HttpBinding {
-                addr: "100.114.114.38:8765".parse().unwrap(),
-                extra_hosts: vec!["raspi".into()],
-            })
+            mcp_transport(&["mcp", "--http", addr, "--allow-host", "raspi"], Some("t")).unwrap(),
+            Transport::Http(
+                HttpBinding::new(addr.parse().unwrap(), vec!["raspi".into()], Some(BearerToken::parse("t").unwrap()))
+                    .unwrap()
+            )
         );
-        assert!(mcp_transport(&["mcp", "--http", "8765"]).is_err());
-        assert!(mcp_transport(&["mcp", "--allow-host", "raspi"]).is_err());
+        assert!(mcp_transport(&["mcp", "--http", addr], None).is_err());
+        assert!(mcp_transport(&["mcp", "--http", "127.0.0.1:8765"], None).is_ok());
+        assert!(mcp_transport(&["mcp", "--http", "8765"], Some("t")).is_err());
+        assert!(mcp_transport(&["mcp", "--allow-host", "raspi"], Some("t")).is_err());
     }
 
     #[test]

@@ -27,7 +27,7 @@ use arc_shortcut::{ApiClient, Cache};
 
 pub mod http;
 
-pub use http::{HttpBinding, MCP_PATH, Transport};
+pub use http::{Auth, HttpBinding, MCP_PATH, Transport};
 
 const QUERY_ROW_CAP: usize = 200;
 const NET_TIMEOUT: Duration = Duration::from_secs(10);

@@ -1,13 +1,13 @@
-use std::net::SocketAddr;
 use std::path::Path;
 
 use arc_core::{BearerToken, Config};
+use arc_mcp::HttpBinding;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 struct Server {
+    base: String,
     url: String,
     client: reqwest::Client,
     _stop: oneshot::Sender<()>,
@@ -32,13 +32,20 @@ async fn start(token: Option<&str>) -> Server {
     let config = config_in(root.path(), token.map(|t| BearerToken::parse(t).unwrap()));
     std::fs::create_dir_all(&config.notes_dir).unwrap();
     arc_index::open(&config.cache_dir).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
+    let binding = HttpBinding::new(
+        "127.0.0.1:0".parse().unwrap(),
+        vec![],
+        config.mcp_token.clone(),
+    )
+    .unwrap();
+    let listener = binding.listen().await.unwrap();
+    let addr = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(arc_mcp::http::serve(listener, config, vec![], async move {
+    tokio::spawn(arc_mcp::http::serve(listener, config, async move {
         let _ = stopped.await;
     }));
     Server {
+        base: format!("http://{addr}"),
         url: format!("http://{addr}{}", arc_mcp::MCP_PATH),
         client: reqwest::Client::new(),
         _stop: stop,
@@ -182,4 +189,45 @@ async fn rejects_unexpected_host_headers() {
         .unwrap()
         .status();
     assert!(status.is_client_error(), "{status}");
+}
+
+#[tokio::test]
+async fn every_method_and_path_needs_the_token() {
+    let server = start(Some("s3cret")).await;
+    let nested = format!("{}/x", server.url);
+    let unknown = format!("{}/elsewhere", server.base);
+    for (method, url) in [
+        (reqwest::Method::GET, &server.url),
+        (reqwest::Method::DELETE, &server.url),
+        (reqwest::Method::OPTIONS, &server.url),
+        (reqwest::Method::POST, &nested),
+        (reqwest::Method::GET, &unknown),
+    ] {
+        let status = server
+            .client
+            .request(method.clone(), url)
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {url}");
+    }
+}
+
+#[tokio::test]
+async fn oversized_bodies_get_413_after_auth() {
+    let server = start(Some("s3cret")).await;
+    let padding = "x".repeat(2 * 1024 * 1024);
+    let body =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"padding": padding}});
+    let unauthenticated = server.post(&body).send().await.unwrap().status();
+    assert_eq!(unauthenticated, StatusCode::UNAUTHORIZED);
+    let status = server
+        .post(&body)
+        .bearer_auth("s3cret")
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
