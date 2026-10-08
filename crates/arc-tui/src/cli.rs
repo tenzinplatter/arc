@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use arc_context::EntryText;
 use arc_core::StoryId;
 use arc_hooks::install::{DevBuilds, Mode};
+use arc_mcp::{HttpBinding, Transport};
 use arc_notes::SessionId;
 use clap::builder::{BoolValueParser, TypedValueParser};
 use chrono::NaiveDate;
@@ -46,9 +48,11 @@ pub enum Commands {
     #[command(subcommand)]
     Daemon(DaemonCommands),
 
-    /// MCP server (stdio) for LLM clients: notes index, note/todo writes and cached Shortcut stories.
+    /// MCP server for LLM clients: notes index, note/todo writes and cached Shortcut stories.
+    ///
+    /// Serves stdio unless `--http` is given.
     #[command()]
-    Mcp,
+    Mcp(McpArgs),
 
     /// Print the Shortcut story for the current git branch.
     ///
@@ -168,6 +172,31 @@ pub enum HookCommands {
 }
 
 #[derive(Args)]
+pub struct McpArgs {
+    /// Serve MCP over streamable HTTP at `http://<ADDR>/mcp` instead of stdio. Binds exactly this
+    /// address (e.g. a Tailscale IP and port). Requires `Authorization: Bearer <mcp_token>` when
+    /// `mcp_token` is set in the config.
+    #[arg(long, value_name = "ADDR")]
+    pub http: Option<SocketAddr>,
+    /// Extra `Host` header value to accept over HTTP, such as a MagicDNS name. Loopback names and
+    /// the bound IP are always accepted.
+    #[arg(long = "allow-host", value_name = "HOST", requires = "http")]
+    pub allowed_hosts: Vec<String>,
+}
+
+impl McpArgs {
+    pub fn transport(self) -> Transport {
+        match self.http {
+            Some(addr) => Transport::Http(HttpBinding {
+                addr,
+                extra_hosts: self.allowed_hosts,
+            }),
+            None => Transport::Stdio,
+        }
+    }
+}
+
+#[derive(Args)]
 pub struct InstallArgs {
     #[command(flatten)]
     pub target: SettingsArgs,
@@ -263,6 +292,27 @@ mod tests {
             Commands::Todo(TodoCommands::Done { .. })
         ));
         assert!(parse(&["todo", "done", "7"]).is_err());
+    }
+
+    fn mcp_transport(args: &[&str]) -> Result<Transport, clap::Error> {
+        match parse(args)? {
+            Commands::Mcp(args) => Ok(args.transport()),
+            _ => panic!("not mcp"),
+        }
+    }
+
+    #[test]
+    fn mcp_defaults_to_stdio_and_binds_http_exactly() {
+        assert_eq!(mcp_transport(&["mcp"]).unwrap(), Transport::Stdio);
+        assert_eq!(
+            mcp_transport(&["mcp", "--http", "100.114.114.38:8765", "--allow-host", "raspi"]).unwrap(),
+            Transport::Http(HttpBinding {
+                addr: "100.114.114.38:8765".parse().unwrap(),
+                extra_hosts: vec!["raspi".into()],
+            })
+        );
+        assert!(mcp_transport(&["mcp", "--http", "8765"]).is_err());
+        assert!(mcp_transport(&["mcp", "--allow-host", "raspi"]).is_err());
     }
 
     #[test]

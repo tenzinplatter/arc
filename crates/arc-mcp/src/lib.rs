@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,14 +16,18 @@ use serde_json::{Value, json};
 use slugify::slugify;
 use tokio::sync::OnceCell;
 
-use arc_context::{EntryText, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote, Vault};
+use arc_context::{Checkout, EntryText, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote, Vault};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
-use arc_notes::{NoteRelPath, SessionId, TodoScope};
+use arc_notes::{BranchName, NoteRelPath, SessionId, TodoScope};
 use arc_shortcut::api::branch::Branch;
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
+
+pub mod http;
+
+pub use http::{HttpBinding, MCP_PATH, Transport};
 
 const QUERY_ROW_CAP: usize = 200;
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,13 +113,16 @@ impl TryFrom<StoryIdInput> for StoryRef {
 
 #[derive(Deserialize, JsonSchema)]
 struct LogSessionArgs {
-    /// Shortcut story id, as a number (`123`) or a string (`"sc-123"`). Defaults to the story resolved from the git branch checked out in `cwd` (an `sc-<id>` in the branch name, or a story note listing the branch under `branches:`).
+    /// Shortcut story id, as a number (`123`) or a string (`"sc-123"`). Defaults to the story resolved from `branch`, or from the git branch checked out in `cwd` (an `sc-<id>` in the branch name, or a story note listing the branch under `branches:`).
     #[serde(default)]
     #[schemars(schema_with = "optional_story_id_schema")]
     story_id: Option<StoryRef>,
-    /// Absolute path of your current working directory: the git checkout or worktree you are working in. The story and branch are resolved from it. Defaults to the directory the arc MCP server was started in, which may be a different checkout or worktree.
+    /// Absolute path of your current working directory: the git checkout or worktree you are working in. The story and branch are resolved from it. Defaults to the directory the arc MCP server was started in, which may be a different checkout or worktree. Only works when the server runs on your machine; over a remote (HTTP) arc server pass `branch` instead.
     #[serde(default)]
     cwd: Option<String>,
+    /// Name of the git branch you are working on (e.g. `me/sc-123/thing`). The story resolves from the branch name alone, without reading any checkout: an `sc-<id>` in the name, or a story note listing the branch under `branches:`. Pass this instead of `cwd` when the arc server runs on another machine (HTTP transport). Don't pass both.
+    #[serde(default)]
+    branch: Option<String>,
     /// What this session got done.
     done: String,
     /// Where things stand now: what works, what's half-done, anything uncommitted or broken.
@@ -129,28 +136,33 @@ struct LogSessionArgs {
 
 #[derive(Deserialize, JsonSchema)]
 struct CurrentStoryArgs {
-    /// Absolute path of your current working directory: the git checkout or worktree you are working in. The story and branch are resolved from it. Defaults to the directory the arc MCP server was started in, which may be a different checkout or worktree.
+    /// Absolute path of your current working directory: the git checkout or worktree you are working in. The story and branch are resolved from it. Defaults to the directory the arc MCP server was started in, which may be a different checkout or worktree. Only works when the server runs on your machine; over a remote (HTTP) arc server pass `branch` instead.
     #[serde(default)]
     cwd: Option<String>,
+    /// Name of the git branch you are working on (e.g. `me/sc-123/thing`). The story resolves from the branch name alone, without reading any checkout: an `sc-<id>` in the name, or a story note listing the branch under `branches:`. Pass this instead of `cwd` when the arc server runs on another machine (HTTP transport). Don't pass both.
+    #[serde(default)]
+    branch: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct WorkDir(PathBuf);
-
-impl WorkDir {
-    fn parse(dir: &str) -> Result<Self> {
-        let path = PathBuf::from(dir);
-        if !path.is_absolute() {
-            bail!("`cwd` must be an absolute path, got '{dir}'");
-        }
-        if !path.is_dir() {
-            bail!("`cwd` '{dir}' is not an existing directory");
-        }
-        Ok(Self(path))
+fn parse_work_dir(dir: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(dir);
+    if !path.is_absolute() {
+        bail!("`cwd` must be an absolute path, got '{dir}'");
     }
+    if !path.is_dir() {
+        bail!("`cwd` '{dir}' is not an existing directory");
+    }
+    Ok(path)
+}
 
-    fn parse_optional(dir: Option<&str>) -> Result<Option<Self>> {
-        dir.map(Self::parse).transpose()
+fn requested_checkout(cwd: Option<&str>, branch: Option<&str>) -> Result<Option<Checkout>> {
+    match (cwd, branch) {
+        (Some(_), Some(_)) => bail!("pass either `cwd` or `branch`, not both"),
+        (Some(dir), None) => parse_work_dir(dir).map(|dir| Some(Checkout::Dir(dir))),
+        (None, Some(branch)) => BranchName::parse(branch.trim())
+            .map(|b| Some(Checkout::Branch(b)))
+            .map_err(|e| anyhow!("`branch`: {e}")),
+        (None, None) => Ok(None),
     }
 }
 
@@ -163,8 +175,8 @@ fn entry_field(name: &str, text: &str) -> Result<EntryText> {
 }
 
 impl LogSessionArgs {
-    fn into_parts(self) -> Result<(Option<WorkDir>, Option<StoryId>, Handoff)> {
-        let cwd = WorkDir::parse_optional(self.cwd.as_deref())?;
+    fn into_parts(self) -> Result<(Option<Checkout>, Option<StoryId>, Handoff)> {
+        let checkout = requested_checkout(self.cwd.as_deref(), self.branch.as_deref())?;
         let handoff = Handoff {
             done: entry_field("done", &self.done)?,
             state: entry_field("state", &self.state)?,
@@ -176,7 +188,7 @@ impl LogSessionArgs {
                 .map(|q| entry_field("questions", q))
                 .transpose()?,
         };
-        Ok((cwd, self.story_id.map(|StoryRef(id)| id), handoff))
+        Ok((checkout, self.story_id.map(|StoryRef(id)| id), handoff))
     }
 }
 
@@ -198,10 +210,16 @@ struct AddTodoArgs {
     global: bool,
 }
 
+#[derive(Clone, Debug)]
+enum Locality {
+    Local { cwd: PathBuf },
+    Remote,
+}
+
 #[derive(Clone)]
 pub struct ArcMcp {
     config: Config,
-    cwd: PathBuf,
+    locality: Locality,
     client: Arc<OnceCell<ApiClient>>,
     lookups_refreshed: Arc<AtomicBool>,
 }
@@ -218,9 +236,17 @@ macro_rules! tool_try {
 #[tool_router]
 impl ArcMcp {
     pub fn new(config: Config, cwd: PathBuf) -> Self {
+        Self::with_locality(config, Locality::Local { cwd })
+    }
+
+    pub fn remote(config: Config) -> Self {
+        Self::with_locality(config, Locality::Remote)
+    }
+
+    fn with_locality(config: Config, locality: Locality) -> Self {
         Self {
             config,
-            cwd,
+            locality,
             client: Arc::new(OnceCell::new()),
             lookups_refreshed: Arc::new(AtomicBool::new(false)),
         }
@@ -424,53 +450,53 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Record a session handoff on a Shortcut story: appends a `### <local time> <UTC offset> · <branch>` entry with Done / State / Next / Open questions to the end of the story note's `## Sessions` section, creating the section (and the story note) if missing. Use it at milestones and always before ending a session — it captures where things stand so the next session can pick up from it. Pass your current working directory as `cwd` (the server's own directory may be another checkout or worktree); the story defaults to the one resolved from the git branch checked out there. Pass `story_id` for any other story; the entry names the branch only when it belongs to that story. Returns the note path, the entry heading, and the directory and git branch it resolved against."
+        description = "Record a session handoff on a Shortcut story: appends a `### <local time> <UTC offset> · <branch>` entry with Done / State / Next / Open questions to the end of the story note's `## Sessions` section, creating the section (and the story note) if missing. Use it at milestones and always before ending a session — it captures where things stand so the next session can pick up from it. Pass your current working directory as `cwd` (the server's own directory may be another checkout or worktree); the story defaults to the one resolved from the git branch checked out there. When the arc server runs on another machine (HTTP transport) it can't see your checkout: pass your git branch name as `branch` instead, and `story_id` when the branch doesn't name or link the story. Pass `story_id` for any other story; the entry names the branch only when it belongs to that story. Returns the note path, the entry heading, and the directory and git branch it resolved against."
     )]
     async fn log_session(
         &self,
         Parameters(args): Parameters<LogSessionArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (cwd, story, handoff) = tool_try!(args.into_parts());
-        let dir = self.work_dir(cwd);
+        let (requested, story, handoff) = tool_try!(args.into_parts());
+        let checkout = tool_try!(self.checkout(requested));
         let mut cache = self.read_cache().await;
         let logged = tool_try!(
-            arc_context::log_session(&dir, &self.config, &mut cache, story, handoff)
+            arc_context::log_session_at(&checkout, &self.config, &mut cache, story, handoff)
                 .await
                 .map_err(|e| format!("{e:#}"))
         );
-        Ok(logged_result(&dir, &logged))
+        Ok(logged_result(&checkout, &logged))
     }
 
     #[tool(
-        description = "The Shortcut story for the git branch checked out in `cwd`, as JSON: story id, name, state, type and url; the branch and how it resolved to the story; the canonical branch name; the story note path; the latest `## Sessions` handoff entries; and the note's open todos. Same payload as `arc context --format json` — use it when the context shown at session start has scrolled away. Pass your current working directory as `cwd` (the server's own directory may be another checkout or worktree). A second text block names the directory and branch it resolved against. Returns a plain message, not an error, when no story resolves for the branch."
+        description = "The Shortcut story for the git branch checked out in `cwd` (or named by `branch`), as JSON: story id, name, state, type and url; the branch and how it resolved to the story; the canonical branch name; the story note path; the latest `## Sessions` handoff entries; and the note's open todos. Same payload as `arc context --format json` — use it when the context shown at session start has scrolled away. Pass your current working directory as `cwd` (the server's own directory may be another checkout or worktree). When the arc server runs on another machine (HTTP transport) it can't see your checkout: pass your git branch name as `branch` instead. A second text block names the directory and branch it resolved against. Returns a plain message, not an error, when no story resolves for the branch."
     )]
     async fn current_story(
         &self,
-        Parameters(CurrentStoryArgs { cwd }): Parameters<CurrentStoryArgs>,
+        Parameters(CurrentStoryArgs { cwd, branch }): Parameters<CurrentStoryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let dir = self.work_dir(tool_try!(WorkDir::parse_optional(cwd.as_deref())));
+        let requested = tool_try!(requested_checkout(cwd.as_deref(), branch.as_deref()));
+        let checkout = tool_try!(self.checkout(requested));
         let mut cache = self.read_cache().await;
         let context = tool_try!(
-            arc_context::current_context(&dir, &self.config, &mut cache)
+            arc_context::current_context_at(&checkout, &self.config, &mut cache)
                 .await
                 .map_err(|e| format!("{e:#}"))
         );
         let Some(context) = context else {
-            let head_dir = dir.clone();
-            let head = tokio::task::spawn_blocking(move || arc_context::git::head(&head_dir))
+            let head_checkout = checkout.clone();
+            let head = tokio::task::spawn_blocking(move || head_checkout.head())
                 .await
                 .map_err(internal)?;
             let head = tool_try!(head.map_err(|e| format!("{e:#}")));
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "no story for this branch\ncwd: {}\nbranch: {}",
-                dir.display(),
-                branch_label(&head)
+                "no story for this branch\n{}",
+                resolved_against(&checkout, &branch_label(&head))
             ))]));
         };
         let json = tool_try!(serde_json::to_string_pretty(&context));
         Ok(with_notes(
             json,
-            [format!("cwd: {}\nbranch: {}", dir.display(), context.branch)],
+            [resolved_against(&checkout, context.branch.as_str())],
         ))
     }
 
@@ -491,7 +517,7 @@ impl ArcMcp {
         let repo = match global {
             true => None,
             false => {
-                let dir = self.work_dir(tool_try!(WorkDir::parse_optional(cwd.as_deref())));
+                let dir = tool_try!(self.todo_dir(cwd.as_deref()));
                 let found = tokio::task::spawn_blocking(move || arc_context::git::repo_key(&dir))
                     .await
                     .map_err(internal)?;
@@ -505,8 +531,24 @@ impl ArcMcp {
 }
 
 impl ArcMcp {
-    fn work_dir(&self, cwd: Option<WorkDir>) -> PathBuf {
-        cwd.map_or_else(|| self.cwd.clone(), |WorkDir(dir)| dir)
+    fn todo_dir(&self, cwd: Option<&str>) -> Result<PathBuf> {
+        match (cwd, &self.locality) {
+            (Some(dir), _) => parse_work_dir(dir),
+            (None, Locality::Local { cwd }) => Ok(cwd.clone()),
+            (None, Locality::Remote) => bail!(
+                "this arc server runs on another machine and can't see your checkout; pass `global: true`"
+            ),
+        }
+    }
+
+    fn checkout(&self, requested: Option<Checkout>) -> Result<Checkout> {
+        match (requested, &self.locality) {
+            (Some(checkout), _) => Ok(checkout),
+            (None, Locality::Local { cwd }) => Ok(Checkout::Dir(cwd.clone())),
+            (None, Locality::Remote) => bail!(
+                "this arc server runs on another machine and can't see your checkout; pass your git branch name as `branch` (and `story_id` if the branch doesn't name or link the story)"
+            ),
+        }
     }
 
     async fn read_cache(&self) -> Cache {
@@ -584,13 +626,19 @@ fn branch_label(head: &GitHead) -> String {
     }
 }
 
-fn logged_result(dir: &Path, logged: &LoggedSession) -> CallToolResult {
+fn resolved_against(checkout: &Checkout, branch: &str) -> String {
+    match checkout {
+        Checkout::Dir(dir) => format!("cwd: {}\nbranch: {branch}", dir.display()),
+        Checkout::Branch(_) => format!("branch: {branch}"),
+    }
+}
+
+fn logged_result(checkout: &Checkout, logged: &LoggedSession) -> CallToolResult {
     let summary = format!(
-        "path: {}\nentry: {}\ncwd: {}\nbranch: {}",
+        "path: {}\nentry: {}\n{}",
         logged.note.rel(),
         logged.entry.header(),
-        dir.display(),
-        branch_label(&logged.head)
+        resolved_against(checkout, &branch_label(&logged.head))
     );
     let created = match &logged.note {
         StoryNote::Created { rel, .. } => Some(format!("note: created {rel} for story {}", logged.story)),
@@ -739,9 +787,20 @@ fn create_note(vault: &Vault, title: &str, body: &str, tags: Vec<String>) -> Res
 #[tool_handler]
 impl ServerHandler for ArcMcp {
     fn get_info(&self) -> ServerInfo {
+        let checkout = match self.locality {
+            Locality::Local { .. } => {
+                "Always pass your current working directory as `cwd` to both: this server's own \
+                 directory is fixed at startup and may be another checkout or worktree"
+            }
+            Locality::Remote => {
+                "This server runs on another machine and can't see your checkout: always pass \
+                 your current git branch name as `branch` to both (never `cwd`), plus `story_id` \
+                 when the branch doesn't name or link the story"
+            }
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("arc", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
+            .with_instructions(format!(
             "arc: the notes vault plus a cache of Shortcut stories. Stories: \
              `active_stories` (slim list of the current iterations), `get_story` (full \
              detail incl. description and comments), `get_story_note` (a story's note). \
@@ -749,17 +808,23 @@ impl ServerHandler for ArcMcp {
              (full Markdown by path or id), `append_note` to add context to a note (optionally \
              under a `## ` `section`), `create_note` for a new note, `create_story_note` for a \
              note linked to a story, `add_todo` for a todo. Current work: `current_story` \
-             returns the story for the git branch checked out in `cwd` (story, note, recent \
+             returns the story for your git branch (story, note, recent \
              `## Sessions` handoffs, open todos); `log_session` records a handoff (done / state / \
              next / open questions) in that story's note — call it at milestones and before \
-             ending a session. Always pass your current working directory as `cwd` to both: this \
-             server's own directory is fixed at startup and may be another checkout or worktree; \
+             ending a session. {checkout}; \
              both echo the directory and branch they resolved against. `active_stories` lists what the arc TUI last \
              cached for the current iteration(s) and may be stale (use the Shortcut MCP \
              for live search); `get_story` refetches the story from Shortcut, falling back \
              to the cache when it's unreachable. Shortcut writes (creating stories, state changes, \
              comments) aren't handled here — use the Shortcut MCP.",
-            )
+            ))
+    }
+}
+
+pub async fn run(config: &Config, transport: Transport) -> Result<()> {
+    match transport {
+        Transport::Stdio => run_stdio(config).await,
+        Transport::Http(binding) => http::run(config, binding).await,
     }
 }
 
@@ -776,6 +841,7 @@ pub async fn run_stdio(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use arc_shortcut::api::story::comment::StoryComment;
     use arc_shortcut::api::user::MemberId;
     use uuid::Uuid;
@@ -1027,6 +1093,7 @@ mod tests {
             repositories_directory: root.to_path_buf(),
             mux: Default::default(),
             notifier: Default::default(),
+            mcp_token: None,
         }
     }
 
@@ -1102,7 +1169,8 @@ mod tests {
         assert_eq!(log["properties"]["story_id"]["type"], json!(["integer", "string", "null"]));
         assert!(log["properties"]["cwd"].is_object());
         let current = serde_json::to_value(&tool("current_story").input_schema).unwrap();
-        assert_eq!(current["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["cwd"]);
+        assert_eq!(current["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["branch", "cwd"]);
+        assert!(log["properties"]["branch"].is_object());
         assert!(current.get("required").is_none_or(|r| r == &json!([])), "{current}");
         let append = serde_json::to_value(&tool("append_note").input_schema).unwrap();
         assert_eq!(append["required"], json!(["content"]));
@@ -1239,6 +1307,63 @@ mod tests {
             );
             assert!(is_error && texts[0].contains("`cwd`"), "{texts:?}");
         }
+    }
+
+    fn branch_args(branch: &str) -> Parameters<CurrentStoryArgs> {
+        Parameters(serde_json::from_value(json!({"branch": branch})).unwrap())
+    }
+
+    #[tokio::test]
+    async fn session_tools_resolve_against_the_branch_argument() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+
+        let (is_error, texts) = result_texts(&mcp.current_story(branch_args("me/sc-7/x")).await.unwrap());
+        assert!(!is_error, "{texts:?}");
+        assert_eq!(serde_json::from_str::<Value>(&texts[0]).unwrap()["story"]["id"], 7);
+        assert_eq!(texts[1], "branch: me/sc-7/x");
+
+        let result = mcp
+            .log_session(log_args(json!({"branch": "me/sc-7/x", "done": "d", "state": "s", "next": "n"})))
+            .await
+            .unwrap();
+        let (is_error, texts) = result_texts(&result);
+        assert!(!is_error, "{texts:?}");
+        assert!(texts[0].starts_with("path: stories/story-seven.md\nentry: ### "), "{texts:?}");
+        assert!(texts[0].ends_with(" · me/sc-7/x\nbranch: me/sc-7/x"), "{texts:?}");
+
+        let (is_error, texts) = result_texts(&mcp.current_story(branch_args("unlinked")).await.unwrap());
+        assert!(!is_error);
+        assert_eq!(texts, ["no story for this branch\nbranch: unlinked"]);
+    }
+
+    #[tokio::test]
+    async fn remote_servers_refuse_to_guess_the_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+        let (is_error, texts) = result_texts(&mcp.current_story(cwd_args(None)).await.unwrap());
+        assert!(is_error && texts[0].contains("pass your git branch name as `branch`"), "{texts:?}");
+        let (is_error, texts) = result_texts(
+            &mcp.log_session(log_args(json!({"story_id": 7, "done": "d", "state": "s", "next": "n"})))
+                .await
+                .unwrap(),
+        );
+        assert!(is_error && texts[0].contains("`branch`"), "{texts:?}");
+        let instructions = mcp.get_info().instructions.unwrap();
+        assert!(instructions.contains("never `cwd`"), "{instructions}");
+    }
+
+    #[tokio::test]
+    async fn checkout_arguments_are_exclusive_and_validated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = server_with_story(tmp.path(), tmp.path().to_path_buf()).await;
+        let both = json!({"cwd": tmp.path().display().to_string(), "branch": "me/sc-7/x"});
+        let (is_error, texts) =
+            result_texts(&mcp.current_story(Parameters(serde_json::from_value(both).unwrap())).await.unwrap());
+        assert!(is_error && texts[0].contains("not both"), "{texts:?}");
+        let (is_error, texts) = result_texts(&mcp.current_story(branch_args("")).await.unwrap());
+        assert!(is_error && texts[0].contains("`branch`"), "{texts:?}");
+        assert!(mcp.get_info().instructions.unwrap().contains("as `cwd`"));
     }
 
     #[tokio::test]

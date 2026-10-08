@@ -225,7 +225,7 @@ pub async fn handle_command(
             DaemonCommands::Install => arc_daemon::install::install(),
         },
 
-        Commands::Mcp => arc_mcp::run_stdio(config).await,
+        Commands::Mcp(args) => arc_mcp::run(config, args.transport()).await,
 
         Commands::Context { format } => {
             emit_context(render_context(format, config, cache).await);

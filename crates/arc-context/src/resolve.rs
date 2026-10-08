@@ -20,9 +20,13 @@ pub struct ResolvedStory {
 }
 
 pub fn resolve(head: &GitHead, cache_dir: &Path) -> anyhow::Result<Option<ResolvedStory>> {
-    let Some(branch) = head.branch() else {
-        return Ok(None);
-    };
+    match head.branch() {
+        Some(branch) => resolve_branch(branch, cache_dir),
+        None => Ok(None),
+    }
+}
+
+pub fn resolve_branch(branch: &BranchName, cache_dir: &Path) -> anyhow::Result<Option<ResolvedStory>> {
     let found = match story_id_in_branch(branch) {
         Some(id) => Some((id, Via::BranchId)),
         None => {

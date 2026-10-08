@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, fmt, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,39 @@ pub struct Config {
     pub repositories_directory: PathBuf,
     pub mux: Mux,
     pub notifier: NotifierConfig,
+    pub mcp_token: Option<BearerToken>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct BearerToken(String);
+
+impl BearerToken {
+    pub fn parse(token: &str) -> anyhow::Result<Self> {
+        if token.is_empty() || token.contains(char::is_whitespace) {
+            anyhow::bail!("mcp_token must be non-empty and contain no whitespace");
+        }
+        Ok(Self(token.to_owned()))
+    }
+
+    pub fn matches(&self, presented: &str) -> bool {
+        let (expected, presented) = (self.0.as_bytes(), presented.as_bytes());
+        expected.len() == presented.len()
+            && expected
+                .iter()
+                .zip(presented)
+                .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+                == 0
+    }
+
+    fn reveal(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BearerToken(<redacted>)")
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -57,6 +90,8 @@ struct ConfigFile {
     mux: Mux,
     #[serde(default, skip_serializing_if = "NotifierConfig::is_desktop")]
     notifier: NotifierConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_token: Option<String>,
 }
 
 impl Default for ConfigFile {
@@ -69,6 +104,7 @@ impl Default for ConfigFile {
             repositories_directory: default_repositories_directory(),
             mux: Mux::default(),
             notifier: NotifierConfig::default(),
+            mcp_token: None,
         }
     }
 }
@@ -102,6 +138,7 @@ impl Config {
         let notes_dir = expand_tilde(&config.notes_dir)?;
         let cache_dir = expand_tilde(&config.cache_dir)?;
         let repositories_directory = expand_tilde(&config.repositories_directory)?;
+        let mcp_token = config.mcp_token.as_deref().map(BearerToken::parse).transpose()?;
 
         Ok(Config {
             notes_dir,
@@ -111,6 +148,7 @@ impl Config {
             repositories_directory,
             mux: config.mux,
             notifier: config.notifier,
+            mcp_token,
         })
     }
 
@@ -123,6 +161,7 @@ impl Config {
             repositories_directory: self.repositories_directory.to_str().unwrap().to_string(),
             mux: self.mux.clone(),
             notifier: self.notifier.clone(),
+            mcp_token: self.mcp_token.as_ref().map(|t| t.reveal().to_owned()),
         };
 
         confy::store("arc", Some("config"), config).context("Failed to write config")
@@ -235,5 +274,22 @@ mod tests {
         };
         let written = toml::to_string(&file).unwrap();
         assert_eq!(parse(&written).unwrap().notifier, file.notifier);
+    }
+
+    #[test]
+    fn bearer_tokens_match_only_the_exact_secret() {
+        let token = BearerToken::parse("s3cret").unwrap();
+        assert!(token.matches("s3cret"));
+        for wrong in ["", "s3cre", "s3cret!", "S3cret", "x3cret"] {
+            assert!(!token.matches(wrong), "{wrong}");
+        }
+        assert_eq!(format!("{token:?}"), "BearerToken(<redacted>)");
+    }
+
+    #[test]
+    fn bearer_tokens_reject_empty_or_spaced_secrets() {
+        for bad in ["", " ", "a b", "tok\n"] {
+            assert!(BearerToken::parse(bad).is_err(), "{bad:?}");
+        }
     }
 }

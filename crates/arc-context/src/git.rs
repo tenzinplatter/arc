@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, bail};
@@ -29,6 +29,21 @@ impl GitHead {
             GitHead::Branch(branch) => Ok(branch),
             GitHead::Detached => bail!("HEAD is detached; check out a branch first"),
             GitHead::NotARepo => bail!("not inside a git repository"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Checkout {
+    Dir(PathBuf),
+    Branch(BranchName),
+}
+
+impl Checkout {
+    pub fn head(&self) -> anyhow::Result<GitHead> {
+        match self {
+            Checkout::Dir(dir) => head(dir),
+            Checkout::Branch(branch) => Ok(GitHead::Branch(branch.clone())),
         }
     }
 }

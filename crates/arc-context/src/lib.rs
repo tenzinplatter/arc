@@ -19,12 +19,12 @@ pub mod todos;
 
 pub use branch::{LinkableBranch, StackableBranch, canonical_branch, story_id_in_branch};
 pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails, build_context};
-pub use git::GitHead;
+pub use git::{Checkout, GitHead};
 pub use note::{
     LinkOutcome, NoteLinks, NoteRename, StoryNote, Vault, create_story_note, link_branch,
     rename_linked_branch, write_breadcrumb, write_session,
 };
-pub use resolve::{ResolvedStory, Via, resolve};
+pub use resolve::{ResolvedStory, Via, resolve, resolve_branch};
 pub use section::{Newline, SectionHeading, append_to_end, append_to_section};
 pub use sessions::{
     Breadcrumb, EntryHeader, EntryKind, EntryText, Handoff, OneLine, SessionEntry, SessionTime,
@@ -35,7 +35,11 @@ pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
 pub use todos::{ListedTodo, TodoListing, add_todo, complete_todo, open_todos, todo_listing};
 
 pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
-    resolve(&git::head(dir)?, &config.cache_dir)
+    resolve_checkout(&Checkout::Dir(dir.to_path_buf()), config)
+}
+
+pub fn resolve_checkout(checkout: &Checkout, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
+    resolve(&checkout.head()?, &config.cache_dir)
 }
 
 async fn blocking<T: Send + 'static>(
@@ -49,8 +53,18 @@ pub async fn current_context(
     config: &Config,
     cache: &mut Cache,
 ) -> anyhow::Result<Option<StoryContext>> {
-    let (owned_dir, owned_config) = (dir.to_path_buf(), config.clone());
-    let Some(resolved) = blocking(move || resolve_dir(&owned_dir, &owned_config)).await? else {
+    current_context_at(&Checkout::Dir(dir.to_path_buf()), config, cache).await
+}
+
+pub async fn current_context_at(
+    checkout: &Checkout,
+    config: &Config,
+    cache: &mut Cache,
+) -> anyhow::Result<Option<StoryContext>> {
+    let (owned_checkout, owned_config) = (checkout.clone(), config.clone());
+    let Some(resolved) =
+        blocking(move || resolve_checkout(&owned_checkout, &owned_config)).await?
+    else {
         return Ok(None);
     };
     let story = lookup_story_backing_off(cache, &config.api_token, &config.cache_dir, resolved.id)
@@ -192,8 +206,12 @@ enum Located {
     Unnoted(SessionTarget),
 }
 
-fn locate_session(dir: &Path, config: &Config, story: Option<StoryId>) -> anyhow::Result<Located> {
-    let head = git::head(dir)?;
+fn locate_session(
+    checkout: &Checkout,
+    config: &Config,
+    story: Option<StoryId>,
+) -> anyhow::Result<Located> {
+    let head = checkout.head()?;
     let (id, resolved) = match story {
         Some(id) => (
             id,
@@ -250,8 +268,19 @@ pub async fn log_session(
     story: Option<StoryId>,
     handoff: Handoff,
 ) -> anyhow::Result<LoggedSession> {
-    let (owned_dir, owned_config) = (dir.to_path_buf(), config.clone());
-    let located = blocking(move || locate_session(&owned_dir, &owned_config, story)).await?;
+    log_session_at(&Checkout::Dir(dir.to_path_buf()), config, cache, story, handoff).await
+}
+
+pub async fn log_session_at(
+    checkout: &Checkout,
+    config: &Config,
+    cache: &mut Cache,
+    story: Option<StoryId>,
+    handoff: Handoff,
+) -> anyhow::Result<LoggedSession> {
+    let (owned_checkout, owned_config) = (checkout.clone(), config.clone());
+    let located =
+        blocking(move || locate_session(&owned_checkout, &owned_config, story)).await?;
     let (target, note) = match located {
         Located::Noted(target, rel) => (target, StoryNote::Existing(rel)),
         Located::Unnoted(target) => {
@@ -375,21 +404,37 @@ mod tests {
             &repo,
             &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
         );
-        let config = Config {
-            notes_dir: tmp.path().join("notes"),
-            cache_dir: tmp.path().join("cache"),
-            api_token: String::new(),
-            editor: String::new(),
-            repositories_directory: tmp.path().to_path_buf(),
-            mux: Default::default(),
-            notifier: Default::default(),
-        };
-        std::fs::create_dir_all(config.notes_dir.join("stories")).unwrap();
+        let config = config_in(tmp.path());
         Some(Env {
             _tmp: tmp,
             repo,
             config,
         })
+    }
+
+    fn config_in(root: &Path) -> Config {
+        let config = Config {
+            notes_dir: root.join("notes"),
+            cache_dir: root.join("cache"),
+            api_token: String::new(),
+            editor: String::new(),
+            repositories_directory: root.to_path_buf(),
+            mux: Default::default(),
+            notifier: Default::default(),
+            mcp_token: None,
+        };
+        std::fs::create_dir_all(config.notes_dir.join("stories")).unwrap();
+        config
+    }
+
+    fn branch_env() -> Env {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_in(tmp.path());
+        Env {
+            repo: tmp.path().join("no-such-checkout"),
+            _tmp: tmp,
+            config,
+        }
     }
 
     fn rel(s: &str) -> NoteRelPath {
@@ -954,6 +999,88 @@ mod tests {
         assert_eq!(logged.entry.branch, None);
         assert_eq!(logged.head, GitHead::NotARepo);
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
+    }
+
+    #[test]
+    fn branch_names_resolve_without_git() {
+        let env = branch_env();
+        let resolved = resolve_branch(&br("me/sc-12/x"), &env.config.cache_dir).unwrap();
+        assert_eq!(
+            resolved,
+            Some(ResolvedStory {
+                id: 12.into(),
+                branch: br("me/sc-12/x"),
+                via: Via::BranchId
+            })
+        );
+        assert!(!env.config.cache_dir.join("arc.db").exists());
+
+        write_note(
+            &env,
+            "stories/other.md",
+            "---\nstory_id: sc-99\nbranches: [linked]\n---\n",
+        );
+        assert_eq!(
+            resolve_branch(&br("linked"), &env.config.cache_dir).unwrap(),
+            Some(ResolvedStory {
+                id: 99.into(),
+                branch: br("linked"),
+                via: Via::LinkedNote(rel("stories/other.md")),
+            })
+        );
+        assert_eq!(
+            resolve_branch(&br("unlinked"), &env.config.cache_dir).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn branch_checkouts_never_run_git() {
+        let env = branch_env();
+        let checkout = Checkout::Branch(br("me/sc-12/x"));
+        assert_eq!(checkout.head().unwrap(), GitHead::Branch(br("me/sc-12/x")));
+        assert_eq!(
+            resolve_checkout(&checkout, &env.config).unwrap().map(|r| r.id),
+            Some(12.into())
+        );
+        assert_eq!(
+            Checkout::Dir(env.repo.clone()).head().unwrap(),
+            GitHead::NotARepo
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_checkouts_drive_context_and_session_logs() {
+        let env = branch_env();
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        let checkout = Checkout::Branch(br("tenzin/sc-7/story-seven"));
+        let logged = log_session_at(&checkout, &env.config, &mut cache, None, handoff("one"))
+            .await
+            .unwrap();
+        assert_eq!(logged.story, 7.into());
+        assert_eq!(logged.head, GitHead::Branch(br("tenzin/sc-7/story-seven")));
+        assert_eq!(logged.entry.branch, Some(br("tenzin/sc-7/story-seven")));
+
+        let context = current_context_at(&checkout, &env.config, &mut cache)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.story.id, 7.into());
+        assert_eq!(context.note, Some(rel("stories/story-seven.md")));
+        assert_eq!(context.sessions.len(), 1);
+
+        let unlinked = Checkout::Branch(br("unlinked"));
+        assert_eq!(
+            current_context_at(&unlinked, &env.config, &mut cache)
+                .await
+                .unwrap(),
+            None
+        );
+        let err = log_session_at(&unlinked, &env.config, &mut cache, None, handoff("x"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pass a story id"), "{err}");
     }
 
     #[test]

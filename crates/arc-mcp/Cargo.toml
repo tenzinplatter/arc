@@ -10,8 +10,9 @@ arc-context = { workspace = true }
 arc-notes = { workspace = true }
 arc-shortcut = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 chrono = { workspace = true }
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 slugify = { workspace = true }
@@ -20,4 +21,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tempfile = { workspace = true }

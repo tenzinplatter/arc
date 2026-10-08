@@ -24,6 +24,7 @@ pub(crate) fn config(root: &Path) -> Config {
         repositories_directory: root.to_path_buf(),
         mux: Default::default(),
         notifier: Default::default(),
+        mcp_token: None,
     }
 }
 

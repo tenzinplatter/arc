@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rmcp = { version = "2.2", features = ["server", "macros", "transport-io"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 schemars = "1"
 indexmap = "2.13"
 arc-core = { path = "crates/arc-core" }
