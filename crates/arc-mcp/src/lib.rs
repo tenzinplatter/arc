@@ -15,14 +15,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use slugify::slugify;
 use tokio::sync::OnceCell;
-use uuid::Uuid;
 
 use arc_context::{EntryText, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote, Vault};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
 use arc_notes::NoteRelPath;
-use arc_notes::todos::{Todo, TodoSource};
 use arc_shortcut::api::branch::Branch;
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
@@ -480,28 +478,7 @@ impl ArcMcp {
             )),
             None => None,
         };
-        let todo = Todo {
-            id: Uuid::new_v4(),
-            text,
-            date,
-            completed: false,
-            source: TodoSource::Manual,
-        };
-        let updated = tool_try!(
-            arc_notes::todos::transform_with_lock(&self.config.cache_dir, move |list| {
-                list.into_iter().chain([todo]).collect()
-            })
-            .await
-        );
-
-        let cache_dir = self.config.cache_dir.clone();
-        let mirrored = tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut conn = arc_index::open(&cache_dir)?;
-            arc_index::mirror_todos(&mut conn, &updated)
-        })
-        .await
-        .map_err(internal)?;
-        tool_try!(mirrored);
+        tool_try!(arc_context::add_todo(&self.config.cache_dir, text, date).await);
         Ok(CallToolResult::success(vec![ContentBlock::text("added")]))
     }
 }
@@ -780,6 +757,7 @@ mod tests {
     use super::*;
     use arc_shortcut::api::story::comment::StoryComment;
     use arc_shortcut::api::user::MemberId;
+    use uuid::Uuid;
 
     fn rel(s: &str) -> NoteRelPath {
         NoteRelPath::parse(s).unwrap()

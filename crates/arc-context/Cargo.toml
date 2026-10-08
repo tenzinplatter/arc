@@ -15,6 +15,4 @@ serde_json = { workspace = true }
 slugify = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
-
-[dev-dependencies]
 uuid = { workspace = true }

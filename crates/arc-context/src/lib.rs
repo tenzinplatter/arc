@@ -15,6 +15,7 @@ pub mod resolve;
 pub mod section;
 pub mod sessions;
 pub mod story;
+pub mod todos;
 
 pub use branch::{LinkableBranch, StackableBranch, canonical_branch, story_id_in_branch};
 pub use context::{ContextStory, OpenTodo, ResolvedBy, StoryContext, StoryDetails, build_context};
@@ -31,6 +32,7 @@ pub use sessions::{
     latest_session_at, latest_sessions,
 };
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
+pub use todos::{ListedTodo, add_todo, complete_todo, open_todos};
 
 pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
     resolve(&git::head(dir)?, &config.cache_dir)
