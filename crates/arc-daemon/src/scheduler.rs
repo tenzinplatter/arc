@@ -60,12 +60,16 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(clock: Arc<dyn Clock>, notifier: Arc<dyn Notifier>) -> Self {
+    pub fn new(
+        clock: Arc<dyn Clock>,
+        notifier: Arc<dyn Notifier>,
+        previously_fired: HashSet<Uuid>,
+    ) -> Self {
         Self {
             clock,
             notifier,
             entries: HashMap::new(),
-            fired_ids: HashSet::new(),
+            fired_ids: previously_fired,
             phase: Phase::AwaitingOverdueBatch,
         }
     }
@@ -86,9 +90,9 @@ impl Scheduler {
         self.entries.clear();
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> Vec<Uuid> {
         let now = self.clock.now();
-        match self.phase {
+        let fired = match self.phase {
             Phase::AwaitingOverdueBatch => {
                 let overdue = self.take_fired(|t| t.fire_at < now);
                 if !overdue.is_empty() {
@@ -98,13 +102,17 @@ impl Scheduler {
                     );
                 }
                 self.phase = Phase::Steady;
+                overdue
             }
             Phase::Steady => {
-                for t in self.take_fired(|t| t.fire_at <= now) {
+                let due = self.take_fired(|t| t.fire_at <= now);
+                for t in &due {
                     self.notifier.notify(&t.title, &t.body);
                 }
+                due
             }
-        }
+        };
+        fired.into_iter().map(|t| t.id).collect()
     }
 
     fn take_fired(&mut self, is_due: impl Fn(&ScheduledTodo) -> bool) -> Vec<ScheduledTodo> {
@@ -183,7 +191,7 @@ mod heap_tests {
             Local.with_ymd_and_hms(2026, 5, 31, 8, 59, 0).unwrap(),
         ));
         let notifier = Arc::new(CapturingNotifier::default());
-        let mut sched = Scheduler::new(clock.clone(), notifier.clone());
+        let mut sched = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
 
         sched.upsert(ScheduledTodo {
             id: Uuid::nil(),
@@ -209,7 +217,7 @@ mod heap_tests {
             Local.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap(),
         ));
         let notifier = Arc::new(CapturingNotifier::default());
-        let mut sched = Scheduler::new(clock.clone(), notifier.clone());
+        let mut sched = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
 
         sched.upsert(ScheduledTodo {
             id: Uuid::from_u128(1),
@@ -236,7 +244,7 @@ mod heap_tests {
             Local.with_ymd_and_hms(2026, 5, 31, 8, 0, 0).unwrap(),
         ));
         let notifier = Arc::new(CapturingNotifier::default());
-        let mut sched = Scheduler::new(clock.clone(), notifier.clone());
+        let mut sched = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
 
         let id = Uuid::new_v4();
         sched.upsert(ScheduledTodo {
@@ -257,7 +265,7 @@ mod heap_tests {
             Local.with_ymd_and_hms(2026, 5, 31, 8, 59, 0).unwrap(),
         ));
         let notifier = Arc::new(CapturingNotifier::default());
-        let mut sched = Scheduler::new(clock.clone(), notifier.clone());
+        let mut sched = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
 
         let id = Uuid::new_v4();
         sched.upsert(ScheduledTodo {
@@ -275,7 +283,7 @@ mod heap_tests {
             Local.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap(),
         ));
         let notifier = Arc::new(CapturingNotifier::default());
-        let mut sched = Scheduler::new(clock.clone(), notifier.clone());
+        let mut sched = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
 
         let id = Uuid::from_u128(1);
         sched.upsert(ScheduledTodo {
@@ -296,5 +304,33 @@ mod heap_tests {
         });
         sched.tick();
         assert_eq!(notifier.0.lock().unwrap().len(), 1, "did not re-fire");
+    }
+
+    #[test]
+    fn restart_does_not_refire_reminders_already_sent() {
+        let clock = Arc::new(FakeClock::new(
+            Local.with_ymd_and_hms(2026, 6, 5, 8, 59, 0).unwrap(),
+        ));
+        let todo = ScheduledTodo {
+            id: Uuid::from_u128(7),
+            title: "t".into(),
+            body: "b".into(),
+            fire_at: at_9am(2026, 6, 5),
+        };
+        let notifier = Arc::new(CapturingNotifier::default());
+        let mut before_restart = Scheduler::new(clock.clone(), notifier.clone(), HashSet::new());
+        before_restart.upsert(todo.clone());
+        before_restart.tick();
+        clock.advance(chrono::Duration::minutes(2));
+        let fired = before_restart.tick();
+        assert_eq!(fired, vec![todo.id]);
+
+        clock.advance(chrono::Duration::hours(3));
+        let mut after_restart =
+            Scheduler::new(clock.clone(), notifier.clone(), fired.into_iter().collect());
+        after_restart.upsert(todo);
+        after_restart.tick();
+
+        assert_eq!(notifier.0.lock().unwrap().len(), 1, "fired once across the restart");
     }
 }
