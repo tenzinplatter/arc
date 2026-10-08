@@ -9,6 +9,7 @@ arc-notes = { workspace = true }
 arc-index = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+fs2 = { workspace = true }
 notify = { workspace = true }
 notify-rust = { workspace = true }
 reqwest = { workspace = true }

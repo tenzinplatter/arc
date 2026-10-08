@@ -136,6 +136,7 @@ dependencies = [
  "arc-index",
  "arc-notes",
  "chrono",
+ "fs2",
  "notify",
  "notify-rust",
  "reqwest",

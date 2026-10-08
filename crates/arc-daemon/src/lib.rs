@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 
 use arc_core::config::{Config, NotifierConfig};
 use crate::fired::FiredLog;
+use crate::lock::DaemonLock;
 use crate::ntfy::NtfyNotifier;
 use crate::scheduler::{DBusNotifier, NoNotifier, Notifier, ScheduledTodo, Scheduler, SystemClock};
 use crate::watcher::WatchEvent;
@@ -16,6 +17,7 @@ use arc_notes::todos::Todo;
 
 pub mod fired;
 pub mod install;
+pub mod lock;
 pub mod ntfy;
 pub mod scheduler;
 pub mod watcher;
@@ -25,6 +27,7 @@ const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 pub async fn run(config: Config) -> Result<()> {
     init_tracing();
     info!("arc daemon starting; notes_dir={}", config.notes_dir.display());
+    let _lock = DaemonLock::acquire(&config.cache_dir)?;
 
     if !config.notes_dir.exists() {
         info!("notes_dir {} missing, creating", config.notes_dir.display());
