@@ -46,22 +46,37 @@ Any note whose frontmatter has `repo: github.com/<owner>/<repo>` scopes its chec
 `arc mcp` serves the notes/todos/stories tools over stdio. `arc mcp --http ADDR` serves the same tools over MCP streamable HTTP at `http://ADDR/mcp`, so agents on other machines can use a shared notes dir:
 
 ```
-arc mcp --http 100.114.114.38:8765                     # bind exactly this address, e.g. the host's Tailscale IP
-arc mcp --http 100.114.114.38:8765 --allow-host raspi  # also accept a MagicDNS name in the Host header
+arc mcp --http 100.x.y.z:8765                     # bind exactly this address, e.g. the host's Tailscale IP
+arc mcp --http 100.x.y.z:8765 --allow-host raspi  # also accept a MagicDNS name in the Host header
 ```
 
-It binds only the address given; keep it on the tailnet. Set `mcp_token` in the config to require `Authorization: Bearer <token>` on every request (requests without it get 401):
+It binds only the address given; keep it on the tailnet. Any address other than loopback requires `mcp_token` in the config, and every request must then carry `Authorization: Bearer <token>` (otherwise 401):
 
 ```toml
 mcp_token = "a-long-random-string"  # e.g. `openssl rand -hex 32`
 ```
 
-A remote server can't see the caller's git checkout, so `current_story` and `log_session` take the caller's branch name as `branch` (plus `story_id` when the branch doesn't name or link the story) and reject calls that pass neither `cwd` nor `branch`.
+Requests are limited to 1 MiB bodies (413 beyond that) and 16 in flight. Only `Host` headers naming loopback, the bound IP or an `--allow-host` name are accepted (403 otherwise), so clients should connect by that IP unless the name is allowed.
+
+A remote server can't see the caller's filesystem: `current_story` and `log_session` reject `cwd` there and take the caller's branch name as `branch` instead. `log_session` also accepts just `story_id` when the caller has no branch.
+
+#### Docker
+
+Run the container with `network_mode: host` so it can bind the host's Tailscale IP directly; with bridge networking the address doesn't exist inside the container. Tailscale must be up on the host before the container starts (otherwise the bind fails and the process exits), so give the service a restart policy. Mount the arc config (with `mcp_token`), the notes dir and the cache dir, and run `arc daemon run` alongside so notes synced in from other machines get reindexed for `query`.
+
+```yaml
+services:
+  arc-mcp:
+    image: arc
+    network_mode: host
+    restart: unless-stopped
+    command: ["arc", "mcp", "--http", "100.x.y.z:8765"]
+```
 
 Register it in Claude Code on another machine:
 
 ```
-claude mcp add --transport http arc-remote http://100.114.114.38:8765/mcp --header "Authorization: Bearer <token>"
+claude mcp add --transport http arc-remote http://100.x.y.z:8765/mcp --header "Authorization: Bearer <token>"
 ```
 
 ### Keys
