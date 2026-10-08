@@ -80,7 +80,7 @@ mcp_token = "a-long-random-string"
 kind = "none"
 ```
 
-Run `arc-mcp` with `network_mode: host` so it can bind the host's Tailscale IP directly; with bridge networking the address doesn't exist inside the container. Tailscale must be up on the host before the container starts (otherwise the bind fails and the process exits), so give the service a restart policy. Pass `TZ` and mount `/etc/localtime` so reminders fire at 9am local time, and use `init: true` so signals reach `arc` and exited children are reaped.
+Inside the container `arc-mcp` binds `0.0.0.0` and docker publishes the port on the host's Tailscale IP only; `--allow-host` with that IP lets clients' `Host` header through. Binding a non-loopback address requires `mcp_token`. Tailscale must be up on the host before docker publishes the port, so give the service a restart policy. Pass `TZ` and mount `/etc/localtime` so reminders fire at 9am local time, and use `init: true` so signals reach `arc` and exited children are reaped.
 
 ```yaml
 x-arc: &arc
@@ -101,8 +101,9 @@ services:
     command: ["daemon", "run"]
   arc-mcp:
     <<: *arc
-    network_mode: host
-    command: ["mcp", "--http", "100.x.y.z:8765"]
+    command: ["mcp", "--http", "0.0.0.0:8765", "--allow-host", "100.x.y.z"]
+    ports:
+      - "100.x.y.z:8765:8765"
 ```
 
 The host directories must be writable by uid 1000, the container's `arc` user.
