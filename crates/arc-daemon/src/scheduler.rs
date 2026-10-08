@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use chrono::{DateTime, Local, NaiveDate};
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::warn;
 use uuid::Uuid;
 
 const RETRY_BASE: chrono::Duration = chrono::Duration::minutes(1);
@@ -31,11 +32,13 @@ pub struct DBusNotifier;
 
 impl Notifier for DBusNotifier {
     fn notify(&self, title: &str, body: &str, receipt: Receipt) {
-        let _ = notify_rust::Notification::new()
-            .summary(title)
-            .body(body)
-            .show();
-        receipt.delivered();
+        match notify_rust::Notification::new().summary(title).body(body).show() {
+            Ok(_) => receipt.delivered(),
+            Err(e) => {
+                warn!("desktop notification failed: {e}");
+                receipt.failed();
+            }
+        }
     }
 }
 

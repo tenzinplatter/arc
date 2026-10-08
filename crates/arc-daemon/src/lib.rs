@@ -24,6 +24,7 @@ pub mod ntfy;
 pub mod scheduler;
 pub mod watcher;
 
+const SESSION_BUS_VAR: &str = "DBUS_SESSION_BUS_ADDRESS";
 const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub async fn run(config: Config) -> Result<()> {
@@ -86,7 +87,15 @@ pub async fn run(config: Config) -> Result<()> {
 
 fn build_notifier(config: &NotifierConfig) -> Result<Arc<dyn Notifier>> {
     let notifier: Arc<dyn Notifier> = match config {
-        NotifierConfig::Desktop => Arc::new(DBusNotifier),
+        NotifierConfig::Desktop => {
+            if std::env::var_os(SESSION_BUS_VAR).is_none() {
+                warn!(
+                    "{SESSION_BUS_VAR} is unset, so desktop reminders can't be shown until a session bus appears; \
+                     set [notifier] kind = \"ntfy\" or \"none\" if this machine has no desktop session"
+                );
+            }
+            Arc::new(DBusNotifier)
+        }
         NotifierConfig::Ntfy { url, topic, token } => {
             info!("reminders go to ntfy topic {topic} at {url}");
             Arc::new(NtfyNotifier::new(
