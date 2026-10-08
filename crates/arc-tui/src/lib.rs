@@ -225,7 +225,9 @@ pub async fn handle_command(
             DaemonCommands::Install => arc_daemon::install::install(),
         },
 
-        Commands::Mcp(args) => arc_mcp::run(config, args.transport(config.mcp_token.clone())?).await,
+        Commands::Mcp(args) => {
+            arc_mcp::run(config, args.transport(config.mcp_token.clone())?).await
+        }
 
         Commands::Context { format } => {
             emit_context(render_context(format, config, cache).await);

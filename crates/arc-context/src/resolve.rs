@@ -26,7 +26,10 @@ pub fn resolve(head: &GitHead, cache_dir: &Path) -> anyhow::Result<Option<Resolv
     }
 }
 
-pub fn resolve_branch(branch: &BranchName, cache_dir: &Path) -> anyhow::Result<Option<ResolvedStory>> {
+pub fn resolve_branch(
+    branch: &BranchName,
+    cache_dir: &Path,
+) -> anyhow::Result<Option<ResolvedStory>> {
     let found = match story_id_in_branch(branch) {
         Some(id) => Some((id, Via::BranchId)),
         None => {

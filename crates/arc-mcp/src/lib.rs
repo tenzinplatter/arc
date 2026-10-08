@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 use slugify::slugify;
 use tokio::sync::OnceCell;
 
-use arc_context::{Checkout, EntryText, SessionRequest, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading, StoryNote, Vault};
+use arc_context::{
+    Checkout, EntryText, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading,
+    SessionRequest, StoryNote, Vault,
+};
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
@@ -667,14 +670,18 @@ fn logged_result(request: &SessionRequest, logged: &LoggedSession) -> CallToolRe
         SessionRequest::Resolve(checkout) => Some(checkout),
         SessionRequest::Story { checkout, .. } => checkout.as_ref(),
     };
-    let summary = std::iter::once(format!("path: {}\nentry: {}", logged.note.rel(), logged.entry.header()))
-        .chain(
-            checkout
-                .zip(logged.head.as_ref())
-                .map(|(checkout, head)| resolved_against(checkout, &branch_label(head))),
-        )
-        .collect::<Vec<_>>()
-        .join("\n");
+    let summary = std::iter::once(format!(
+        "path: {}\nentry: {}",
+        logged.note.rel(),
+        logged.entry.header()
+    ))
+    .chain(
+        checkout
+            .zip(logged.head.as_ref())
+            .map(|(checkout, head)| resolved_against(checkout, &branch_label(head))),
+    )
+    .collect::<Vec<_>>()
+    .join("\n");
     let created = match &logged.note {
         StoryNote::Created { rel, .. } => Some(format!("note: created {rel} for story {}", logged.story)),
         StoryNote::Existing(_) => None,
@@ -877,9 +884,9 @@ pub async fn run_stdio(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use arc_shortcut::api::story::comment::StoryComment;
     use arc_shortcut::api::user::MemberId;
+    use std::path::Path;
     use uuid::Uuid;
 
     fn rel(s: &str) -> NoteRelPath {
@@ -1187,13 +1194,26 @@ mod tests {
 
     #[test]
     fn log_session_args_reject_empty_fields() {
-        let args = |v: Value| serde_json::from_value::<LogSessionArgs>(v).unwrap().into_parts(&Locality::Remote);
+        let args = |v: Value| {
+            serde_json::from_value::<LogSessionArgs>(v)
+                .unwrap()
+                .into_parts(&Locality::Remote)
+        };
         let err = args(json!({"done": " ", "state": "s", "next": "n"})).unwrap_err();
         assert!(err.to_string().contains("`story_id`"), "{err}");
         let err = args(json!({"story_id": 3, "done": " ", "state": "s", "next": "n"})).unwrap_err();
         assert_eq!(err.to_string(), "`done`: empty session field");
-        let (request, handoff) = args(json!({"story_id": "sc-3", "done": "d", "state": "s", "next": "n", "questions": "  "})).unwrap();
-        assert_eq!(request, SessionRequest::Story { id: 3.into(), checkout: None });
+        let (request, handoff) = args(
+            json!({"story_id": "sc-3", "done": "d", "state": "s", "next": "n", "questions": "  "}),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            SessionRequest::Story {
+                id: 3.into(),
+                checkout: None
+            }
+        );
         assert_eq!(handoff.questions, None);
     }
 
@@ -1206,7 +1226,14 @@ mod tests {
         assert_eq!(log["properties"]["story_id"]["type"], json!(["integer", "string", "null"]));
         assert!(log["properties"]["cwd"].is_object());
         let current = serde_json::to_value(&tool("current_story").input_schema).unwrap();
-        assert_eq!(current["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["branch", "cwd"]);
+        assert_eq!(
+            current["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["branch", "cwd"]
+        );
         assert!(log["properties"]["branch"].is_object());
         assert!(current.get("required").is_none_or(|r| r == &json!([])), "{current}");
         let append = serde_json::to_value(&tool("append_note").input_schema).unwrap();
@@ -1353,23 +1380,40 @@ mod tests {
     #[tokio::test]
     async fn session_tools_resolve_against_the_branch_argument() {
         let tmp = tempfile::tempdir().unwrap();
-        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+        let mcp = ArcMcp::remote(
+            server_with_story(tmp.path(), tmp.path().to_path_buf())
+                .await
+                .config,
+        );
 
-        let (is_error, texts) = result_texts(&mcp.current_story(branch_args("me/sc-7/x")).await.unwrap());
+        let (is_error, texts) =
+            result_texts(&mcp.current_story(branch_args("me/sc-7/x")).await.unwrap());
         assert!(!is_error, "{texts:?}");
-        assert_eq!(serde_json::from_str::<Value>(&texts[0]).unwrap()["story"]["id"], 7);
+        assert_eq!(
+            serde_json::from_str::<Value>(&texts[0]).unwrap()["story"]["id"],
+            7
+        );
         assert_eq!(texts[1], "branch: me/sc-7/x");
 
         let result = mcp
-            .log_session(log_args(json!({"branch": "me/sc-7/x", "done": "d", "state": "s", "next": "n"})))
+            .log_session(log_args(
+                json!({"branch": "me/sc-7/x", "done": "d", "state": "s", "next": "n"}),
+            ))
             .await
             .unwrap();
         let (is_error, texts) = result_texts(&result);
         assert!(!is_error, "{texts:?}");
-        assert!(texts[0].starts_with("path: stories/story-seven.md\nentry: ### "), "{texts:?}");
-        assert!(texts[0].ends_with(" · me/sc-7/x\nbranch: me/sc-7/x"), "{texts:?}");
+        assert!(
+            texts[0].starts_with("path: stories/story-seven.md\nentry: ### "),
+            "{texts:?}"
+        );
+        assert!(
+            texts[0].ends_with(" · me/sc-7/x\nbranch: me/sc-7/x"),
+            "{texts:?}"
+        );
 
-        let (is_error, texts) = result_texts(&mcp.current_story(branch_args("unlinked")).await.unwrap());
+        let (is_error, texts) =
+            result_texts(&mcp.current_story(branch_args("unlinked")).await.unwrap());
         assert!(!is_error);
         assert_eq!(texts, ["no story for this branch\nbranch: unlinked"]);
     }
@@ -1377,12 +1421,25 @@ mod tests {
     #[tokio::test]
     async fn remote_servers_refuse_to_guess_the_checkout() {
         let tmp = tempfile::tempdir().unwrap();
-        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+        let mcp = ArcMcp::remote(
+            server_with_story(tmp.path(), tmp.path().to_path_buf())
+                .await
+                .config,
+        );
         let (is_error, texts) = result_texts(&mcp.current_story(cwd_args(None)).await.unwrap());
-        assert!(is_error && texts[0].contains("pass your git branch name as `branch`"), "{texts:?}");
-        let (is_error, texts) =
-            result_texts(&mcp.log_session(log_args(json!({"done": "d", "state": "s", "next": "n"}))).await.unwrap());
-        assert!(is_error && texts[0].contains("`branch`") && texts[0].contains("`story_id`"), "{texts:?}");
+        assert!(
+            is_error && texts[0].contains("pass your git branch name as `branch`"),
+            "{texts:?}"
+        );
+        let (is_error, texts) = result_texts(
+            &mcp.log_session(log_args(json!({"done": "d", "state": "s", "next": "n"})))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            is_error && texts[0].contains("`branch`") && texts[0].contains("`story_id`"),
+            "{texts:?}"
+        );
         let instructions = mcp.get_info().instructions.unwrap();
         assert!(instructions.contains("never `cwd`"), "{instructions}");
     }
@@ -1393,7 +1450,10 @@ mod tests {
         let mcp = ArcMcp::remote(config_in(tmp.path()));
         let start = Instant::now();
         assert!(mcp.claim_lookup_refresh(start));
-        assert!(!mcp.clone().claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL / 2));
+        assert!(
+            !mcp.clone()
+                .claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL / 2)
+        );
         assert!(mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
         assert!(!mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
     }
@@ -1401,33 +1461,57 @@ mod tests {
     #[tokio::test]
     async fn remote_servers_reject_cwd() {
         let tmp = tempfile::tempdir().unwrap();
-        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
-        let cwd = tmp.path().display().to_string();
-        let (is_error, texts) = result_texts(&mcp.current_story(cwd_args(Some(tmp.path()))).await.unwrap());
-        assert!(is_error, "{texts:?}");
-        assert_eq!(texts, ["this server can't see your filesystem; pass `branch`"]);
-        let (is_error, texts) = result_texts(
-            &mcp.log_session(log_args(json!({"cwd": cwd, "story_id": 7, "done": "d", "state": "s", "next": "n"})))
+        let mcp = ArcMcp::remote(
+            server_with_story(tmp.path(), tmp.path().to_path_buf())
                 .await
-                .unwrap(),
+                .config,
         );
-        assert!(is_error && texts[0].contains("can't see your filesystem"), "{texts:?}");
+        let cwd = tmp.path().display().to_string();
+        let (is_error, texts) =
+            result_texts(&mcp.current_story(cwd_args(Some(tmp.path()))).await.unwrap());
+        assert!(is_error, "{texts:?}");
+        assert_eq!(
+            texts,
+            ["this server can't see your filesystem; pass `branch`"]
+        );
+        let (is_error, texts) = result_texts(
+            &mcp.log_session(log_args(
+                json!({"cwd": cwd, "story_id": 7, "done": "d", "state": "s", "next": "n"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            is_error && texts[0].contains("can't see your filesystem"),
+            "{texts:?}"
+        );
         assert!(Locality::Remote.checkout(Some(&cwd), None).is_err());
     }
 
     #[tokio::test]
     async fn remote_log_session_takes_a_bare_story_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
-        let (is_error, texts) = result_texts(
-            &mcp.log_session(log_args(json!({"story_id": "sc-7", "done": "d", "state": "s", "next": "n"})))
+        let mcp = ArcMcp::remote(
+            server_with_story(tmp.path(), tmp.path().to_path_buf())
                 .await
-                .unwrap(),
+                .config,
+        );
+        let (is_error, texts) = result_texts(
+            &mcp.log_session(log_args(
+                json!({"story_id": "sc-7", "done": "d", "state": "s", "next": "n"}),
+            ))
+            .await
+            .unwrap(),
         );
         assert!(!is_error, "{texts:?}");
-        let [path, entry] = texts[0].lines().collect::<Vec<_>>()[..] else { panic!("{texts:?}") };
+        let [path, entry] = texts[0].lines().collect::<Vec<_>>()[..] else {
+            panic!("{texts:?}")
+        };
         assert_eq!(path, "path: stories/story-seven.md");
-        assert!(entry.starts_with("entry: ### ") && !entry.contains(" · "), "{entry}");
+        assert!(
+            entry.starts_with("entry: ### ") && !entry.contains(" · "),
+            "{entry}"
+        );
     }
 
     #[tokio::test]
@@ -1435,8 +1519,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mcp = server_with_story(tmp.path(), tmp.path().to_path_buf()).await;
         let both = json!({"cwd": tmp.path().display().to_string(), "branch": "me/sc-7/x"});
-        let (is_error, texts) =
-            result_texts(&mcp.current_story(Parameters(serde_json::from_value(both).unwrap())).await.unwrap());
+        let (is_error, texts) = result_texts(
+            &mcp.current_story(Parameters(serde_json::from_value(both).unwrap()))
+                .await
+                .unwrap(),
+        );
         assert!(is_error && texts[0].contains("not both"), "{texts:?}");
         let (is_error, texts) = result_texts(&mcp.current_story(branch_args("")).await.unwrap());
         assert!(is_error && texts[0].contains("`branch`"), "{texts:?}");
@@ -1448,7 +1535,11 @@ mod tests {
     async fn note_tools_refuse_symlinks_out_of_the_notes_dir() {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
-        let mcp = ArcMcp::remote(server_with_story(tmp.path(), tmp.path().to_path_buf()).await.config);
+        let mcp = ArcMcp::remote(
+            server_with_story(tmp.path(), tmp.path().to_path_buf())
+                .await
+                .config,
+        );
         let (notes, outside) = (tmp.path().join("notes"), tmp.path().join("outside"));
         std::fs::create_dir_all(&notes).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -1458,11 +1549,17 @@ mod tests {
         symlink(&outside, notes.join("stories")).unwrap();
 
         let get = mcp
-            .get_note(Parameters(GetNoteArgs { id: None, path: Some("leak.md".into()) }))
+            .get_note(Parameters(GetNoteArgs {
+                id: None,
+                path: Some("leak.md".into()),
+            }))
             .await
             .unwrap();
         let (is_error, texts) = result_texts(&get);
-        assert!(is_error && texts[0].contains("outside the notes dir"), "{texts:?}");
+        assert!(
+            is_error && texts[0].contains("outside the notes dir"),
+            "{texts:?}"
+        );
 
         let append = mcp
             .append_note(Parameters(AppendNoteArgs {
@@ -1474,14 +1571,23 @@ mod tests {
             .await
             .unwrap();
         assert!(result_texts(&append).0);
-        assert_eq!(std::fs::read_to_string(outside.join("secret.md")).unwrap(), "secret\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret.md")).unwrap(),
+            "secret\n"
+        );
 
         let created = mcp
-            .create_story_note(Parameters(CreateStoryNoteArgs { story_id: 7, body: "b".into() }))
+            .create_story_note(Parameters(CreateStoryNoteArgs {
+                story_id: 7,
+                body: "b".into(),
+            }))
             .await
             .unwrap();
         let (is_error, texts) = result_texts(&created);
-        assert!(is_error && texts[0].contains("outside the notes dir"), "{texts:?}");
+        assert!(
+            is_error && texts[0].contains("outside the notes dir"),
+            "{texts:?}"
+        );
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
     }
 

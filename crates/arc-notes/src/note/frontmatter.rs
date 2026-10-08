@@ -210,7 +210,10 @@ impl BranchName {
             bail!("empty branch name");
         }
         if let Some(rule) = ref_format_violation(name) {
-            bail!("'{}' isn't a valid git branch name: {rule}", name.escape_debug());
+            bail!(
+                "'{}' isn't a valid git branch name: {rule}",
+                name.escape_debug()
+            );
         }
         Ok(Self(name.to_owned()))
     }
@@ -237,7 +240,10 @@ fn ref_format_violation(name: &str) -> Option<&'static str> {
         Some("it starts with '-' or '/'")
     } else if name.ends_with(['/', '.']) || name.ends_with(".lock") {
         Some("it ends with '/', '.' or '.lock'")
-    } else if name.split('/').any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock")) {
+    } else if name
+        .split('/')
+        .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+    {
         Some("a '/'-separated component is empty, starts with '.' or ends with '.lock'")
     } else {
         None
@@ -651,12 +657,42 @@ mod tests {
 
     #[test]
     fn branch_names_follow_git_ref_format() {
-        for valid in ["main", "me/sc-12/x", "feature/a.b", "fix_sc-12", "v1.2", "a@b", "x-", "UPPER/Case"] {
+        for valid in [
+            "main",
+            "me/sc-12/x",
+            "feature/a.b",
+            "fix_sc-12",
+            "v1.2",
+            "a@b",
+            "x-",
+            "UPPER/Case",
+        ] {
             assert_eq!(BranchName::parse(valid).unwrap().as_str(), valid);
         }
         for invalid in [
-            "", " x ", "a b", "a\tb", "a\u{7f}", "a..b", "a~1", "a^", "a:b", "a?", "a*", "a[0", "a\\b",
-            "-x", "/x", "x/", "x.", "x.lock", "a/b.lock/c", "a@{1}", "@", "a//b", "a/.hidden",
+            "",
+            " x ",
+            "a b",
+            "a\tb",
+            "a\u{7f}",
+            "a..b",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[0",
+            "a\\b",
+            "-x",
+            "/x",
+            "x/",
+            "x.",
+            "x.lock",
+            "a/b.lock/c",
+            "a@{1}",
+            "@",
+            "a//b",
+            "a/.hidden",
         ] {
             assert!(BranchName::parse(invalid).is_err(), "{invalid:?}");
         }

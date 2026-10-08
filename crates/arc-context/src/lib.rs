@@ -38,7 +38,10 @@ pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<Resolve
     resolve_checkout(&Checkout::Dir(dir.to_path_buf()), config)
 }
 
-pub fn resolve_checkout(checkout: &Checkout, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
+pub fn resolve_checkout(
+    checkout: &Checkout,
+    config: &Config,
+) -> anyhow::Result<Option<ResolvedStory>> {
     resolve(&checkout.head()?, &config.cache_dir)
 }
 
@@ -62,8 +65,7 @@ pub async fn current_context_at(
     cache: &mut Cache,
 ) -> anyhow::Result<Option<StoryContext>> {
     let (owned_checkout, owned_config) = (checkout.clone(), config.clone());
-    let Some(resolved) =
-        blocking(move || resolve_checkout(&owned_checkout, &owned_config)).await?
+    let Some(resolved) = blocking(move || resolve_checkout(&owned_checkout, &owned_config)).await?
     else {
         return Ok(None);
     };
@@ -1052,7 +1054,9 @@ mod tests {
         let checkout = Checkout::Branch(br("me/sc-12/x"));
         assert_eq!(checkout.head().unwrap(), GitHead::Branch(br("me/sc-12/x")));
         assert_eq!(
-            resolve_checkout(&checkout, &env.config).unwrap().map(|r| r.id),
+            resolve_checkout(&checkout, &env.config)
+                .unwrap()
+                .map(|r| r.id),
             Some(12.into())
         );
         assert_eq!(
@@ -1115,7 +1119,11 @@ mod tests {
         assert_eq!(logged.story, 7.into());
         assert_eq!(logged.head, None);
         assert_eq!(logged.entry.branch, None);
-        assert!(!logged.entry.header().contains(" · "), "{}", logged.entry.header());
+        assert!(
+            !logged.entry.header().contains(" · "),
+            "{}",
+            logged.entry.header()
+        );
         let body =
             std::fs::read_to_string(env.config.notes_dir.join("stories/story-seven.md")).unwrap();
         assert!(body.contains("**Done:** phone"), "{body}");

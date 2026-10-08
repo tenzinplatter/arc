@@ -186,14 +186,28 @@ mod tests {
 
         assert_eq!(within("real.md").unwrap(), notes.join("real.md"));
         assert_eq!(within("alias.md").unwrap(), notes.join("alias.md"));
-        assert_eq!(within("stories/new.md").unwrap(), notes.join("stories/new.md"));
-        assert_eq!(within("new/dir/note.md").unwrap(), notes.join("new/dir/note.md"));
-        for escaping in ["leak.md", "escape/secret.md", "escape/new.md", "dangling.md"] {
+        assert_eq!(
+            within("stories/new.md").unwrap(),
+            notes.join("stories/new.md")
+        );
+        assert_eq!(
+            within("new/dir/note.md").unwrap(),
+            notes.join("new/dir/note.md")
+        );
+        for escaping in [
+            "leak.md",
+            "escape/secret.md",
+            "escape/new.md",
+            "dangling.md",
+        ] {
             assert!(within(escaping).is_err(), "{escaping}");
         }
         let missing = tmp.path().join("no-notes");
         assert_eq!(
-            NoteRelPath::parse("a.md").unwrap().abs_within(&missing).unwrap(),
+            NoteRelPath::parse("a.md")
+                .unwrap()
+                .abs_within(&missing)
+                .unwrap(),
             missing.join("a.md")
         );
     }

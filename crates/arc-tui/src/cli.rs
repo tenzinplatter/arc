@@ -306,8 +306,12 @@ mod tests {
         assert_eq!(
             mcp_transport(&["mcp", "--http", addr, "--allow-host", "raspi"], Some("t")).unwrap(),
             Transport::Http(
-                HttpBinding::new(addr.parse().unwrap(), vec!["raspi".into()], Some(BearerToken::parse("t").unwrap()))
-                    .unwrap()
+                HttpBinding::new(
+                    addr.parse().unwrap(),
+                    vec!["raspi".into()],
+                    Some(BearerToken::parse("t").unwrap())
+                )
+                .unwrap()
             )
         );
         assert!(mcp_transport(&["mcp", "--http", addr], None).is_err());

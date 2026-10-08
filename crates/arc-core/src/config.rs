@@ -168,7 +168,11 @@ impl Config {
         let notes_dir = expand_tilde(&config.notes_dir)?;
         let cache_dir = expand_tilde(&config.cache_dir)?;
         let repositories_directory = expand_tilde(&config.repositories_directory)?;
-        let mcp_token = config.mcp_token.as_deref().map(BearerToken::parse).transpose()?;
+        let mcp_token = config
+            .mcp_token
+            .as_deref()
+            .map(BearerToken::parse)
+            .transpose()?;
 
         Ok(Config {
             notes_dir,
@@ -336,7 +340,10 @@ mod tests {
         for secret in ["shortcut-secret", "mcp-secret", "ntfy-secret"] {
             assert!(!debug.contains(secret), "{debug}");
         }
-        assert!(debug.contains("\"/n\"") && debug.contains("http://ntfy.local"), "{debug}");
+        assert!(
+            debug.contains("\"/n\"") && debug.contains("http://ntfy.local"),
+            "{debug}"
+        );
     }
 
     #[test]
