@@ -90,6 +90,10 @@ impl NoteRelPath {
         Self(format!("{dir}/{slug}.md"))
     }
 
+    pub fn todos() -> Self {
+        Self("todos.md".into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

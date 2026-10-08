@@ -1,5 +1,4 @@
-use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use chrono::NaiveDate;
@@ -7,35 +6,11 @@ use regex::Regex;
 
 use uuid::Uuid;
 
-use crate::checkbox::split_checkbox;
+use crate::checkbox::{Checkbox, split_checkbox};
 use crate::path::NoteRelPath;
-use crate::todos::{Todo, TodoSource};
+use crate::todos::Todo;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedTodo {
-    pub text: String,
-    pub completed: bool,
-    pub date: Option<NaiveDate>,
-    pub file: NoteRelPath,
-    pub line: u32,
-    pub fingerprint: u64,
-}
-
-impl ParsedTodo {
-    pub fn into_todo(self, id: Uuid) -> Todo {
-        Todo {
-            id,
-            text: self.text,
-            date: self.date,
-            completed: self.completed,
-            source: TodoSource::NoteParsed {
-                file: self.file,
-                line: self.line,
-                fingerprint: self.fingerprint,
-            },
-        }
-    }
-}
+const TODO_ID_NAMESPACE: Uuid = Uuid::from_u128(0x1243f4f0_6526_4859_a227_e672f1bf19e3);
 
 fn date_token_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -48,8 +23,9 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
+pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
     let re = date_token_regex();
+    let mut occurrences: HashMap<String, u32> = HashMap::new();
 
     content.lines().enumerate().filter_map(|(idx, raw_line)| {
         let line_no = (idx as u32) + 1;
@@ -70,26 +46,33 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<ParsedTodo> {
         };
 
         let normalized = text.to_lowercase();
-        let fp = fingerprint(Path::new(file.as_str()), &normalized);
+        let occurrence = occurrences.entry(normalized.clone()).or_default();
+        let id = todo_id(file, &normalized, *occurrence);
+        *occurrence += 1;
 
-        Some(ParsedTodo {
+        Some(Todo {
+            id,
             text,
-            completed: checkbox.is_done(),
             date,
+            completed: checkbox.is_done(),
             file: file.clone(),
             line: line_no,
-            fingerprint: fp,
         })
     })
     .collect()
 }
 
-/// `DefaultHasher` output may change across Rust toolchains, re-iding every note-parsed todo once.
-pub fn fingerprint(file: &Path, normalized_text: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    file.hash(&mut h);
-    normalized_text.hash(&mut h);
-    h.finish()
+pub fn todo_id(file: &NoteRelPath, normalized_text: &str, occurrence: u32) -> Uuid {
+    let key = format!("{file}\0{normalized_text}\0{occurrence}");
+    Uuid::new_v5(&TODO_ID_NAMESPACE, key.as_bytes())
+}
+
+pub fn render_todo_line(state: Checkbox, text: &str, date: Option<NaiveDate>) -> String {
+    let text = collapse_whitespace(text);
+    match date {
+        Some(date) => format!("{}{text} @{}", state.marker(), date.format("%d-%m-%Y")),
+        None => format!("{}{text}", state.marker()),
+    }
 }
 
 #[cfg(test)]
@@ -157,46 +140,60 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_stable_across_whitespace_in_text() {
+    fn id_stable_across_whitespace_case_and_completion() {
         let a = parse_note("- [ ] hello world", &f());
-        let b = parse_note("    - [ ]   hello world   ", &f());
-        assert_eq!(a[0].fingerprint, b[0].fingerprint);
+        let b = parse_note("    - [x]   Hello World   ", &f());
+        assert_eq!(a[0].id, b[0].id);
     }
 
     #[test]
-    fn fingerprint_changes_after_text_edit() {
+    fn id_stable_across_date_edits() {
+        let a = parse_note("- [ ] hello", &f());
+        let b = parse_note("- [ ] hello @10-06-2026", &f());
+        assert_eq!(a[0].id, b[0].id);
+    }
+
+    #[test]
+    fn id_changes_after_text_edit() {
         let a = parse_note("- [ ] hello", &f());
         let b = parse_note("- [ ] hello world", &f());
-        assert_ne!(a[0].fingerprint, b[0].fingerprint);
+        assert_ne!(a[0].id, b[0].id);
     }
 
     #[test]
-    fn fingerprint_stable_across_line_moves() {
+    fn id_stable_across_line_moves() {
         let a = parse_note("- [ ] x", &f());
         let b = parse_note("# header\n\n- [ ] x", &f());
-        assert_eq!(a[0].fingerprint, b[0].fingerprint);
+        assert_eq!(a[0].id, b[0].id);
         assert_ne!(a[0].line, b[0].line);
     }
 
     #[test]
-    fn into_todo_keeps_parsed_fields_as_note_source() {
-        let p = parse_note("- [x] ship @10-06-2026", &f()).remove(0);
-        let fp = p.fingerprint;
-        let todo = p.into_todo(Uuid::nil());
-        assert_eq!(
-            todo,
-            Todo {
-                id: Uuid::nil(),
-                text: "ship".into(),
-                date: NaiveDate::from_ymd_opt(2026, 6, 10),
-                completed: true,
-                source: TodoSource::NoteParsed { file: f(), line: 1, fingerprint: fp },
-            }
-        );
+    fn id_differs_between_notes() {
+        let a = parse_note("- [ ] x", &f());
+        let b = parse_note("- [ ] x", &NoteRelPath::parse("other.md").unwrap());
+        assert_ne!(a[0].id, b[0].id);
     }
 
     #[test]
-    fn todo_ids_stay_stable_across_releases_because_fingerprint_value_is_pinned() {
-        assert_eq!(fingerprint(Path::new("stories/a.md"), "write the thing"), 9874501586080003358);
+    fn duplicate_checkboxes_get_distinct_ids() {
+        let t = parse_note("- [ ] call\n- [x] call\n", &f());
+        assert_ne!(t[0].id, t[1].id);
+    }
+
+    #[test]
+    fn todo_ids_are_pinned_so_every_machine_agrees() {
+        let id = todo_id(&NoteRelPath::parse("stories/a.md").unwrap(), "write the thing", 0);
+        assert_eq!(id.to_string(), "de2ae85b-25cf-5f26-8927-89596c6df8a6");
+    }
+
+    #[test]
+    fn rendered_line_parses_back_to_the_same_todo() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 9);
+        let line = render_todo_line(Checkbox::Open, "book   flights", date);
+        assert_eq!(line, "- [ ] book flights @09-10-2026");
+        let t = parse_note(&line, &f()).remove(0);
+        assert_eq!((t.text.as_str(), t.date, t.completed), ("book flights", date, false));
+        assert_eq!(render_todo_line(Checkbox::Done, "shipped", None), "- [x] shipped");
     }
 }

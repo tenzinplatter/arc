@@ -139,6 +139,10 @@ pub async fn handle_command(
     cache: Cache,
     config: &Config,
 ) -> anyhow::Result<()> {
+    let adopted = arc_notes::todos::adopt_legacy_todos(&config.notes_dir, &config.cache_dir).await?;
+    if adopted > 0 {
+        eprintln!("moved {adopted} todos from the cache into {}", arc_notes::NoteRelPath::todos());
+    }
     match command {
         Commands::Note => {
             if let Some(story) = &cache.active_story {
@@ -320,7 +324,7 @@ async fn todo(command: TodoCommands, config: &Config) -> anyhow::Result<()> {
             }
         }
         TodoCommands::Add { text, date } => {
-            let todo = arc_context::add_todo(&config.cache_dir, text, date).await?;
+            let todo = arc_context::add_todo(&config.notes_dir, &config.cache_dir, text, date).await?;
             println!("{}", todo.id);
         }
         TodoCommands::Done { id } => {

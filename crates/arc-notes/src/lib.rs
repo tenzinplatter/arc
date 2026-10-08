@@ -9,5 +9,5 @@ pub use checkbox::Checkbox;
 pub use note::Note;
 pub use note::frontmatter::{BranchName, SplitNote};
 pub use path::{NoteDir, NoteRelPath};
-pub use todos::{Todo, TodoSource};
+pub use todos::{Edited, Todo};
 pub use write::{NoteLock, NoteLocks};

@@ -31,6 +31,7 @@ impl App {
 
         let api_client = ApiClient::from_token_and_cache(&config.api_token, &mut cache).await?;
 
+        crate::todos::adopt_legacy_todos(&config.notes_dir, &config.cache_dir).await?;
         let todos = crate::todos::load_todos(&config.cache_dir).await;
 
         let (sender, receiver) = mpsc::unbounded_channel();

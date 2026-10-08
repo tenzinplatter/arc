@@ -141,31 +141,22 @@ impl App {
                 }
             }
 
-            cmd::Cmd::WriteTodos => {
-                let todos_snapshot = self.model.data.todos.clone();
-                crate::todos::transform_with_lock(&self.model.config.cache_dir, move |_| {
-                    todos_snapshot
-                })
-                .await?;
+            cmd::Cmd::AddTodo { text } => {
+                let today = Some(arc_core::time::today());
+                self.spawn_todo_edit("Failed to add todo", move |notes_dir, cache_dir| async move {
+                    crate::todos::add_todo(&notes_dir, &cache_dir, text, today).await
+                });
             }
 
-            cmd::Cmd::SyncNoteCheckbox {
-                file,
-                text,
-                to,
-            } => {
-                let notes_dir = self.model.config.notes_dir.clone();
-                let sender = self.sender.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::todos::toggle_note_checkbox(&notes_dir, &file, &text, to).await
-                    {
-                        let info = ErrorInfo::new(
-                            "Failed to sync todo state to note".to_string(),
-                            e.to_string(),
-                        );
-                        let _ = sender.send(Msg::Error(info));
-                    }
+            cmd::Cmd::SetTodoCompleted { id, to } => {
+                self.spawn_todo_edit("Failed to sync todo state to note", move |notes_dir, cache_dir| async move {
+                    crate::todos::set_completed(&notes_dir, &cache_dir, id, to).await
+                });
+            }
+
+            cmd::Cmd::RemoveTodo { id } => {
+                self.spawn_todo_edit("Failed to remove todo from note", move |notes_dir, cache_dir| async move {
+                    crate::todos::remove_todo(&notes_dir, &cache_dir, id).await
                 });
             }
 
@@ -235,6 +226,21 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn spawn_todo_edit<F, Fut>(&self, failure: &'static str, edit: F)
+    where
+        F: FnOnce(std::path::PathBuf, std::path::PathBuf) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<crate::todos::Edited>> + Send,
+    {
+        let notes_dir = self.model.config.notes_dir.clone();
+        let cache_dir = self.model.config.cache_dir.clone();
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            if let Err(e) = edit(notes_dir, cache_dir).await {
+                let _ = sender.send(msg::Msg::Error(ErrorInfo::new(failure.to_string(), e.to_string())));
+            }
+        });
     }
 
     async fn poll_for_message(&mut self) -> Result<Option<msg::Msg>> {

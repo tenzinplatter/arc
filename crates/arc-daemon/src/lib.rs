@@ -10,11 +10,10 @@ use arc_core::config::Config;
 use crate::scheduler::{DBusNotifier, ScheduledTodo, Scheduler, SystemClock};
 use crate::watcher::WatchEvent;
 use arc_notes::NoteRelPath;
-use arc_notes::todos::{Todo, TodoSource};
+use arc_notes::todos::Todo;
 
 pub mod install;
 pub mod scheduler;
-pub mod store;
 pub mod watcher;
 
 const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -80,6 +79,7 @@ async fn bootstrap_scan(
 ) -> Result<()> {
     let files = list_markdown(notes_dir)?;
     info!("bootstrap: scanning {} note files", files.len());
+    let mut todos = Vec::new();
     for abs in files {
         let Some(rel) = NoteRelPath::from_abs(notes_dir, &abs) else {
             warn!("bootstrap: skipping {}: not a UTF-8 path under the notes dir", abs.display());
@@ -92,14 +92,12 @@ async fn bootstrap_scan(
                 continue;
             }
         };
-        let parsed = arc_notes::scanner::parse_note(&content, &rel);
-        if let Err(e) = store::merge_file(cache_dir, &rel, parsed).await {
-            warn!("merge {rel} failed: {e:#}");
-        }
+        todos.extend(arc_notes::scanner::parse_note(&content, &rel));
         if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
             warn!("index {rel} failed: {e:#}");
         }
     }
+    arc_notes::todos::save_todos(cache_dir, &todos).await?;
     mirror_todos(cache_dir, index).await;
     Ok(())
 }
@@ -153,12 +151,11 @@ async fn handle_event(
 
     match read_current_content(&event) {
         Ok(None) => {
-            store::drop_file(&config.cache_dir, &rel).await?;
+            arc_notes::todos::refresh_note(&config.cache_dir, &rel, None).await?;
             let _ = arc_index::remove_note(index, &rel);
         }
         Ok(Some(content)) => {
-            let parsed = arc_notes::scanner::parse_note(&content, &rel);
-            store::merge_file(&config.cache_dir, &rel, parsed).await?;
+            arc_notes::todos::refresh_note(&config.cache_dir, &rel, Some(&content)).await?;
             if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
                 warn!("index {rel} failed: {e:#}");
             }
@@ -188,13 +185,10 @@ fn scheduled_todo(t: Todo) -> Option<ScheduledTodo> {
         .with_ymd_and_hms(date.year(), date.month(), date.day(), 9, 0, 0)
         .single()
         .unwrap_or_else(Local::now);
-    let title = match &t.source {
-        TodoSource::NoteParsed { file, .. } => file
-            .file_stem()
-            .map(|s| format!("arc — {}", s))
-            .unwrap_or_else(|| "arc".to_string()),
-        TodoSource::Manual => "arc".to_string(),
-    };
+    let title = t
+        .file
+        .file_stem()
+        .map_or_else(|| "arc".to_string(), |s| format!("arc — {s}"));
     Some(ScheduledTodo {
         id: t.id,
         title,

@@ -28,7 +28,7 @@ shellexpand = "3.1.1"
 textwrap = "0.16"
 slugify = "0.1.0"
 tokio = { version = "1.49.0", features = ["full"] }
-uuid = { version = "1.19.0", features = ["serde", "v4"] }
+uuid = { version = "1.19.0", features = ["serde", "v4", "v5"] }
 unicode-ellipsis = "0.3.0"
 tempfile = "3.24.0"
 which = "8.0.0"

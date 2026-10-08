@@ -5,7 +5,7 @@ pub use rusqlite::Connection;
 use rusqlite::OpenFlags;
 
 use arc_notes::note::frontmatter::{EntityLink, Frontmatter};
-use arc_notes::todos::{Todo, TodoSource};
+use arc_notes::todos::Todo;
 use arc_notes::{BranchName, NoteDir, NoteRelPath};
 use arc_core::StoryId;
 
@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS todos (
     text      TEXT,
     date      TEXT,
     completed INTEGER,
-    source    TEXT,
     file      TEXT,
     line      INTEGER,
     position  INTEGER
@@ -204,25 +203,16 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM todos", [])?;
     for (pos, t) in todos.iter().enumerate() {
-        let (source, file, line) = match &t.source {
-            TodoSource::Manual => ("manual", None, None),
-            TodoSource::NoteParsed { file, line, .. } => (
-                "note",
-                Some(file.as_str().to_string()),
-                Some(*line),
-            ),
-        };
         tx.execute(
-            "INSERT INTO todos (id, text, date, completed, source, file, line, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO todos (id, text, date, completed, file, line, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 t.id.to_string(),
                 t.text,
                 t.date.map(|d| d.to_string()),
                 t.completed as i64,
-                source,
-                file,
-                line,
+                t.file.as_str(),
+                t.line,
                 pos as i64,
             ],
         )?;
@@ -484,10 +474,7 @@ mod tests {
         let mut conn = open(tmp.path()).unwrap();
         reindex_note(&conn, &rel("stories/a.md"), "---\nid: a\n---\n# Hi\n").unwrap();
 
-        let todos = vec![Todo::new_manual(
-            "do it".into(),
-            NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
-        )];
+        let todos = arc_notes::scanner::parse_note("- [ ] do it @01-05-2026", &rel("todos.md"));
         mirror_todos(&mut conn, &todos).unwrap();
         let got = select(&conn, "SELECT text FROM todos").unwrap();
         assert!(got.contains("do it"));
@@ -783,7 +770,7 @@ mod tests {
                 row(
                     "table",
                     "todos",
-                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    source    TEXT,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER\n)"),
+                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER\n)"),
                 ),
             ]
         );
@@ -804,17 +791,19 @@ mod tests {
         mirror_todos(&mut conn, &[
             Todo {
                 id: uuid::Uuid::from_u128(1),
-                text: "manual".into(),
+                text: "added".into(),
                 date: NaiveDate::from_ymd_opt(2026, 5, 31),
                 completed: false,
-                source: TodoSource::Manual,
+                file: rel("todos.md"),
+                line: 4,
             },
             Todo {
                 id: uuid::Uuid::from_u128(2),
                 text: "parsed".into(),
                 date: None,
                 completed: true,
-                source: TodoSource::NoteParsed { file: rel("stories/sc-7.md"), line: 12, fingerprint: 5 },
+                file: rel("stories/sc-7.md"),
+                line: 12,
             },
         ]).unwrap();
         let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&select(&conn, sql).unwrap()).unwrap() };
@@ -838,8 +827,8 @@ mod tests {
         assert_eq!(
             rows("SELECT * FROM todos ORDER BY position"),
             serde_json::json!([
-                {"id": "00000000-0000-0000-0000-000000000001", "text": "manual", "date": "2026-05-31", "completed": 0, "source": "manual", "file": null, "line": null, "position": 0},
-                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "source": "note", "file": "stories/sc-7.md", "line": 12, "position": 1}
+                {"id": "00000000-0000-0000-0000-000000000001", "text": "added", "date": "2026-05-31", "completed": 0, "file": "todos.md", "line": 4, "position": 0},
+                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "file": "stories/sc-7.md", "line": 12, "position": 1}
             ])
         );
     }

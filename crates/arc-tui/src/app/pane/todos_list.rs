@@ -4,11 +4,11 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use arc_notes::Checkbox;
+use arc_notes::{Checkbox, NoteRelPath};
 
 use crate::{
     app::{cmd::Cmd, msg::TodosListMsg, pane::nav},
-    todos::{Todo, TodoSource},
+    todos::Todo,
 };
 
 pub use crate::app::model::TodosListState;
@@ -135,16 +135,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             };
             todo.completed = !todo.completed;
             state.visible.insert(id);
-
-            let sync_note = match &todo.source {
-                TodoSource::NoteParsed { file, .. } => Some(Cmd::SyncNoteCheckbox {
-                    file: file.clone(),
-                    text: todo.text.clone(),
-                    to: Checkbox::from_completed(todo.completed),
-                }),
-                TodoSource::Manual => None,
-            };
-            std::iter::once(Cmd::WriteTodos).chain(sync_note).collect()
+            vec![Cmd::SetTodoCompleted { id, to: Checkbox::from_completed(todo.completed) }]
         }
 
         TodosListMsg::FocusSectionNext | TodosListMsg::FocusSectionPrev => {
@@ -172,11 +163,11 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             let Some(id) = state.selected_id else {
                 return vec![Cmd::None];
             };
-            let is_note_parsed = todos
+            let in_todos_note = todos
                 .iter()
                 .find(|t| t.id == id)
-                .is_some_and(|t| matches!(t.source, TodoSource::NoteParsed { .. }));
-            if is_note_parsed {
+                .is_some_and(|t| t.file == NoteRelPath::todos());
+            if !in_todos_note {
                 return vec![Cmd::None];
             }
 
@@ -191,7 +182,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
                 .filter(still_listed)
                 .or(prev_id.filter(still_listed))
                 .or_else(|| todos.first().map(|t| t.id));
-            vec![Cmd::WriteTodos]
+            vec![Cmd::RemoveTodo { id }]
         }
     }
 }
@@ -222,7 +213,8 @@ mod tests {
             text: text.to_string(),
             date: Some(date),
             completed: false,
-            source: TodoSource::Manual,
+            file: NoteRelPath::todos(),
+            line: 1,
         }
     }
 
@@ -232,7 +224,8 @@ mod tests {
             text: text.to_string(),
             date: None,
             completed: false,
-            source: TodoSource::Manual,
+            file: NoteRelPath::todos(),
+            line: 1,
         }
     }
 
@@ -242,8 +235,42 @@ mod tests {
             text: text.to_string(),
             date: None,
             completed: true,
-            source: TodoSource::Manual,
+            file: NoteRelPath::todos(),
+            line: 1,
         }
+    }
+
+    fn selected(todos: &[Todo], id: Uuid) -> TodosListState {
+        TodosListState {
+            selected_id: Some(id),
+            ..TodosListState::new(todos)
+        }
+    }
+
+    #[test]
+    fn toggling_asks_for_the_checkbox_to_change() {
+        let todo = manual_undated("tick");
+        let mut todos = vec![todo.clone()];
+        let cmds = update(&mut selected(&todos, todo.id), &mut todos, TodosListMsg::ToggleComplete);
+        assert!(matches!(cmds[..], [Cmd::SetTodoCompleted { id, to: Checkbox::Done }] if id == todo.id));
+    }
+
+    #[test]
+    fn deleting_only_removes_todos_from_the_todos_note() {
+        let added = manual_undated("added by hand");
+        let in_story = Todo {
+            file: NoteRelPath::parse("stories/a.md").unwrap(),
+            ..manual_undated("lives in a story")
+        };
+        let mut todos = vec![added.clone(), in_story.clone()];
+
+        let cmds = update(&mut selected(&todos, in_story.id), &mut todos, TodosListMsg::DeleteSelected);
+        assert!(matches!(cmds[..], [Cmd::None]));
+        assert_eq!(todos.len(), 2);
+
+        let cmds = update(&mut selected(&todos, added.id), &mut todos, TodosListMsg::DeleteSelected);
+        assert!(matches!(cmds[..], [Cmd::RemoveTodo { id }] if id == added.id));
+        assert_eq!(todos, [in_story]);
     }
 
     #[test]

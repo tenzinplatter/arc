@@ -28,8 +28,7 @@ impl App {
                         handle.abort();
                     }
                 }
-                self.model.data.todos.retain(|t| !t.completed);
-                vec![Cmd::WriteTodos]
+                vec![Cmd::None]
             }
 
             Msg::KeyPressed(key_event) => self.handle_key_input(key_event),
@@ -160,11 +159,7 @@ impl App {
                 msg,
             ),
 
-            Msg::AddTodoModal(msg) => add_todo_modal::update(
-                &mut self.model.ui.overlay,
-                &mut self.model.data.todos,
-                msg,
-            ),
+            Msg::AddTodoModal(msg) => add_todo_modal::update(&mut self.model.ui.overlay, msg),
         }
     }
 
@@ -299,14 +294,15 @@ impl App {
             }
             ViewType::Todos => {
                 if key.code == KeyCode::Char('n') {
-                    let source = self
+                    let note = self
                         .model
                         .ui
                         .todos_list
                         .selected_id
                         .and_then(|id| self.model.data.todos.iter().find(|t| t.id == id))
-                        .map(|t| &t.source);
-                    if let Some(crate::todos::TodoSource::NoteParsed { file, .. }) = source {
+                        .map(|t| &t.file)
+                        .filter(|file| **file != arc_notes::NoteRelPath::todos());
+                    if let Some(file) = note {
                         return vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(
                             file.clone(),
                         ))];

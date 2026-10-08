@@ -94,6 +94,13 @@ impl Frontmatter {
         }
     }
 
+    pub fn todos() -> Self {
+        Self {
+            note_type: Some("todos".into()),
+            ..Self::linked("todos".into(), EntityLink::None)
+        }
+    }
+
     pub fn scratch(slug: String) -> Self {
         Self {
             note_type: Some("scratch".into()),

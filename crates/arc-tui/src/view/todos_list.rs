@@ -10,7 +10,7 @@ use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
     app::{model::TodosListState, pane::todos_list::visible_sections},
-    todos::{Todo, TodoSource},
+    todos::Todo,
     view::{headed_rows, render_headed_item},
 };
 
@@ -108,24 +108,16 @@ impl TodoItemWidget<'_> {
         } else {
             base_style
         };
-        let source_label = match &self.todo.source {
-            TodoSource::NoteParsed { file, line, .. } => {
-                let stem = file.file_stem().unwrap_or("?");
-                Some(Span::styled(
-                    format!(" [{}:{}]", stem, line),
-                    Style::default().fg(Color::DarkGray),
-                ))
-            }
-            TodoSource::Manual => None,
-        };
+        let source_label = Span::styled(
+            format!(" [{}:{}]", self.todo.file.file_stem().unwrap_or("?"), self.todo.line),
+            Style::default().fg(Color::DarkGray),
+        );
 
-        [
+        Line::from(vec![
             Span::styled(format!("{} ", checkbox), base_style),
             Span::styled(self.todo.text.clone(), name_style),
-        ]
-        .into_iter()
-        .chain(source_label)
-        .collect()
+            source_label,
+        ])
     }
 }
 

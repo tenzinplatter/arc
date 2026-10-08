@@ -1,11 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::{
-    app::{cmd::Cmd, model::Overlay, msg::AddTodoModalMsg},
-    todos::Todo,
-};
+use crate::app::{cmd::Cmd, model::Overlay, msg::AddTodoModalMsg};
 
-pub fn update(overlay: &mut Overlay, todos: &mut Vec<Todo>, msg: AddTodoModalMsg) -> Vec<Cmd> {
+pub fn update(overlay: &mut Overlay, msg: AddTodoModalMsg) -> Vec<Cmd> {
     match msg {
         AddTodoModalMsg::Open => {
             *overlay = Overlay::AddTodo {
@@ -27,9 +24,9 @@ pub fn update(overlay: &mut Overlay, todos: &mut Vec<Todo>, msg: AddTodoModalMsg
             if let Overlay::AddTodo { input } = overlay
                 && !input.is_empty()
             {
-                todos.push(Todo::new_manual(input.clone(), arc_core::time::today()));
+                let text = std::mem::take(input);
                 *overlay = Overlay::None;
-                return vec![Cmd::WriteTodos];
+                return vec![Cmd::AddTodo { text }];
             }
         }
     }

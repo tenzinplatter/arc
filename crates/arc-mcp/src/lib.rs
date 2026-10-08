@@ -297,7 +297,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, text, date, completed, source['manual'|'note'], file, line, position). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
+        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, text, date, completed, file, line, position). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
     )]
     async fn query(
         &self,
@@ -466,7 +466,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Add a manual todo. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD."
+        description = "Add a todo as a checkbox at the end of `todos.md` in the notes dir. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id."
     )]
     async fn add_todo(
         &self,
@@ -478,8 +478,8 @@ impl ArcMcp {
             )),
             None => None,
         };
-        tool_try!(arc_context::add_todo(&self.config.cache_dir, text, date).await);
-        Ok(CallToolResult::success(vec![ContentBlock::text("added")]))
+        let todo = tool_try!(arc_context::add_todo(&self.config.notes_dir, &self.config.cache_dir, text, date).await);
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!("added {}", todo.id))]))
     }
 }
 

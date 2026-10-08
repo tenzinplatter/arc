@@ -3,7 +3,7 @@ use std::path::Path;
 
 use arc_core::StoryId;
 use arc_index::Connection;
-use arc_notes::{BranchName, NoteRelPath, Todo, TodoSource};
+use arc_notes::{BranchName, NoteRelPath, Todo};
 use arc_shortcut::Cache;
 use arc_shortcut::api::story::Story;
 use chrono::NaiveDate;
@@ -81,14 +81,11 @@ pub(crate) fn find_note(
 fn open_todos_in(note: &NoteRelPath, todos: &[Todo]) -> Vec<OpenTodo> {
     todos
         .iter()
-        .filter(|t| !t.completed)
-        .filter_map(|t| match &t.source {
-            TodoSource::NoteParsed { file, line, .. } if file == note => Some(OpenTodo {
-                text: t.text.clone(),
-                date: t.date,
-                line: *line,
-            }),
-            TodoSource::NoteParsed { .. } | TodoSource::Manual => None,
+        .filter(|t| !t.completed && &t.file == note)
+        .map(|t| OpenTodo {
+            text: t.text.clone(),
+            date: t.date,
+            line: t.line,
         })
         .collect()
 }

@@ -319,7 +319,7 @@ mod tests {
     use std::process::Command;
 
     use arc_notes::note::frontmatter::Frontmatter;
-    use arc_notes::todos::{Todo, TodoSource};
+    use arc_notes::todos::Todo;
     use arc_shortcut::api::story::Story;
     use arc_shortcut::api::user::{CurrentUser, MemberId, MentionName};
     use serde_json::json;
@@ -493,15 +493,7 @@ mod tests {
     fn note_todos(path: &str, content: &str) -> Vec<Todo> {
         arc_notes::scanner::parse_note(content, &rel(path))
             .into_iter()
-            .enumerate()
-            .map(|(i, p)| p.into_todo(Uuid::from_u128(i as u128)))
-            .chain([Todo {
-                id: Uuid::from_u128(100),
-                text: "manual".into(),
-                date: None,
-                completed: false,
-                source: TodoSource::Manual,
-            }])
+            .chain(arc_notes::scanner::parse_note("- [ ] added by hand\n", &NoteRelPath::todos()))
             .collect()
     }
 

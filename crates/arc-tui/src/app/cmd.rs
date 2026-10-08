@@ -5,6 +5,7 @@ use std::{
 };
 
 use slugify::slugify;
+use uuid::Uuid;
 
 use arc_notes::{Checkbox, NoteDir, NoteRelPath};
 
@@ -41,11 +42,15 @@ pub enum Cmd {
     OpenInBrowser {
         app_url: String,
     },
-    WriteTodos,
-    SyncNoteCheckbox {
-        file: NoteRelPath,
+    AddTodo {
         text: String,
+    },
+    SetTodoCompleted {
+        id: Uuid,
         to: Checkbox,
+    },
+    RemoveTodo {
+        id: Uuid,
     },
     ShowError(ErrorInfo),
 }
