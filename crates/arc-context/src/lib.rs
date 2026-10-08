@@ -32,7 +32,7 @@ pub use sessions::{
     latest_session_at, latest_sessions,
 };
 pub use story::{lookup_story, lookup_story_backing_off, lookup_user};
-pub use todos::{ListedTodo, add_todo, complete_todo, open_todos};
+pub use todos::{ListedTodo, TodoListing, add_todo, complete_todo, open_todos, todo_listing};
 
 pub fn resolve_dir(dir: &Path, config: &Config) -> anyhow::Result<Option<ResolvedStory>> {
     resolve(&git::head(dir)?, &config.cache_dir)

@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use arc_notes::{Checkbox, NoteRelPath};
+use arc_notes::Checkbox;
 
 use crate::{
     app::{cmd::Cmd, msg::TodosListMsg, pane::nav},
@@ -166,7 +166,7 @@ pub fn update(state: &mut TodosListState, todos: &mut Vec<Todo>, msg: TodosListM
             let in_todos_note = todos
                 .iter()
                 .find(|t| t.id == id)
-                .is_some_and(|t| t.file == NoteRelPath::todos());
+                .is_some_and(|t| t.file.is_todo_list());
             if !in_todos_note {
                 return vec![Cmd::None];
             }
@@ -206,6 +206,7 @@ pub fn key_to_msg(key: KeyEvent) -> Option<TodosListMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_notes::NoteRelPath;
 
     fn manual_dated(text: &str, date: NaiveDate) -> Todo {
         Todo {
@@ -215,6 +216,7 @@ mod tests {
             completed: false,
             file: NoteRelPath::todos(),
             line: 1,
+            scope: Default::default(),
         }
     }
 
@@ -226,6 +228,7 @@ mod tests {
             completed: false,
             file: NoteRelPath::todos(),
             line: 1,
+            scope: Default::default(),
         }
     }
 
@@ -237,6 +240,7 @@ mod tests {
             completed: true,
             file: NoteRelPath::todos(),
             line: 1,
+            scope: Default::default(),
         }
     }
 
@@ -271,6 +275,18 @@ mod tests {
         let cmds = update(&mut selected(&todos, added.id), &mut todos, TodosListMsg::DeleteSelected);
         assert!(matches!(cmds[..], [Cmd::RemoveTodo { id }] if id == added.id));
         assert_eq!(todos, [in_story]);
+    }
+
+    #[test]
+    fn deleting_removes_todos_from_a_repo_todos_note() {
+        let in_repo = Todo {
+            file: NoteRelPath::repo_todos("o-arc"),
+            ..manual_undated("repo scoped")
+        };
+        let mut todos = vec![in_repo.clone()];
+
+        let cmds = update(&mut selected(&todos, in_repo.id), &mut todos, TodosListMsg::DeleteSelected);
+        assert!(matches!(cmds[..], [Cmd::RemoveTodo { id }] if id == in_repo.id));
     }
 
     #[test]

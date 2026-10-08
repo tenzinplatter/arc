@@ -7,6 +7,8 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{Mapping, Value};
 
+use crate::scope::RepoKey;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityLink {
     None,
@@ -38,6 +40,7 @@ pub struct Frontmatter {
     pub aliases: Vec<String>,
     pub link: EntityLink,
     pub branches: Vec<String>,
+    pub repo: Option<RepoKey>,
 }
 
 impl Frontmatter {
@@ -50,6 +53,7 @@ impl Frontmatter {
             aliases: Vec::new(),
             link,
             branches: Vec::new(),
+            repo: None,
         }
     }
 
@@ -98,6 +102,16 @@ impl Frontmatter {
         Self {
             note_type: Some("todos".into()),
             ..Self::linked("todos".into(), EntityLink::None)
+        }
+    }
+
+    pub fn repo_todos(repo: RepoKey) -> Self {
+        let file = repo.todo_file();
+        let id = file.file_stem().unwrap_or("todos").to_owned();
+        Self {
+            note_type: Some("todos".into()),
+            repo: Some(repo),
+            ..Self::linked(id, EntityLink::None)
         }
     }
 
@@ -500,6 +514,8 @@ struct RawFrontmatter {
         skip_serializing_if = "Vec::is_empty"
     )]
     branches: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_id: Option<String>,
@@ -550,6 +566,7 @@ impl From<RawFrontmatter> for Frontmatter {
             aliases: r.aliases,
             link,
             branches: r.branches,
+            repo: r.repo.as_deref().and_then(|repo| RepoKey::parse(repo).ok()),
         }
     }
 }
@@ -592,6 +609,7 @@ impl From<Frontmatter> for RawFrontmatter {
             created: f.created,
             note_type: f.note_type,
             branches: f.branches,
+            repo: f.repo.map(String::from),
             ..link
         }
     }
@@ -982,10 +1000,11 @@ mod tests {
                 epic_url: Some("https://ep/40".into()),
             },
             branches: vec!["sc-9-branch".into()],
+            repo: Some(RepoKey::parse("github.com/o/r").unwrap()),
         };
         assert_eq!(
             fm.to_block().unwrap(),
-            "---\nid: sc-9-slug\naliases:\n- alias\ntags:\n- t\ncreated: 2026-03-31\ntype: story\nstory_id: sc-9\nstory_link: https://s/9\nstory_name: Story nine\niteration: https://it/3\nepic: https://ep/40\nbranches:\n- sc-9-branch\n---\n"
+            "---\nid: sc-9-slug\naliases:\n- alias\ntags:\n- t\ncreated: 2026-03-31\ntype: story\nstory_id: sc-9\nstory_link: https://s/9\nstory_name: Story nine\niteration: https://it/3\nepic: https://ep/40\nbranches:\n- sc-9-branch\nrepo: github.com/o/r\n---\n"
         );
     }
 }

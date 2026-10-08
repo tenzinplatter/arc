@@ -22,10 +22,12 @@ arc               # launch TUI
 arc open          # open note for active story in $EDITOR
 arc tmux          # open/attach tmux session for active story
 arc todo list     # open todos with ids (--format json)
-arc todo add TEXT # append a todo to todos.md in the notes dir (--date YYYY-MM-DD)
+arc todo add TEXT # add a todo to this repo's todos/<owner>-<repo>.md (--date YYYY-MM-DD, --session ID, --global for todos.md)
 arc todo done ID  # complete a todo, ticking its note checkbox
 arc migrate       # one-time: move shortcut-notes config/cache/notes to arc
 ```
+
+Any note whose frontmatter has `repo: github.com/<owner>/<repo>` scopes its checkboxes to that repo; every clone and worktree of it shares the key. A `#session/<id>` token on a checkbox line ties the todo to the Claude Code session that added it.
 
 ### Keys
 

@@ -301,7 +301,7 @@ impl App {
                         .selected_id
                         .and_then(|id| self.model.data.todos.iter().find(|t| t.id == id))
                         .map(|t| &t.file)
-                        .filter(|file| **file != arc_notes::NoteRelPath::todos());
+                        .filter(|file| !file.is_todo_list());
                     if let Some(file) = note {
                         return vec![Cmd::OpenNote(NoteToOpen::existing_or_daily_template(
                             file.clone(),

@@ -4,6 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+const TODOS_DIR: &str = "todos";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoteDir {
     Daily,
@@ -92,6 +94,14 @@ impl NoteRelPath {
 
     pub fn todos() -> Self {
         Self("todos.md".into())
+    }
+
+    pub fn repo_todos(slug: &str) -> Self {
+        Self(format!("{TODOS_DIR}/{slug}.md"))
+    }
+
+    pub fn is_todo_list(&self) -> bool {
+        *self == Self::todos() || self.0.starts_with(&format!("{TODOS_DIR}/"))
     }
 
     pub fn as_str(&self) -> &str {

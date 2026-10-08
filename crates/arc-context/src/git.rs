@@ -1,9 +1,9 @@
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, bail};
-use arc_notes::BranchName;
+use arc_notes::{BranchName, RepoKey};
 
 const HEADS: &str = "refs/heads/";
 const ORIGIN_HEAD: &str = "refs/remotes/origin/HEAD";
@@ -64,6 +64,30 @@ pub fn head(dir: &Path) -> anyhow::Result<GitHead> {
     })
 }
 
+pub fn repo_key(dir: &Path) -> anyhow::Result<Option<RepoKey>> {
+    let remote = match git(dir, &["remote", "get-url", "origin"]) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        out => out.context("failed to run git")?,
+    };
+    if remote.status.success() {
+        let url = String::from_utf8(remote.stdout).context("git remote is not UTF-8")?;
+        return RepoKey::from_remote(&url).map(Some);
+    }
+    let common = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).context("failed to run git")?;
+    if !common.status.success() {
+        return Ok(None);
+    }
+    let common = PathBuf::from(String::from_utf8(common.stdout).context("git dir is not UTF-8")?.trim_end());
+    let root = match common.file_name() {
+        Some(name) if name == ".git" => common.parent().unwrap_or(&common),
+        _ => &common,
+    };
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .map(RepoKey::parse)
+        .transpose()
+}
+
 pub fn default_branch(dir: &Path) -> anyhow::Result<Option<BranchName>> {
     let out = git(dir, &["symbolic-ref", "--quiet", ORIGIN_HEAD]).context("failed to run git")?;
     symbolic_ref(out)?
@@ -82,4 +106,60 @@ pub fn rename_current_branch(dir: &Path, to: &BranchName) -> anyhow::Result<()> 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn repo(parent: &Path, name: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        run(&dir, &["init", "--quiet"]);
+        dir
+    }
+
+    #[test]
+    fn a_repo_and_its_worktrees_share_their_origin_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = repo(tmp.path(), "arc");
+        run(&main, &["remote", "add", "origin", "git@github.com:o/arc.git"]);
+        run(&main, &["commit", "--quiet", "--allow-empty", "-m", "root"]);
+        let worktree = tmp.path().join("wt");
+        run(&main, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
+
+        let want = Some(RepoKey::parse("github.com/o/arc").unwrap());
+        assert_eq!(repo_key(&main).unwrap(), want);
+        assert_eq!(repo_key(&worktree).unwrap(), want);
+        assert_eq!(repo_key(&main.join(".git")).unwrap(), want);
+    }
+
+    #[test]
+    fn a_repo_without_a_remote_is_keyed_by_its_main_checkout_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = repo(tmp.path(), "hearth");
+        run(&main, &["commit", "--quiet", "--allow-empty", "-m", "root"]);
+        let worktree = tmp.path().join("hearth-wt");
+        run(&main, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
+
+        assert_eq!(repo_key(&main).unwrap(), Some(RepoKey::parse("hearth").unwrap()));
+        assert_eq!(repo_key(&worktree).unwrap(), Some(RepoKey::parse("hearth").unwrap()));
+    }
+
+    #[test]
+    fn outside_a_repo_there_is_no_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(repo_key(tmp.path()).unwrap(), None);
+    }
 }

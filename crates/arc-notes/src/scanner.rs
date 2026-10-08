@@ -7,7 +7,9 @@ use regex::Regex;
 use uuid::Uuid;
 
 use crate::checkbox::{Checkbox, split_checkbox};
+use crate::note::frontmatter::Frontmatter;
 use crate::path::NoteRelPath;
+use crate::scope::{SessionId, TodoScope};
 use crate::todos::Todo;
 
 const TODO_ID_NAMESPACE: Uuid = Uuid::from_u128(0x1243f4f0_6526_4859_a227_e672f1bf19e3);
@@ -19,12 +21,27 @@ fn date_token_regex() -> &'static Regex {
     })
 }
 
+fn session_token_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?:^|\s)#session/([A-Za-z0-9_-]+)").expect("session token regex compiles"))
+}
+
+fn take_session(text: &str) -> (Option<SessionId>, String) {
+    let Some(caps) = session_token_regex().captures(text) else {
+        return (None, text.to_owned());
+    };
+    let whole = caps.get(0).expect("group 0 always matches").range();
+    let session = SessionId::parse(&caps[1]).ok();
+    (session, collapse_whitespace(&format!("{} {}", &text[..whole.start], &text[whole.end..])))
+}
+
 fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
     let re = date_token_regex();
+    let repo = Frontmatter::from_note(content).and_then(|frontmatter| frontmatter.repo);
     let mut occurrences: HashMap<String, u32> = HashMap::new();
 
     content.lines().enumerate().filter_map(|(idx, raw_line)| {
@@ -45,6 +62,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
             None => (None, collapse_whitespace(rest)),
         };
 
+        let (session, text) = take_session(&text);
         let normalized = text.to_lowercase();
         let occurrence = occurrences.entry(normalized.clone()).or_default();
         let id = todo_id(file, &normalized, *occurrence);
@@ -57,6 +75,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
             completed: checkbox.is_done(),
             file: file.clone(),
             line: line_no,
+            scope: TodoScope { repo: repo.clone(), session },
         })
     })
     .collect()
@@ -67,12 +86,10 @@ pub fn todo_id(file: &NoteRelPath, normalized_text: &str, occurrence: u32) -> Uu
     Uuid::new_v5(&TODO_ID_NAMESPACE, key.as_bytes())
 }
 
-pub fn render_todo_line(state: Checkbox, text: &str, date: Option<NaiveDate>) -> String {
-    let text = collapse_whitespace(text);
-    match date {
-        Some(date) => format!("{}{text} @{}", state.marker(), date.format("%d-%m-%Y")),
-        None => format!("{}{text}", state.marker()),
-    }
+pub fn render_todo_line(state: Checkbox, text: &str, date: Option<NaiveDate>, session: Option<&SessionId>) -> String {
+    let date = date.map(|date| format!(" @{}", date.format("%d-%m-%Y"))).unwrap_or_default();
+    let session = session.map(|session| format!(" {}", session.token())).unwrap_or_default();
+    format!("{}{}{date}{session}", state.marker(), collapse_whitespace(text))
 }
 
 #[cfg(test)]
@@ -154,6 +171,29 @@ mod tests {
     }
 
     #[test]
+    fn session_token_is_scope_not_text_and_keeps_the_id() {
+        let plain = parse_note("- [ ] hello", &f());
+        let tagged = parse_note("- [ ] hello @10-06-2026 #session/abc-123", &f());
+        assert_eq!(tagged[0].text, "hello");
+        assert_eq!(tagged[0].scope.session, Some(SessionId::parse("abc-123").unwrap()));
+        assert_eq!(tagged[0].id, plain[0].id);
+    }
+
+    #[test]
+    fn a_hash_inside_a_word_is_not_a_session_token() {
+        let t = parse_note("- [ ] fix issue#session/x", &f());
+        assert_eq!(t[0].text, "fix issue#session/x");
+        assert_eq!(t[0].scope.session, None);
+    }
+
+    #[test]
+    fn todos_take_their_repo_from_the_note_frontmatter() {
+        let t = parse_note("---\nid: arc\nrepo: github.com/o/arc\n---\n- [ ] ship\n", &f());
+        assert_eq!(t[0].scope.repo.as_ref().map(|r| r.as_str()), Some("github.com/o/arc"));
+        assert_eq!(parse_note("- [ ] ship", &f())[0].scope.repo, None);
+    }
+
+    #[test]
     fn id_changes_after_text_edit() {
         let a = parse_note("- [ ] hello", &f());
         let b = parse_note("- [ ] hello world", &f());
@@ -190,10 +230,10 @@ mod tests {
     #[test]
     fn rendered_line_parses_back_to_the_same_todo() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 9);
-        let line = render_todo_line(Checkbox::Open, "book   flights", date);
+        let line = render_todo_line(Checkbox::Open, "book   flights", date, None);
         assert_eq!(line, "- [ ] book flights @09-10-2026");
         let t = parse_note(&line, &f()).remove(0);
         assert_eq!((t.text.as_str(), t.date, t.completed), ("book flights", date, false));
-        assert_eq!(render_todo_line(Checkbox::Done, "shipped", None), "- [x] shipped");
+        assert_eq!(render_todo_line(Checkbox::Done, "shipped", None, None), "- [x] shipped");
     }
 }

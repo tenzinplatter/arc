@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 use arc_notes::todos::{self, load_todos};
-use arc_notes::{Checkbox, NoteRelPath, Todo};
+use arc_notes::{Checkbox, NoteRelPath, RepoKey, SessionId, Todo, TodoScope};
 use chrono::NaiveDate;
 use serde::Serialize;
 use uuid::Uuid;
@@ -15,6 +15,8 @@ pub struct ListedTodo {
     pub text: String,
     pub date: Option<NaiveDate>,
     pub note: NoteRelPath,
+    pub repo: Option<RepoKey>,
+    pub session: Option<SessionId>,
 }
 
 impl From<Todo> for ListedTodo {
@@ -24,8 +26,16 @@ impl From<Todo> for ListedTodo {
             text: todo.text,
             date: todo.date,
             note: todo.file,
+            repo: todo.scope.repo,
+            session: todo.scope.session,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TodoListing {
+    pub repo: Option<RepoKey>,
+    pub todos: Vec<ListedTodo>,
 }
 
 impl fmt::Display for ListedTodo {
@@ -47,13 +57,20 @@ pub async fn open_todos(cache_dir: &Path) -> Vec<ListedTodo> {
         .collect()
 }
 
+pub async fn todo_listing(dir: &Path, cache_dir: &Path) -> anyhow::Result<TodoListing> {
+    let dir = dir.to_path_buf();
+    let repo = blocking(move || crate::git::repo_key(&dir)).await?;
+    Ok(TodoListing { repo, todos: open_todos(cache_dir).await })
+}
+
 pub async fn add_todo(
     notes_dir: &Path,
     cache_dir: &Path,
     text: String,
     date: Option<NaiveDate>,
+    scope: TodoScope,
 ) -> anyhow::Result<Todo> {
-    let added = todos::add_todo(notes_dir, cache_dir, text, date).await?;
+    let added = todos::add_todo_in(notes_dir, cache_dir, text, date, scope).await?;
     mirror(cache_dir, added.todos).await?;
     Ok(added.todo)
 }
@@ -81,12 +98,21 @@ mod tests {
     async fn added_todos_are_listed_until_completed() {
         let (notes, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let date = NaiveDate::from_ymd_opt(2026, 10, 9);
-        let added = add_todo(notes.path(), cache.path(), "book flights".to_string(), date).await.unwrap();
+        let added = add_todo(notes.path(), cache.path(), "book flights".to_string(), date, TodoScope::default())
+            .await
+            .unwrap();
 
         let listed = open_todos(cache.path()).await;
         assert_eq!(
             listed,
-            [ListedTodo { id: added.id, text: "book flights".to_string(), date, note: NoteRelPath::todos() }]
+            [ListedTodo {
+                id: added.id,
+                text: "book flights".to_string(),
+                date,
+                note: NoteRelPath::todos(),
+                repo: None,
+                session: None,
+            }]
         );
 
         let completed = complete_todo(cache.path(), notes.path(), added.id).await.unwrap();
@@ -114,7 +140,7 @@ mod tests {
     #[tokio::test]
     async fn completing_an_unknown_id_fails_without_writing() {
         let (notes, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let kept = add_todo(notes.path(), cache.path(), "keep".to_string(), None).await.unwrap();
+        let kept = add_todo(notes.path(), cache.path(), "keep".to_string(), None, TodoScope::default()).await.unwrap();
 
         assert!(complete_todo(cache.path(), notes.path(), Uuid::new_v4()).await.is_err());
         assert_eq!(open_todos(cache.path()).await, [ListedTodo::from(kept)]);

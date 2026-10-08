@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use arc_context::EntryText;
 use arc_core::StoryId;
 use arc_hooks::install::{DevBuilds, Mode};
+use arc_notes::SessionId;
 use clap::builder::{BoolValueParser, TypedValueParser};
 use chrono::NaiveDate;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -133,12 +134,18 @@ pub enum TodoCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Add a manual todo.
+    /// Add a todo, scoped to the current directory's git repo unless `--global`.
     Add {
         text: String,
         /// Due date, `YYYY-MM-DD`.
         #[arg(long)]
         date: Option<NaiveDate>,
+        /// The Claude Code session that asked for it.
+        #[arg(long)]
+        session: Option<SessionId>,
+        /// Add it to `todos.md` instead of the repo's todo note.
+        #[arg(long)]
+        global: bool,
     },
     /// Complete a todo by id, ticking its checkbox when it came from a note.
     Done { id: Uuid },

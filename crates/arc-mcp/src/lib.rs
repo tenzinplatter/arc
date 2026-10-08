@@ -20,7 +20,7 @@ use arc_context::{EntryText, GitHead, Handoff, LoggedSession, NoteLinks, Section
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
-use arc_notes::NoteRelPath;
+use arc_notes::{NoteRelPath, SessionId, TodoScope};
 use arc_shortcut::api::branch::Branch;
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
@@ -187,6 +187,15 @@ struct AddTodoArgs {
     /// Optional due date, `YYYY-MM-DD`.
     #[serde(default)]
     date: Option<String>,
+    /// Absolute path of your current working directory. The todo is scoped to the git repo there. Defaults to the directory the arc MCP server was started in.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Your Claude Code session id, so the todo shows up as this session's.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// True for a todo that belongs to no repo; it goes to `todos.md`.
+    #[serde(default)]
+    global: bool,
 }
 
 #[derive(Clone)]
@@ -466,11 +475,11 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Add a todo as a checkbox at the end of `todos.md` in the notes dir. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id."
+        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<owner>-<repo>.md`) for the git repo at `cwd`, or in `todos.md` when `global` is true or `cwd` is no repo. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
     )]
     async fn add_todo(
         &self,
-        Parameters(AddTodoArgs { text, date }): Parameters<AddTodoArgs>,
+        Parameters(AddTodoArgs { text, date, cwd, session_id, global }): Parameters<AddTodoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let date = match date.as_deref() {
             Some(d) => Some(tool_try!(
@@ -478,8 +487,20 @@ impl ArcMcp {
             )),
             None => None,
         };
-        let todo = tool_try!(arc_context::add_todo(&self.config.notes_dir, &self.config.cache_dir, text, date).await);
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!("added {}", todo.id))]))
+        let session = tool_try!(session_id.as_deref().map(SessionId::parse).transpose().map_err(|e| format!("{e:#}")));
+        let repo = match global {
+            true => None,
+            false => {
+                let dir = self.work_dir(tool_try!(WorkDir::parse_optional(cwd.as_deref())));
+                let found = tokio::task::spawn_blocking(move || arc_context::git::repo_key(&dir))
+                    .await
+                    .map_err(internal)?;
+                tool_try!(found.map_err(|e| format!("{e:#}")))
+            }
+        };
+        let scope = TodoScope { repo, session };
+        let todo = tool_try!(arc_context::add_todo(&self.config.notes_dir, &self.config.cache_dir, text, date, scope).await);
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!("added {} to {}", todo.id, todo.file))]))
     }
 }
 

@@ -6,6 +6,7 @@ use crate::checkbox::{Checkbox, split_checkbox};
 use crate::note::frontmatter::Frontmatter;
 use crate::path::NoteRelPath;
 use crate::scanner::{parse_note, render_todo_line};
+use crate::scope::TodoScope;
 use crate::write::{self, NoteLocks};
 
 use anyhow::{Context, anyhow, bail};
@@ -22,6 +23,8 @@ pub struct Todo {
     pub completed: bool,
     pub file: NoteRelPath,
     pub line: u32,
+    #[serde(default)]
+    pub scope: TodoScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,10 +155,10 @@ where
     Ok(NoteEdit { parsed, todos })
 }
 
-fn appended(content: Option<&str>, lines: &[String]) -> anyhow::Result<String> {
+fn appended(content: Option<&str>, lines: &[String], fresh: &Frontmatter) -> anyhow::Result<String> {
     let base = match content {
         Some(content) => content.to_string(),
-        None => format!("{}\n", Frontmatter::todos().to_block()?),
+        None => format!("{}\n", fresh.to_block()?),
     };
     let separator = if base.is_empty() || base.ends_with('\n') { "" } else { "\n" };
     Ok(format!("{base}{separator}{}\n", lines.join("\n")))
@@ -166,15 +169,17 @@ fn add_todo_blocking(
     cache_dir: &Path,
     text: &str,
     date: Option<NaiveDate>,
+    scope: &TodoScope,
 ) -> anyhow::Result<Edited> {
     if text.trim().is_empty() {
         bail!("todo text is empty");
     }
-    let line = render_todo_line(Checkbox::Open, text, date);
-    let file = NoteRelPath::todos();
+    let line = render_todo_line(Checkbox::Open, text, date, scope.session.as_ref());
+    let file = scope.file();
+    let fresh = scope.repo.clone().map_or_else(Frontmatter::todos, Frontmatter::repo_todos);
     let mut appended_at = 0;
     let edit = edit_note(notes_dir, cache_dir, &file, |content| {
-        let after = appended(content, std::slice::from_ref(&line))?;
+        let after = appended(content, std::slice::from_ref(&line), &fresh)?;
         appended_at = after.lines().count() as u32;
         Ok(after)
     })?;
@@ -192,8 +197,18 @@ pub async fn add_todo(
     text: String,
     date: Option<NaiveDate>,
 ) -> anyhow::Result<Edited> {
+    add_todo_in(notes_dir, cache_dir, text, date, TodoScope::default()).await
+}
+
+pub async fn add_todo_in(
+    notes_dir: &Path,
+    cache_dir: &Path,
+    text: String,
+    date: Option<NaiveDate>,
+    scope: TodoScope,
+) -> anyhow::Result<Edited> {
     let (notes_dir, cache_dir) = (notes_dir.to_path_buf(), cache_dir.to_path_buf());
-    tokio::task::spawn_blocking(move || add_todo_blocking(&notes_dir, &cache_dir, &text, date)).await?
+    tokio::task::spawn_blocking(move || add_todo_blocking(&notes_dir, &cache_dir, &text, date, &scope)).await?
 }
 
 fn cached(cache_dir: &Path, id: Uuid) -> anyhow::Result<Todo> {
@@ -287,11 +302,11 @@ fn adopt_legacy_todos_blocking(notes_dir: &Path, cache_dir: &Path) -> anyhow::Re
     let lines: Vec<String> = legacy
         .iter()
         .filter(|t| matches!(t.source, LegacySource::Manual) && !t.text.trim().is_empty())
-        .map(|t| render_todo_line(Checkbox::from_completed(t.completed), &t.text, t.date))
+        .map(|t| render_todo_line(Checkbox::from_completed(t.completed), &t.text, t.date, None))
         .collect();
     match lines.is_empty() {
         true => transform_blocking(cache_dir, |_| Vec::new()).map(drop)?,
-        false => edit_note(notes_dir, cache_dir, &NoteRelPath::todos(), |content| appended(content, &lines)).map(drop)?,
+        false => edit_note(notes_dir, cache_dir, &NoteRelPath::todos(), |content| appended(content, &lines, &Frontmatter::todos())).map(drop)?,
     }
     Ok(lines.len())
 }
@@ -456,6 +471,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scoped_todo_lands_in_its_repo_file_with_its_session() {
+        let (notes, cache) = dirs();
+        let scope = TodoScope {
+            repo: Some(crate::RepoKey::parse("github.com/o/arc").unwrap()),
+            session: Some(crate::SessionId::parse("s1").unwrap()),
+        };
+        let added = add_todo_in(notes.path(), cache.path(), "ship".into(), date(9), scope.clone()).await.unwrap();
+
+        let written = read(&notes, "todos/o-arc.md");
+        assert!(written.contains("repo: github.com/o/arc"), "{written}");
+        assert!(written.contains("id: o-arc\n"), "{written}");
+        assert!(written.ends_with("- [ ] ship @09-10-2026 #session/s1\n"), "{written}");
+        assert_eq!(added.todo.file.as_str(), "todos/o-arc.md");
+        assert_eq!(added.todo.scope, scope);
+        assert!(!notes.path().join("todos.md").exists());
+    }
+
+    #[tokio::test]
     async fn adding_a_duplicate_returns_the_new_line() {
         let (notes, cache) = dirs();
         let first = add_todo(notes.path(), cache.path(), "call".into(), None).await.unwrap();
@@ -586,7 +619,11 @@ mod tests {
     "date": "2026-05-31",
     "completed": true,
     "file": "stories/a.md",
-    "line": 12
+    "line": 12,
+    "scope": {
+      "repo": null,
+      "session": null
+    }
   }
 ]"#;
 
@@ -598,6 +635,7 @@ mod tests {
             completed: true,
             file: NoteRelPath::parse("stories/a.md").unwrap(),
             line: 12,
+            scope: TodoScope::default(),
         }]
     }
 

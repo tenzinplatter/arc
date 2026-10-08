@@ -796,6 +796,7 @@ mod tests {
                 completed: false,
                 file: rel("todos.md"),
                 line: 4,
+                scope: Default::default(),
             },
             Todo {
                 id: uuid::Uuid::from_u128(2),
@@ -804,6 +805,7 @@ mod tests {
                 completed: true,
                 file: rel("stories/sc-7.md"),
                 line: 12,
+                scope: Default::default(),
             },
         ]).unwrap();
         let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&select(&conn, sql).unwrap()).unwrap() };
