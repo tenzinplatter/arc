@@ -14,7 +14,7 @@ use crate::{
         cmd::{NoteToOpen, open_mux_session},
     },
     cache::Cache,
-    cli::{Commands, ContextFormat, DaemonCommands, HookCommands, LinkMode, SettingsArgs},
+    cli::{Commands, DaemonCommands, HookCommands, LinkMode, OutputFormat, SettingsArgs, TodoCommands},
     note::Note,
 };
 use arc_context::{Handoff, LinkOutcome, NoteRename, StoryNote};
@@ -55,7 +55,7 @@ pub async fn run(terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
 }
 
 async fn render_context(
-    format: ContextFormat,
+    format: OutputFormat,
     config: &Config,
     cache: Cache,
 ) -> anyhow::Result<Option<String>> {
@@ -65,8 +65,8 @@ async fn render_context(
         return Ok(None);
     };
     Ok(Some(match format {
-        ContextFormat::Text => context.to_string(),
-        ContextFormat::Json => format!("{}\n", serde_json::to_string_pretty(&context)?),
+        OutputFormat::Text => context.to_string(),
+        OutputFormat::Json => format!("{}\n", serde_json::to_string_pretty(&context)?),
     }))
 }
 
@@ -80,7 +80,7 @@ fn emit_context(rendered: anyhow::Result<Option<String>>) {
     }
 }
 
-pub async fn print_context(format: ContextFormat) {
+pub async fn print_context(format: OutputFormat) {
     std::panic::set_hook(Box::new(|panic| dbg_file!("arc context: {panic}")));
     let rendered = tokio::spawn(async move {
         let config = Config::read()?;
@@ -303,7 +303,30 @@ pub async fn handle_command(
             Ok(())
         }
 
+        Commands::Todo(todo_cmd) => todo(todo_cmd, config).await,
+
         Commands::Migrate => unreachable!("Migrate is handled in main.rs before config is loaded"),
         Commands::Hook(_) => unreachable!("Hook is handled in main.rs before config is loaded"),
     }
+}
+
+async fn todo(command: TodoCommands, config: &Config) -> anyhow::Result<()> {
+    match command {
+        TodoCommands::List { format } => {
+            let todos = arc_context::open_todos(&config.cache_dir).await;
+            match format {
+                OutputFormat::Text => todos.iter().for_each(|todo| println!("{todo}")),
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&todos)?),
+            }
+        }
+        TodoCommands::Add { text, date } => {
+            let todo = arc_context::add_todo(&config.cache_dir, text, date).await?;
+            println!("{}", todo.id);
+        }
+        TodoCommands::Done { id } => {
+            let todo = arc_context::complete_todo(&config.cache_dir, &config.notes_dir, id).await?;
+            println!("done: {}", todo.text);
+        }
+    }
+    Ok(())
 }

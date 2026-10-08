@@ -138,7 +138,7 @@ mod tests {
             },
             ..manual("ship it")
         };
-        arc_notes::todos::save_todos(cache.path(), &[todo.clone()]).await.unwrap();
+        arc_notes::todos::save_todos(cache.path(), std::slice::from_ref(&todo)).await.unwrap();
 
         complete_todo(cache.path(), notes.path(), todo.id).await.unwrap();
 
@@ -151,7 +151,7 @@ mod tests {
     async fn completing_an_unknown_id_fails_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let kept = manual("keep");
-        arc_notes::todos::save_todos(dir.path(), &[kept.clone()]).await.unwrap();
+        arc_notes::todos::save_todos(dir.path(), std::slice::from_ref(&kept)).await.unwrap();
 
         assert!(complete_todo(dir.path(), dir.path(), Uuid::new_v4()).await.is_err());
         assert_eq!(open_todos(dir.path()).await, [ListedTodo::from(kept)]);

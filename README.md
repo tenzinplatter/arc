@@ -21,6 +21,9 @@ api_token = "your-token-here"
 arc               # launch TUI
 arc open          # open note for active story in $EDITOR
 arc tmux          # open/attach tmux session for active story
+arc todo list     # open todos with ids (--format json)
+arc todo add TEXT # add a manual todo (--date YYYY-MM-DD)
+arc todo done ID  # complete a todo, ticking its note checkbox
 arc migrate       # one-time: move shortcut-notes config/cache/notes to arc
 ```
 

@@ -4,7 +4,9 @@ use arc_context::EntryText;
 use arc_core::StoryId;
 use arc_hooks::install::{DevBuilds, Mode};
 use clap::builder::{BoolValueParser, TypedValueParser};
+use chrono::NaiveDate;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "arc")]
@@ -56,8 +58,8 @@ pub enum Commands {
     #[command()]
     Context {
         /// Output format.
-        #[arg(long, value_enum, default_value_t = ContextFormat::Text)]
-        format: ContextFormat,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
 
     /// Print the canonical branch name for a story: `{mention_name}/sc-{id}/{slug}[-{suffix}]`.
@@ -118,6 +120,28 @@ pub enum Commands {
     /// doesn't resolve to a story or anything goes wrong.
     #[command(subcommand)]
     Hook(HookCommands),
+
+    /// Open todos from `todos.json` and notes: list, add and complete them.
+    #[command(subcommand)]
+    Todo(TodoCommands),
+}
+
+#[derive(Subcommand)]
+pub enum TodoCommands {
+    /// Print the open todos with their ids, due dates and source notes.
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Add a manual todo.
+    Add {
+        text: String,
+        /// Due date, `YYYY-MM-DD`.
+        #[arg(long)]
+        date: Option<NaiveDate>,
+    },
+    /// Complete a todo by id, ticking its checkbox when it came from a note.
+    Done { id: Uuid },
 }
 
 #[derive(Subcommand)]
@@ -196,7 +220,7 @@ impl LinkMode {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum ContextFormat {
+pub enum OutputFormat {
     /// Compact, human- and LLM-readable lines.
     Text,
     /// Pretty-printed JSON.
@@ -218,6 +242,20 @@ mod tests {
     fn parse(args: &[&str]) -> Result<Commands, clap::Error> {
         Cli::try_parse_from(["arc"].iter().chain(args))
             .map(|cli| cli.command.expect("a subcommand"))
+    }
+
+    #[test]
+    fn todo_parses_dates_and_ids() {
+        assert!(matches!(
+            parse(&["todo", "add", "book flights", "--date", "2026-10-09"]).unwrap(),
+            Commands::Todo(TodoCommands::Add { date: Some(_), .. })
+        ));
+        assert!(parse(&["todo", "add", "x", "--date", "tomorrow"]).is_err());
+        assert!(matches!(
+            parse(&["todo", "done", "00000000-0000-0000-0000-000000000001"]).unwrap(),
+            Commands::Todo(TodoCommands::Done { .. })
+        ));
+        assert!(parse(&["todo", "done", "7"]).is_err());
     }
 
     #[test]
