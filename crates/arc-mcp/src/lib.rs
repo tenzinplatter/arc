@@ -1026,6 +1026,7 @@ mod tests {
             editor: String::new(),
             repositories_directory: root.to_path_buf(),
             mux: Default::default(),
+            notifier: Default::default(),
         }
     }
 

@@ -382,6 +382,7 @@ mod tests {
             editor: String::new(),
             repositories_directory: tmp.path().to_path_buf(),
             mux: Default::default(),
+            notifier: Default::default(),
         };
         std::fs::create_dir_all(config.notes_dir.join("stories")).unwrap();
         Some(Env {

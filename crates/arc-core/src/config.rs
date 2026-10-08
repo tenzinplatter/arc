@@ -11,6 +11,21 @@ pub enum Mux {
     Zellij,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum NotifierConfig {
+    #[default]
+    Desktop,
+    Ntfy {
+        url: String,
+        topic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
+    #[serde(rename = "none")]
+    Silent,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub notes_dir: PathBuf,
@@ -19,6 +34,7 @@ pub struct Config {
     pub editor: String,
     pub repositories_directory: PathBuf,
     pub mux: Mux,
+    pub notifier: NotifierConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -33,6 +49,8 @@ struct ConfigFile {
     repositories_directory: String,
     #[serde(default)]
     mux: Mux,
+    #[serde(default)]
+    notifier: NotifierConfig,
 }
 
 impl Default for ConfigFile {
@@ -44,6 +62,7 @@ impl Default for ConfigFile {
             editor: default_editor(),
             repositories_directory: default_repositories_directory(),
             mux: Mux::default(),
+            notifier: NotifierConfig::default(),
         }
     }
 }
@@ -85,6 +104,7 @@ impl Config {
             editor: config.editor,
             repositories_directory,
             mux: config.mux,
+            notifier: config.notifier,
         })
     }
 
@@ -96,6 +116,7 @@ impl Config {
             editor: self.editor.clone(),
             repositories_directory: self.repositories_directory.to_str().unwrap().to_string(),
             mux: self.mux.clone(),
+            notifier: self.notifier.clone(),
         };
 
         confy::store("arc", Some("config"), config).context("Failed to write config")
@@ -113,4 +134,93 @@ fn default_cache_dir() -> PathBuf {
         .expect("Couldn't find home dir")
         .join(".cache")
         .join("arc")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(toml_src: &str) -> Result<ConfigFile, toml::de::Error> {
+        toml::from_str(toml_src)
+    }
+
+    const BASE: &str = "notes_dir = \"~/notes\"\napi_token = \"t\"\n";
+
+    #[test]
+    fn notifier_defaults_to_desktop_when_absent() {
+        assert_eq!(parse(BASE).unwrap().notifier, NotifierConfig::Desktop);
+    }
+
+    #[test]
+    fn parses_desktop_notifier() {
+        let cfg = parse(&format!("{BASE}[notifier]\nkind = \"desktop\"\n")).unwrap();
+        assert_eq!(cfg.notifier, NotifierConfig::Desktop);
+    }
+
+    #[test]
+    fn parses_none_notifier() {
+        let cfg = parse(&format!("{BASE}[notifier]\nkind = \"none\"\n")).unwrap();
+        assert_eq!(cfg.notifier, NotifierConfig::Silent);
+    }
+
+    #[test]
+    fn parses_ntfy_notifier_without_token() {
+        let cfg = parse(&format!(
+            "{BASE}[notifier]\nkind = \"ntfy\"\nurl = \"http://ntfy.local:2586\"\ntopic = \"arc\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.notifier,
+            NotifierConfig::Ntfy {
+                url: "http://ntfy.local:2586".into(),
+                topic: "arc".into(),
+                token: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_ntfy_notifier_with_token() {
+        let cfg = parse(&format!(
+            "{BASE}[notifier]\nkind = \"ntfy\"\nurl = \"http://ntfy.local\"\ntopic = \"arc\"\ntoken = \"tk_secret\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.notifier,
+            NotifierConfig::Ntfy {
+                url: "http://ntfy.local".into(),
+                topic: "arc".into(),
+                token: Some("tk_secret".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_ntfy_without_topic() {
+        let err = parse(&format!(
+            "{BASE}[notifier]\nkind = \"ntfy\"\nurl = \"http://ntfy.local\"\n"
+        ))
+        .err()
+        .expect("ntfy without a topic must not parse");
+        assert!(err.to_string().contains("topic"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_notifier_kind() {
+        assert!(parse(&format!("{BASE}[notifier]\nkind = \"pager\"\n")).is_err());
+    }
+
+    #[test]
+    fn notifier_round_trips_through_toml() {
+        let file = ConfigFile {
+            notifier: NotifierConfig::Ntfy {
+                url: "http://ntfy.local".into(),
+                topic: "arc".into(),
+                token: None,
+            },
+            ..parse(BASE).unwrap()
+        };
+        let written = toml::to_string(&file).unwrap();
+        assert_eq!(parse(&written).unwrap().notifier, file.notifier);
+    }
 }

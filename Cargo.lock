@@ -124,6 +124,7 @@ dependencies = [
  "confy",
  "serde",
  "shellexpand",
+ "toml",
 ]
 
 [[package]]

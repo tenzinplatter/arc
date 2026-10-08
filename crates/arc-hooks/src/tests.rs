@@ -23,6 +23,7 @@ pub(crate) fn config(root: &Path) -> Config {
         editor: String::new(),
         repositories_directory: root.to_path_buf(),
         mux: Default::default(),
+        notifier: Default::default(),
     }
 }
 

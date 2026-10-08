@@ -9,3 +9,6 @@ chrono = { workspace = true }
 serde = { workspace = true }
 confy = { workspace = true }
 shellexpand = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

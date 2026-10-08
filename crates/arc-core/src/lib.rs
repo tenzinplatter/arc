@@ -4,5 +4,5 @@ pub mod time;
 #[macro_use]
 pub mod macros;
 
-pub use config::{Config, Mux};
+pub use config::{Config, Mux, NotifierConfig};
 pub use ids::{EpicId, IterationId, StoryId};
