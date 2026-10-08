@@ -62,16 +62,50 @@ A remote server can't see the caller's filesystem: `current_story` and `log_sess
 
 #### Docker
 
-Run the container with `network_mode: host` so it can bind the host's Tailscale IP directly; with bridge networking the address doesn't exist inside the container. Tailscale must be up on the host before the container starts (otherwise the bind fails and the process exits), so give the service a restart policy. Mount the arc config (with `mcp_token`), the notes dir and the cache dir, and run `arc daemon run` alongside so notes synced in from other machines get reindexed for `query`.
+The image's entrypoint is `arc`, so `command` holds only the subcommand and its arguments. Run two services from it: `arc daemon run` keeps the cache and index current as notes sync in from other machines, and `arc mcp --http` serves them. Both share three mounts:
+
+- `/home/arc/.config` holding `arc/config.toml`
+- `/home/arc/.cache/arc`, the cache and index
+- `/notes`, the notes dir
+
+The container config must set `notes_dir = "/notes"` and an explicit `[notifier]`: the default `desktop` has no session bus in a container, so use `kind = "ntfy"` or `kind = "none"`. Set `mcp_token` too.
+
+```toml
+notes_dir = "/notes"
+api_token = "..."
+editor = "vi"
+mcp_token = "a-long-random-string"
+
+[notifier]
+kind = "none"
+```
+
+Run `arc-mcp` with `network_mode: host` so it can bind the host's Tailscale IP directly; with bridge networking the address doesn't exist inside the container. Tailscale must be up on the host before the container starts (otherwise the bind fails and the process exits), so give the service a restart policy. Pass `TZ` and mount `/etc/localtime` so reminders fire at 9am local time, and use `init: true` so signals reach `arc` and exited children are reaped.
 
 ```yaml
+x-arc: &arc
+  image: arc
+  init: true
+  restart: unless-stopped
+  environment:
+    TZ: Australia/Sydney
+  volumes:
+    - /etc/localtime:/etc/localtime:ro
+    - ./arc-config:/home/arc/.config
+    - ./arc-cache:/home/arc/.cache/arc
+    - /srv/notes:/notes
+
 services:
+  arc-daemon:
+    <<: *arc
+    command: ["daemon", "run"]
   arc-mcp:
-    image: arc
+    <<: *arc
     network_mode: host
-    restart: unless-stopped
-    command: ["arc", "mcp", "--http", "100.x.y.z:8765"]
+    command: ["mcp", "--http", "100.x.y.z:8765"]
 ```
+
+The host directories must be writable by uid 1000, the container's `arc` user.
 
 Register it in Claude Code on another machine:
 
