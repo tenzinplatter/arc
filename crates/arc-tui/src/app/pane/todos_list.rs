@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use arc_notes::NoteRelPath;
 
-    fn manual_dated(text: &str, date: NaiveDate) -> Todo {
+    fn dated(text: &str, date: NaiveDate) -> Todo {
         Todo {
             id: uuid::Uuid::new_v4(),
             text: text.to_string(),
@@ -220,7 +220,7 @@ mod tests {
         }
     }
 
-    fn manual_undated(text: &str) -> Todo {
+    fn undated(text: &str) -> Todo {
         Todo {
             id: uuid::Uuid::new_v4(),
             text: text.to_string(),
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn toggling_asks_for_the_checkbox_to_change() {
-        let todo = manual_undated("tick");
+        let todo = undated("tick");
         let mut todos = vec![todo.clone()];
         let cmds = update(&mut selected(&todos, todo.id), &mut todos, TodosListMsg::ToggleComplete);
         assert!(matches!(cmds[..], [Cmd::SetTodoCompleted { id, to: Checkbox::Done }] if id == todo.id));
@@ -261,10 +261,10 @@ mod tests {
 
     #[test]
     fn deleting_only_removes_todos_from_the_todos_note() {
-        let added = manual_undated("added by hand");
+        let added = undated("added by hand");
         let in_story = Todo {
             file: NoteRelPath::parse("stories/a.md").unwrap(),
-            ..manual_undated("lives in a story")
+            ..undated("lives in a story")
         };
         let mut todos = vec![added.clone(), in_story.clone()];
 
@@ -281,7 +281,7 @@ mod tests {
     fn deleting_removes_todos_from_a_repo_todos_note() {
         let in_repo = Todo {
             file: NoteRelPath::repo_todos(&arc_notes::RepoKey::canonical("gitlab.com/g/sub/arc").unwrap()),
-            ..manual_undated("repo scoped")
+            ..undated("repo scoped")
         };
         let mut todos = vec![in_repo.clone()];
 
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn completed_todo_loaded_at_open_is_hidden() {
-        let incomplete = manual_undated("keep me");
+        let incomplete = undated("keep me");
         let done = completed("hide me");
         let todos = vec![incomplete.clone(), done.clone()];
 
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn toggling_complete_keeps_todo_visible() {
-        let todo = manual_undated("oops");
+        let todo = undated("oops");
         let mut todos = vec![todo.clone()];
         let mut state = TodosListState {
             selected_id: Some(todo.id),
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn refresh_visible_drops_ids_that_disappear() {
-        let todo = manual_undated("gone soon");
+        let todo = undated("gone soon");
         let mut state = TodosListState::new(std::slice::from_ref(&todo));
         assert!(state.visible.contains(&todo.id));
 
@@ -343,11 +343,11 @@ mod tests {
         let next_week = today + chrono::Duration::days(7);
 
         let todos = vec![
-            manual_dated("future", next_week),
-            manual_dated("yesterday", yesterday),
-            manual_undated("no date"),
-            manual_dated("today", today),
-            manual_dated("tomorrow", tomorrow),
+            dated("future", next_week),
+            dated("yesterday", yesterday),
+            undated("no date"),
+            dated("today", today),
+            dated("tomorrow", tomorrow),
         ];
 
         let kinds: Vec<_> = group_todos_by_section(&todos, today)

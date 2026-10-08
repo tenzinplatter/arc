@@ -126,7 +126,7 @@ pub enum Commands {
     #[command(subcommand)]
     Hook(HookCommands),
 
-    /// Open todos from `todos.json` and notes: list, add and complete them.
+    /// Open todos, which live as checkboxes in notes: list, add and complete them.
     #[command(subcommand)]
     Todo(TodoCommands),
 }
@@ -151,7 +151,7 @@ pub enum TodoCommands {
         #[arg(long)]
         global: bool,
     },
-    /// Complete a todo by id, ticking its checkbox when it came from a note.
+    /// Complete a todo by id, ticking its checkbox in its note.
     Done { id: Uuid },
 }
 
