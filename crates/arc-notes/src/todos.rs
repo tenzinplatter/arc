@@ -137,7 +137,7 @@ where
     F: FnOnce(Option<&str>) -> anyhow::Result<String>,
 {
     let _lock = NoteLocks::in_cache(cache_dir).note(file)?;
-    let path = file.abs(notes_dir);
+    let path = file.abs_within(notes_dir)?;
     let before = match std::fs::read_to_string(&path) {
         Ok(content) => Some(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -536,6 +536,20 @@ mod tests {
         assert!(format!("{err:#}").contains("github.com/someone/else"), "{err:#}");
         assert_eq!(read(&notes, "todos/github.com/o/arc.md"), squatter);
         assert!(add_todo(notes.path(), cache.path(), "ship".into(), None).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adding_through_a_symlink_out_of_the_notes_dir_fails_without_writing() {
+        let (notes, cache) = dirs();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), notes.path().join("todos")).unwrap();
+
+        let err = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("outside the notes dir"), "{err:#}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
