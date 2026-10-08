@@ -15,6 +15,18 @@ api_token = "your-token-here"
 # cache_dir = "~/.cache/arc"  # optional
 ```
 
+`arc daemon run` sends todo reminders through the `[notifier]` table. It defaults to desktop notifications over DBus when the table is absent:
+
+```toml
+[notifier]
+kind = "ntfy"                         # "desktop" (default), "ntfy" or "none"
+url = "http://100.114.114.38:2586"
+topic = "arc"
+# token = "tk_..."                    # optional ntfy access token
+```
+
+Use `kind = "none"` on machines that should index notes without sending reminders. Each machine records the reminders it has sent in `cache_dir/fired-reminders`, so restarting the daemon doesn't send them again.
+
 ## Usage
 
 ```
