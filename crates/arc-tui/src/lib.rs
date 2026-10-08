@@ -317,10 +317,14 @@ pub async fn handle_command(
 async fn todo(command: TodoCommands, config: &Config) -> anyhow::Result<()> {
     match command {
         TodoCommands::List { format } => {
-            let listing = arc_context::todo_listing(&env::current_dir()?, &config.cache_dir).await?;
             match format {
-                OutputFormat::Text => listing.todos.iter().for_each(|todo| println!("{todo}")),
-                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&listing)?),
+                OutputFormat::Text => {
+                    arc_context::open_todos(&config.cache_dir).await.iter().for_each(|todo| println!("{todo}"))
+                }
+                OutputFormat::Json => {
+                    let listing = arc_context::todo_listing(&env::current_dir()?, &config.cache_dir).await?;
+                    println!("{}", serde_json::to_string_pretty(&listing)?)
+                }
             }
         }
         TodoCommands::Add { text, date, session, global } => {
