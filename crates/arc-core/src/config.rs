@@ -26,6 +26,12 @@ pub enum NotifierConfig {
     Silent,
 }
 
+impl NotifierConfig {
+    pub fn is_desktop(&self) -> bool {
+        matches!(self, NotifierConfig::Desktop)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub notes_dir: PathBuf,
@@ -49,7 +55,7 @@ struct ConfigFile {
     repositories_directory: String,
     #[serde(default)]
     mux: Mux,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "NotifierConfig::is_desktop")]
     notifier: NotifierConfig,
 }
 
@@ -208,6 +214,13 @@ mod tests {
     #[test]
     fn rejects_unknown_notifier_kind() {
         assert!(parse(&format!("{BASE}[notifier]\nkind = \"pager\"\n")).is_err());
+    }
+
+    #[test]
+    fn desktop_notifier_writes_no_notifier_table() {
+        let written = toml::to_string(&parse(BASE).unwrap()).unwrap();
+        assert!(!written.contains("notifier"), "{written}");
+        assert_eq!(parse(&written).unwrap().notifier, NotifierConfig::Desktop);
     }
 
     #[test]
