@@ -138,6 +138,7 @@ dependencies = [
  "chrono",
  "notify",
  "notify-rust",
+ "reqwest",
  "tempfile",
  "tokio",
  "tracing",

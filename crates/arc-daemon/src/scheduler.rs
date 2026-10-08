@@ -31,6 +31,12 @@ impl Notifier for DBusNotifier {
     }
 }
 
+pub struct NoNotifier;
+
+impl Notifier for NoNotifier {
+    fn notify(&self, _title: &str, _body: &str) {}
+}
+
 #[derive(Clone, Debug)]
 pub struct ScheduledTodo {
     pub id: Uuid,

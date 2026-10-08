@@ -6,13 +6,15 @@ use chrono::{Datelike, Local, TimeZone};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use arc_core::config::Config;
-use crate::scheduler::{DBusNotifier, ScheduledTodo, Scheduler, SystemClock};
+use arc_core::config::{Config, NotifierConfig};
+use crate::ntfy::NtfyNotifier;
+use crate::scheduler::{DBusNotifier, NoNotifier, Notifier, ScheduledTodo, Scheduler, SystemClock};
 use crate::watcher::WatchEvent;
 use arc_notes::NoteRelPath;
 use arc_notes::todos::Todo;
 
 pub mod install;
+pub mod ntfy;
 pub mod scheduler;
 pub mod watcher;
 
@@ -33,7 +35,7 @@ pub async fn run(config: Config) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     let _watcher = watcher::spawn(config.notes_dir.clone(), tx)?;
 
-    let mut sched = Scheduler::new(Arc::new(SystemClock), Arc::new(DBusNotifier));
+    let mut sched = Scheduler::new(Arc::new(SystemClock), build_notifier(&config.notifier)?);
     rebuild_schedule(&config.cache_dir, &mut sched).await?;
     sched.tick();
 
@@ -61,6 +63,26 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
     }
+}
+
+fn build_notifier(config: &NotifierConfig) -> Result<Arc<dyn Notifier>> {
+    let notifier: Arc<dyn Notifier> = match config {
+        NotifierConfig::Desktop => Arc::new(DBusNotifier),
+        NotifierConfig::Ntfy { url, topic, token } => {
+            info!("reminders go to ntfy topic {topic} at {url}");
+            Arc::new(NtfyNotifier::new(
+                tokio::runtime::Handle::current(),
+                url,
+                topic,
+                token.as_deref(),
+            )?)
+        }
+        NotifierConfig::Silent => {
+            info!("reminders disabled by config");
+            Arc::new(NoNotifier)
+        }
+    };
+    Ok(notifier)
 }
 
 fn init_tracing() {

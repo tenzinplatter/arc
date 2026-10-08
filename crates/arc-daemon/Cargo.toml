@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 notify = { workspace = true }
 notify-rust = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
