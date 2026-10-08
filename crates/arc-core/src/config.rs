@@ -17,13 +17,48 @@ pub enum NotifierConfig {
     #[default]
     Desktop,
     Ntfy {
-        url: String,
+        url: NtfyUrl,
         topic: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
     },
     #[serde(rename = "none")]
     Silent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct NtfyUrl(String);
+
+impl NtfyUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for NtfyUrl {
+    type Error = anyhow::Error;
+
+    fn try_from(url: String) -> anyhow::Result<Self> {
+        let after_scheme = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+        let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or_default();
+        if authority.contains('@') {
+            anyhow::bail!("ntfy url must not carry credentials; put the access token in `token` instead");
+        }
+        Ok(Self(url))
+    }
+}
+
+impl From<NtfyUrl> for String {
+    fn from(url: NtfyUrl) -> Self {
+        url.0
+    }
+}
+
+impl fmt::Display for NtfyUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl NotifierConfig {
@@ -225,6 +260,21 @@ mod tests {
 
     const BASE: &str = "notes_dir = \"~/notes\"\napi_token = \"t\"\n";
 
+    fn ntfy_url(url: &str) -> NtfyUrl {
+        NtfyUrl::try_from(url.to_owned()).unwrap()
+    }
+
+    #[test]
+    fn rejects_ntfy_url_with_credentials() {
+        for url in ["https://user:pass@ntfy.sh", "https://user@ntfy.sh/base", "user:pass@ntfy.local:2586"] {
+            let err = parse(&format!("{BASE}[notifier]\nkind = \"ntfy\"\nurl = \"{url}\"\ntopic = \"arc\"\n"))
+                .err()
+                .unwrap_or_else(|| panic!("{url} must not parse"));
+            assert!(err.to_string().contains("credentials"), "{err}");
+        }
+        assert!(NtfyUrl::try_from("https://ntfy.sh/base?next=a@b".to_owned()).is_ok());
+    }
+
     #[test]
     fn notifier_defaults_to_desktop_when_absent() {
         assert_eq!(parse(BASE).unwrap().notifier, NotifierConfig::Desktop);
@@ -251,7 +301,7 @@ mod tests {
         assert_eq!(
             cfg.notifier,
             NotifierConfig::Ntfy {
-                url: "http://ntfy.local:2586".into(),
+                url: ntfy_url("http://ntfy.local:2586"),
                 topic: "arc".into(),
                 token: None,
             }
@@ -267,7 +317,7 @@ mod tests {
         assert_eq!(
             cfg.notifier,
             NotifierConfig::Ntfy {
-                url: "http://ntfy.local".into(),
+                url: ntfy_url("http://ntfy.local"),
                 topic: "arc".into(),
                 token: Some("tk_secret".into()),
             }
@@ -300,7 +350,7 @@ mod tests {
     fn notifier_round_trips_through_toml() {
         let file = ConfigFile {
             notifier: NotifierConfig::Ntfy {
-                url: "http://ntfy.local".into(),
+                url: ntfy_url("http://ntfy.local"),
                 topic: "arc".into(),
                 token: None,
             },
@@ -330,7 +380,7 @@ mod tests {
             repositories_directory: PathBuf::from("/r"),
             mux: Mux::default(),
             notifier: NotifierConfig::Ntfy {
-                url: "http://ntfy.local".into(),
+                url: ntfy_url("http://ntfy.local"),
                 topic: "arc".into(),
                 token: Some("ntfy-secret".into()),
             },

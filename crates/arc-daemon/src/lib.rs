@@ -100,7 +100,7 @@ fn build_notifier(config: &NotifierConfig) -> Result<Arc<dyn Notifier>> {
             info!("reminders go to ntfy topic {topic} at {url}");
             Arc::new(NtfyNotifier::new(
                 tokio::runtime::Handle::current(),
-                url,
+                url.as_str(),
                 topic,
                 token.as_deref(),
             )?)
