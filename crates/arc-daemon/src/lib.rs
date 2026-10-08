@@ -37,10 +37,9 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     let mut index = arc_index::open(&config.cache_dir)?;
-    bootstrap_scan(&config.notes_dir, &config.cache_dir, &mut index).await?;
-
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     let _watcher = watcher::spawn(config.notes_dir.clone(), tx)?;
+    bootstrap_scan(&config.notes_dir, &config.cache_dir, &mut index).await?;
 
     let (fired_log, previously_fired) =
         FiredLog::open(&config.cache_dir, Local::now().date_naive())?;
@@ -182,31 +181,42 @@ async fn handle_event(
     index: &mut arc_index::Connection,
     event: WatchEvent,
 ) -> Result<()> {
+    if refresh_note_from_event(&config.notes_dir, &config.cache_dir, index, &event).await? {
+        mirror_todos(&config.cache_dir, index).await;
+        rebuild_schedule(&config.cache_dir, sched).await?;
+    }
+    Ok(())
+}
+
+async fn refresh_note_from_event(
+    notes_dir: &Path,
+    cache_dir: &Path,
+    index: &mut arc_index::Connection,
+    event: &WatchEvent,
+) -> Result<bool> {
     let abs = event.path();
-    let Some(rel) = NoteRelPath::from_abs(&config.notes_dir, abs) else {
-        warn!("skipping {}: not a UTF-8 path under the notes dir", abs.display());
-        return Ok(());
+    let Some(rel) = NoteRelPath::from_abs(notes_dir, abs) else {
+        warn!("skipping {}: not a note under the notes dir", abs.display());
+        return Ok(false);
     };
 
-    match read_current_content(&event) {
+    match read_current_content(event) {
         Ok(None) => {
-            arc_notes::todos::refresh_note(&config.cache_dir, &rel, None).await?;
+            arc_notes::todos::refresh_note(cache_dir, &rel, None).await?;
             let _ = arc_index::remove_note(index, &rel);
         }
         Ok(Some(content)) => {
-            arc_notes::todos::refresh_note(&config.cache_dir, &rel, Some(&content)).await?;
+            arc_notes::todos::refresh_note(cache_dir, &rel, Some(&content)).await?;
             if let Err(e) = arc_index::reindex_note(index, &rel, &content) {
                 warn!("index {rel} failed: {e:#}");
             }
         }
         Err(e) => {
             warn!("read {} failed: {e}", abs.display());
-            return Ok(());
+            return Ok(false);
         }
     }
-    mirror_todos(&config.cache_dir, index).await;
-    rebuild_schedule(&config.cache_dir, sched).await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn rebuild_schedule(cache_dir: &Path, sched: &mut Scheduler) -> Result<()> {
@@ -259,5 +269,20 @@ mod tests {
             list_notes(notes.path(), notes.path()).unwrap().iter().map(ToString::to_string).collect();
         listed.sort();
         assert_eq!(listed, ["stories/a.md", "todos.md"]);
+    }
+
+    #[tokio::test]
+    async fn a_todo_added_while_the_bootstrap_scan_runs_survives_its_cache_replace() {
+        let (notes, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut index = arc_index::open(cache.path()).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
+        let _watcher = watcher::spawn(notes.path().to_path_buf(), tx).unwrap();
+
+        let added = arc_notes::todos::add_todo(notes.path(), cache.path(), "mid-scan".into(), None).await.unwrap();
+        arc_notes::todos::save_todos(cache.path(), &[]).await.unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        assert!(refresh_note_from_event(notes.path(), cache.path(), &mut index, &event).await.unwrap());
+        assert_eq!(arc_notes::todos::load_todos(cache.path()).await, [added.todo]);
     }
 }
