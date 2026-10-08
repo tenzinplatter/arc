@@ -209,11 +209,38 @@ impl BranchName {
         if name.is_empty() {
             bail!("empty branch name");
         }
+        if let Some(rule) = ref_format_violation(name) {
+            bail!("'{}' isn't a valid git branch name: {rule}", name.escape_debug());
+        }
         Ok(Self(name.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+const FORBIDDEN_REF_CHARS: [char; 7] = ['~', '^', ':', '?', '*', '[', '\\'];
+
+fn ref_format_violation(name: &str) -> Option<&'static str> {
+    if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Some("it contains whitespace or control characters")
+    } else if name.contains(FORBIDDEN_REF_CHARS) {
+        Some("it contains one of ~ ^ : ? * [ \\")
+    } else if name.contains("..") {
+        Some("it contains '..'")
+    } else if name.contains("@{") {
+        Some("it contains '@{'")
+    } else if name == "@" {
+        Some("it is '@'")
+    } else if name.starts_with(['-', '/']) {
+        Some("it starts with '-' or '/'")
+    } else if name.ends_with(['/', '.']) || name.ends_with(".lock") {
+        Some("it ends with '/', '.' or '.lock'")
+    } else if name.split('/').any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock")) {
+        Some("a '/'-separated component is empty, starts with '.' or ends with '.lock'")
+    } else {
+        None
     }
 }
 
@@ -623,9 +650,16 @@ mod tests {
     }
 
     #[test]
-    fn branch_name_rejects_only_empty() {
-        assert!(BranchName::parse("").is_err());
-        assert_eq!(BranchName::parse(" x ").unwrap().as_str(), " x ");
+    fn branch_names_follow_git_ref_format() {
+        for valid in ["main", "me/sc-12/x", "feature/a.b", "fix_sc-12", "v1.2", "a@b", "x-", "UPPER/Case"] {
+            assert_eq!(BranchName::parse(valid).unwrap().as_str(), valid);
+        }
+        for invalid in [
+            "", " x ", "a b", "a\tb", "a\u{7f}", "a..b", "a~1", "a^", "a:b", "a?", "a*", "a[0", "a\\b",
+            "-x", "/x", "x/", "x.", "x.lock", "a/b.lock/c", "a@{1}", "@", "a//b", "a/.hidden",
+        ] {
+            assert!(BranchName::parse(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]
@@ -852,11 +886,11 @@ mod tests {
     fn add_branch_quotes_ambiguous_names() {
         let out = add_branch("---\nid: s\n---\n", &br("true")).unwrap();
         assert!(out.contains("  - \"true\"\n"));
-        let out = add_branch(&out, &br("a: b#c")).unwrap();
-        assert!(out.contains("  - \"a: b#c\"\n"));
+        let out = add_branch(&out, &br("#c")).unwrap();
+        assert!(out.contains("  - \"#c\"\n"));
         assert_eq!(
             Frontmatter::from_note(&out).unwrap().branches,
-            vec!["true", "a: b#c"]
+            vec!["true", "#c"]
         );
         let out = add_branch("---\nbranches: [a]\n---\n", &br("x,y")).unwrap();
         assert_eq!(out, "---\nbranches: [a, \"x,y\"]\n---\n");
