@@ -231,3 +231,20 @@ async fn oversized_bodies_get_413_after_auth() {
         .status();
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+#[tokio::test]
+async fn remote_session_tools_refuse_cwd() {
+    let server = start(None).await;
+    let cwd = std::env::temp_dir().display().to_string();
+    let story = server
+        .rpc(
+            1,
+            "tools/call",
+            json!({"name": "current_story", "arguments": {"cwd": cwd}}),
+            None,
+        )
+        .await;
+    assert_eq!(story["result"]["isError"], true, "{story}");
+    let text = story["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("can't see your filesystem"), "{text}");
+}

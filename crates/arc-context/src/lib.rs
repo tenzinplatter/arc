@@ -190,14 +190,23 @@ pub fn link_stacked_branch(
 #[derive(Debug)]
 pub struct LoggedSession {
     pub story: StoryId,
-    pub head: GitHead,
+    pub head: Option<GitHead>,
     pub note: StoryNote,
     pub entry: SessionEntry,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRequest {
+    Resolve(Checkout),
+    Story {
+        id: StoryId,
+        checkout: Option<Checkout>,
+    },
+}
+
 struct SessionTarget {
     story: StoryId,
-    head: GitHead,
+    head: Option<GitHead>,
     branch: Option<BranchName>,
 }
 
@@ -206,24 +215,21 @@ enum Located {
     Unnoted(SessionTarget),
 }
 
-fn locate_session(
-    checkout: &Checkout,
-    config: &Config,
-    story: Option<StoryId>,
-) -> anyhow::Result<Located> {
-    let head = checkout.head()?;
-    let (id, resolved) = match story {
-        Some(id) => (
-            id,
-            resolve(&head, &config.cache_dir)
-                .ok()
-                .flatten()
-                .filter(|r| r.id == id),
-        ),
-        None => {
+fn locate_session(request: &SessionRequest, config: &Config) -> anyhow::Result<Located> {
+    let (id, head, resolved) = match request {
+        SessionRequest::Resolve(checkout) => {
+            let head = checkout.head()?;
             let resolved = resolve(&head, &config.cache_dir)?
                 .context("the current branch doesn't resolve to a story; pass a story id")?;
-            (resolved.id, Some(resolved))
+            (resolved.id, Some(head), Some(resolved))
+        }
+        SessionRequest::Story { id, checkout } => {
+            let head = checkout.as_ref().map(Checkout::head).transpose()?;
+            let resolved = head
+                .as_ref()
+                .and_then(|head| resolve(head, &config.cache_dir).ok().flatten())
+                .filter(|r| r.id == *id);
+            (*id, head, resolved)
         }
     };
     let conn = arc_index::open(&config.cache_dir)?;
@@ -268,19 +274,25 @@ pub async fn log_session(
     story: Option<StoryId>,
     handoff: Handoff,
 ) -> anyhow::Result<LoggedSession> {
-    log_session_at(&Checkout::Dir(dir.to_path_buf()), config, cache, story, handoff).await
+    let checkout = Checkout::Dir(dir.to_path_buf());
+    let request = match story {
+        Some(id) => SessionRequest::Story {
+            id,
+            checkout: Some(checkout),
+        },
+        None => SessionRequest::Resolve(checkout),
+    };
+    log_session_at(&request, config, cache, handoff).await
 }
 
 pub async fn log_session_at(
-    checkout: &Checkout,
+    request: &SessionRequest,
     config: &Config,
     cache: &mut Cache,
-    story: Option<StoryId>,
     handoff: Handoff,
 ) -> anyhow::Result<LoggedSession> {
-    let (owned_checkout, owned_config) = (checkout.clone(), config.clone());
-    let located =
-        blocking(move || locate_session(&owned_checkout, &owned_config, story)).await?;
+    let (owned_request, owned_config) = (request.clone(), config.clone());
+    let located = blocking(move || locate_session(&owned_request, &owned_config)).await?;
     let (target, note) = match located {
         Located::Noted(target, rel) => (target, StoryNote::Existing(rel)),
         Located::Unnoted(target) => {
@@ -937,7 +949,7 @@ mod tests {
         .unwrap();
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
         assert_eq!(logged.entry.branch, None);
-        assert_eq!(logged.head, GitHead::Branch(br("linked")));
+        assert_eq!(logged.head, Some(GitHead::Branch(br("linked"))));
 
         write_note(
             &env,
@@ -983,7 +995,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(logged.entry.branch, None);
-        assert_eq!(logged.head, GitHead::Branch(br("me/sc-12/x")));
+        assert_eq!(logged.head, Some(GitHead::Branch(br("me/sc-12/x"))));
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
 
         let outside = tempfile::tempdir().unwrap();
@@ -997,7 +1009,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(logged.entry.branch, None);
-        assert_eq!(logged.head, GitHead::NotARepo);
+        assert_eq!(logged.head, Some(GitHead::NotARepo));
         assert_eq!(logged.note, StoryNote::Existing(rel("stories/seven.md")));
     }
 
@@ -1035,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_checkouts_never_run_git() {
+    fn branch_checkouts_resolve_by_name_while_dirs_ask_git() {
         let env = branch_env();
         let checkout = Checkout::Branch(br("me/sc-12/x"));
         assert_eq!(checkout.head().unwrap(), GitHead::Branch(br("me/sc-12/x")));
@@ -1055,11 +1067,15 @@ mod tests {
         let mut cache = cache_for(&env);
         cache.upsert_story(story_seven());
         let checkout = Checkout::Branch(br("tenzin/sc-7/story-seven"));
-        let logged = log_session_at(&checkout, &env.config, &mut cache, None, handoff("one"))
+        let request = SessionRequest::Resolve(checkout.clone());
+        let logged = log_session_at(&request, &env.config, &mut cache, handoff("one"))
             .await
             .unwrap();
         assert_eq!(logged.story, 7.into());
-        assert_eq!(logged.head, GitHead::Branch(br("tenzin/sc-7/story-seven")));
+        assert_eq!(
+            logged.head,
+            Some(GitHead::Branch(br("tenzin/sc-7/story-seven")))
+        );
         assert_eq!(logged.entry.branch, Some(br("tenzin/sc-7/story-seven")));
 
         let context = current_context_at(&checkout, &env.config, &mut cache)
@@ -1077,10 +1093,32 @@ mod tests {
                 .unwrap(),
             None
         );
-        let err = log_session_at(&unlinked, &env.config, &mut cache, None, handoff("x"))
+        let request = SessionRequest::Resolve(unlinked);
+        let err = log_session_at(&request, &env.config, &mut cache, handoff("x"))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("pass a story id"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn story_requests_log_without_any_checkout() {
+        let env = branch_env();
+        let mut cache = cache_for(&env);
+        cache.upsert_story(story_seven());
+        let request = SessionRequest::Story {
+            id: 7.into(),
+            checkout: None,
+        };
+        let logged = log_session_at(&request, &env.config, &mut cache, handoff("phone"))
+            .await
+            .unwrap();
+        assert_eq!(logged.story, 7.into());
+        assert_eq!(logged.head, None);
+        assert_eq!(logged.entry.branch, None);
+        assert!(!logged.entry.header().contains(" · "), "{}", logged.entry.header());
+        let body =
+            std::fs::read_to_string(env.config.notes_dir.join("stories/story-seven.md")).unwrap();
+        assert!(body.contains("**Done:** phone"), "{body}");
     }
 
     #[test]
