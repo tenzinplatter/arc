@@ -17,7 +17,7 @@ fn scan_dir_newest_first(notes_dir: &Path, dir: NoteDir) -> Vec<NoteRelPath> {
     let mut notes: Vec<NoteRelPath> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter(|path| path.is_file())
         .filter_map(|path| NoteRelPath::from_abs(notes_dir, &path))
         .collect();
     notes.sort_by(|a, b| b.cmp(a));

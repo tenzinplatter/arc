@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -119,14 +119,11 @@ async fn bootstrap_scan(
     cache_dir: &Path,
     index: &mut arc_index::Connection,
 ) -> Result<()> {
-    let files = list_markdown(notes_dir)?;
-    info!("bootstrap: scanning {} note files", files.len());
+    let notes = list_notes(notes_dir, notes_dir)?;
+    info!("bootstrap: scanning {} note files", notes.len());
     let mut todos = Vec::new();
-    for abs in files {
-        let Some(rel) = NoteRelPath::from_abs(notes_dir, &abs) else {
-            warn!("bootstrap: skipping {}: not a UTF-8 path under the notes dir", abs.display());
-            continue;
-        };
+    for rel in notes {
+        let abs = rel.abs(notes_dir);
         let content = match std::fs::read_to_string(&abs) {
             Ok(c) => c,
             Err(e) => {
@@ -151,7 +148,7 @@ async fn mirror_todos(cache_dir: &Path, index: &mut arc_index::Connection) {
     }
 }
 
-fn list_markdown(dir: &Path) -> Result<Vec<PathBuf>> {
+fn list_notes(notes_dir: &Path, dir: &Path) -> Result<Vec<NoteRelPath>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -159,12 +156,12 @@ fn list_markdown(dir: &Path) -> Result<Vec<PathBuf>> {
         .map(|entry| {
             let p = entry?.path();
             if p.is_dir() {
-                list_markdown(&p)
+                list_notes(notes_dir, &p)
             } else {
-                Ok(watcher::is_markdown(&p).then_some(p).into_iter().collect())
+                Ok(NoteRelPath::from_abs(notes_dir, &p).into_iter().collect())
             }
         })
-        .collect::<Result<Vec<Vec<PathBuf>>>>()?;
+        .collect::<Result<Vec<Vec<NoteRelPath>>>>()?;
     Ok(nested.concat())
 }
 
@@ -237,4 +234,30 @@ fn scheduled_todo(t: Todo) -> Option<ScheduledTodo> {
         body: t.text,
         fire_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_lists_notes_but_not_sync_artefacts() {
+        let notes = tempfile::tempdir().unwrap();
+        for rel in [
+            "todos.md",
+            "stories/a.md",
+            "todos.sync-conflict-20261009-000000-ABCDEFG.md",
+            ".stversions/todos~20261009-000000.md",
+            ".git/x.md",
+            "stories/a.txt",
+        ] {
+            let abs = notes.path().join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, "- [ ] x\n").unwrap();
+        }
+        let mut listed: Vec<String> =
+            list_notes(notes.path(), notes.path()).unwrap().iter().map(ToString::to_string).collect();
+        listed.sort();
+        assert_eq!(listed, ["stories/a.md", "todos.md"]);
+    }
 }

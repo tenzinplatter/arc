@@ -382,16 +382,15 @@ pub fn scan_story_note(
     notes_dir: &Path,
     story_id: StoryId,
 ) -> Result<Option<(NoteRelPath, String)>> {
-    let mut names: Vec<String> = match std::fs::read_dir(notes_dir.join(NoteDir::Stories)) {
+    let mut notes: Vec<NoteRelPath> = match std::fs::read_dir(notes_dir.join(NoteDir::Stories)) {
         Ok(dir) => dir
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|e| NoteRelPath::from_abs(notes_dir, &e.ok()?.path()))
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    names.sort();
-    for stem in names.iter().filter_map(|n| n.strip_suffix(".md")) {
-        let rel = NoteRelPath::in_dir(NoteDir::Stories, stem);
+    notes.sort();
+    for rel in notes {
         if let Some(body) = read_note(notes_dir, &rel)?
             && links_story(&body, story_id)
         {

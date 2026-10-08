@@ -7,6 +7,8 @@ use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::UnboundedSender;
 
+use arc_notes::NoteRelPath;
+
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
@@ -58,30 +60,25 @@ pub fn spawn(
     let mut watcher = notify::recommended_watcher(notify_tx)?;
     watcher.watch(&notes_dir, RecursiveMode::Recursive)?;
 
-    std::thread::spawn(move || debounce_loop(notify_rx, tx));
+    std::thread::spawn(move || debounce_loop(&notes_dir, notify_rx, tx));
 
     Ok(watcher)
 }
 
-pub(crate) fn is_markdown(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-}
-
 fn debounce_loop(
+    notes_dir: &Path,
     rx: std_mpsc::Receiver<notify::Result<notify::Event>>,
     tx: UnboundedSender<WatchEvent>,
 ) {
     let mut pending: HashMap<PathBuf, Pending> = HashMap::new();
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(ev)) => ingest(&ev, &mut pending),
+            Ok(Ok(ev)) => ingest(notes_dir, &ev, &mut pending),
             Ok(Err(_)) | Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
         for ev in rx.try_iter().flatten() {
-            ingest(&ev, &mut pending);
+            ingest(notes_dir, &ev, &mut pending);
         }
         for ev in take_settled(&mut pending, Instant::now()) {
             if tx.send(ev).is_err() {
@@ -98,9 +95,10 @@ fn take_settled(pending: &mut HashMap<PathBuf, Pending>, now: Instant) -> Vec<Wa
         .collect()
 }
 
-fn ingest(ev: &notify::Event, pending: &mut HashMap<PathBuf, Pending>) {
+fn ingest(notes_dir: &Path, ev: &notify::Event, pending: &mut HashMap<PathBuf, Pending>) {
     let kind = WatchKind::of(&ev.kind);
-    pending.extend(ev.paths.iter().filter(|p| is_markdown(p)).map(|path| {
+    let is_note = |path: &&PathBuf| NoteRelPath::from_abs(notes_dir, path).is_some();
+    pending.extend(ev.paths.iter().filter(is_note).map(|path| {
         (
             path.clone(),
             Pending {

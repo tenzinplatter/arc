@@ -80,6 +80,7 @@ impl NoteRelPath {
 
     pub fn from_abs(notes_dir: &Path, abs: &Path) -> Option<Self> {
         let rel = abs.strip_prefix(notes_dir).ok()?;
+        is_user_note(rel).then_some(())?;
         Self::from_stored(rel.to_str()?.to_owned())
     }
 
@@ -138,6 +139,18 @@ impl NoteRelPath {
     pub fn file_stem(&self) -> Option<&str> {
         Path::new(&self.0).file_stem().and_then(|s| s.to_str())
     }
+}
+
+const SYNC_CONFLICT_MARKER: &str = ".sync-conflict-";
+
+fn is_user_note(rel: &Path) -> bool {
+    let markdown = rel.extension().is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    let visible = rel.components().all(|c| !c.as_os_str().as_encoded_bytes().starts_with(b"."));
+    let conflict_copy = rel
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.contains(SYNC_CONFLICT_MARKER));
+    markdown && visible && !conflict_copy
 }
 
 impl fmt::Display for NoteRelPath {
@@ -254,9 +267,28 @@ mod tests {
         assert!(NoteRelPath::from_abs(notes, Path::new("/home/u/notes/../x/a.md")).is_none());
         assert!(NoteRelPath::from_abs(notes, notes).is_none());
         assert_eq!(
-            NoteRelPath::from_abs(notes, Path::new("/home/u/notes/a.TXT")).unwrap().as_str(),
-            "a.TXT"
+            NoteRelPath::from_abs(notes, Path::new("/home/u/notes/a.MD")).unwrap().as_str(),
+            "a.MD"
         );
+        assert!(NoteRelPath::from_abs(notes, Path::new("/home/u/notes/a.txt")).is_none());
+    }
+
+    #[test]
+    fn from_abs_rejects_sync_and_tool_artefacts() {
+        let notes = Path::new("/home/u/notes");
+        for artefact in [
+            ".stversions/todos~20261009-000000.md",
+            ".stfolder/x.md",
+            ".git/x.md",
+            ".obsidian/workspace.md",
+            ".trash/old.md",
+            "stories/.hidden.md",
+            "todos.sync-conflict-20261009-000000-ABCDEFG.md",
+            "todos/github.com/o/arc.sync-conflict-20261009-000000-ABCDEFG.md",
+        ] {
+            assert!(NoteRelPath::from_abs(notes, &notes.join(artefact)).is_none(), "{artefact}");
+        }
+        assert!(NoteRelPath::from_abs(notes, &notes.join("todos/github.com/o/my.repo.md")).is_some());
     }
 
     #[test]
