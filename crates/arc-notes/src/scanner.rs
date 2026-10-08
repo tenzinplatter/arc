@@ -21,18 +21,10 @@ fn date_token_regex() -> &'static Regex {
     })
 }
 
-fn session_token_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?:^|\s)#session/([A-Za-z0-9_-]+)").expect("session token regex compiles"))
-}
-
-fn take_session(text: &str) -> (Option<SessionId>, String) {
-    let Some(caps) = session_token_regex().captures(text) else {
-        return (None, text.to_owned());
-    };
-    let whole = caps.get(0).expect("group 0 always matches").range();
-    let session = SessionId::parse(&caps[1]).ok();
-    (session, collapse_whitespace(&format!("{} {}", &text[..whole.start], &text[whole.end..])))
+fn take_sessions(text: &str) -> (Option<SessionId>, String) {
+    let (tokens, kept): (Vec<&str>, Vec<&str>) =
+        text.split_whitespace().partition(|word| SessionId::from_token(word).is_some());
+    (tokens.first().and_then(|token| SessionId::from_token(token)), kept.join(" "))
 }
 
 fn collapse_whitespace(s: &str) -> String {
@@ -41,7 +33,7 @@ fn collapse_whitespace(s: &str) -> String {
 
 pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
     let re = date_token_regex();
-    let repo = Frontmatter::from_note(content).and_then(|frontmatter| frontmatter.repo);
+    let repo = Frontmatter::from_note(content).and_then(|frontmatter| frontmatter.repo?.key().cloned());
     let mut occurrences: HashMap<String, u32> = HashMap::new();
 
     content.lines().enumerate().filter_map(|(idx, raw_line)| {
@@ -62,7 +54,7 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
             None => (None, collapse_whitespace(rest)),
         };
 
-        let (session, text) = take_session(&text);
+        let (session, text) = take_sessions(&text);
         let normalized = text.to_lowercase();
         let occurrence = occurrences.entry(normalized.clone()).or_default();
         let id = todo_id(file, &normalized, *occurrence);
@@ -187,10 +179,45 @@ mod tests {
     }
 
     #[test]
+    fn a_session_token_needs_a_boundary_after_its_id() {
+        for line in ["- [ ] ship #session/x.y", "- [ ] ship #session/xé", "- [ ] ship #session/x, then"] {
+            let t = parse_note(line, &f()).remove(0);
+            assert_eq!(t.scope.session, None, "{line}");
+            assert_eq!(t.text, line.trim_start_matches("- [ ] "), "{line}");
+        }
+    }
+
+    #[test]
+    fn every_session_token_is_stripped_and_the_first_wins() {
+        let plain = parse_note("- [ ] ship it", &f());
+        let t = parse_note("- [ ] #session/a ship #session/b it #session/c", &f());
+        assert_eq!(t[0].text, "ship it");
+        assert_eq!(t[0].scope.session, SessionId::parse("a").ok());
+        assert_eq!(t[0].id, plain[0].id);
+    }
+
+    #[test]
+    fn a_session_token_beside_a_date_keeps_both() {
+        let plain = parse_note("- [ ] ship", &f());
+        for line in [
+            "- [ ] ship #session/abc @10-06-2026",
+            "- [ ] ship @10-06-2026 #session/abc",
+            "- [ ] ship #session/abc@10-06-2026",
+        ] {
+            let t = parse_note(line, &f()).remove(0);
+            assert_eq!(t.text, "ship", "{line}");
+            assert_eq!(t.date, NaiveDate::from_ymd_opt(2026, 6, 10), "{line}");
+            assert_eq!(t.scope.session, SessionId::parse("abc").ok(), "{line}");
+            assert_eq!(t.id, plain[0].id, "{line}");
+        }
+    }
+
+    #[test]
     fn todos_take_their_repo_from_the_note_frontmatter() {
-        let t = parse_note("---\nid: arc\nrepo: github.com/o/arc\n---\n- [ ] ship\n", &f());
-        assert_eq!(t[0].scope.repo.as_ref().map(|r| r.as_str()), Some("github.com/o/arc"));
+        let t = parse_note("---\nid: arc\nrepo: https://GitHub.com/O/Arc.git\n---\n- [ ] ship\n", &f());
+        assert_eq!(t[0].scope.repo, crate::RepoKey::canonical("github.com/o/arc"));
         assert_eq!(parse_note("- [ ] ship", &f())[0].scope.repo, None);
+        assert_eq!(parse_note("---\nid: x\nrepo: hearth\n---\n- [ ] ship\n", &f())[0].scope.repo, None);
     }
 
     #[test]

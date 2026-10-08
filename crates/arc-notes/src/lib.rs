@@ -12,4 +12,4 @@ pub use note::frontmatter::{BranchName, SplitNote};
 pub use path::{NoteDir, NoteRelPath};
 pub use todos::{Edited, Todo};
 pub use write::{NoteLock, NoteLocks};
-pub use scope::{RepoKey, SessionId, TodoScope};
+pub use scope::{NoteRepo, RepoKey, SessionId, TodoScope};

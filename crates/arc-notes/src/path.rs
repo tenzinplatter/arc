@@ -4,6 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::scope::{PathSegment, RepoKey};
+
 const TODOS_DIR: &str = "todos";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,8 +98,9 @@ impl NoteRelPath {
         Self("todos.md".into())
     }
 
-    pub fn repo_todos(slug: &str) -> Self {
-        Self(format!("{TODOS_DIR}/{slug}.md"))
+    pub fn repo_todos(repo: &RepoKey) -> Self {
+        let segments: Vec<&str> = repo.segments().map(PathSegment::as_str).collect();
+        Self(format!("{TODOS_DIR}/{}.md", segments.join("/")))
     }
 
     pub fn is_todo_list(&self) -> bool {
@@ -163,6 +166,15 @@ mod tests {
         let names: Vec<&str> = NoteDir::ALL.iter().map(|d| d.as_str()).collect();
         assert_eq!(names, ["daily", "stories", "iterations", "epics", "scratch"]);
         assert_eq!(NoteRelPath::in_dir(NoteDir::Stories, "a-b").as_str(), "stories/a-b.md");
+    }
+
+    #[test]
+    fn nested_repo_todo_notes_are_todo_lists() {
+        let nested = NoteRelPath::repo_todos(&RepoKey::canonical("gitlab.com/g/sub/r").unwrap());
+        assert_eq!(nested.as_str(), "todos/gitlab.com/g/sub/r.md");
+        assert!(nested.is_todo_list());
+        assert!(NoteRelPath::todos().is_todo_list());
+        assert!(!NoteRelPath::parse("stories/todos.md").unwrap().is_todo_list());
     }
 
     #[test]

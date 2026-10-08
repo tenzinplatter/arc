@@ -6,7 +6,7 @@ use crate::checkbox::{Checkbox, split_checkbox};
 use crate::note::frontmatter::Frontmatter;
 use crate::path::NoteRelPath;
 use crate::scanner::{parse_note, render_todo_line};
-use crate::scope::TodoScope;
+use crate::scope::{NoteRepo, RepoKey, TodoScope};
 use crate::write::{self, NoteLocks};
 
 use anyhow::{Context, anyhow, bail};
@@ -179,6 +179,8 @@ fn add_todo_blocking(
     let fresh = scope.repo.clone().map_or_else(Frontmatter::todos, Frontmatter::repo_todos);
     let mut appended_at = 0;
     let edit = edit_note(notes_dir, cache_dir, &file, |content| {
+        let content = content.filter(|existing| !existing.trim().is_empty());
+        content.map_or(Ok(()), |existing| ensure_scoped_to(existing, &file, scope.repo.as_ref()))?;
         let after = appended(content, std::slice::from_ref(&line), &fresh)?;
         appended_at = after.lines().count() as u32;
         Ok(after)
@@ -189,6 +191,19 @@ fn add_todo_blocking(
         .find(|t| t.line == appended_at)
         .ok_or_else(|| anyhow!("added todo is missing from {file}"))?;
     Ok(Edited { todo, todos: edit.todos })
+}
+
+fn ensure_scoped_to(content: &str, file: &NoteRelPath, repo: Option<&RepoKey>) -> anyhow::Result<()> {
+    let found = Frontmatter::from_note(content).and_then(|frontmatter| frontmatter.repo);
+    if found.as_ref().and_then(NoteRepo::key) != repo {
+        let describe = |repo: Option<String>| repo.map_or("no repo".to_owned(), |repo| format!("repo `{repo}`"));
+        bail!(
+            "{file} belongs to {}, not {}; refusing to add a todo to it",
+            describe(found.map(String::from)),
+            describe(repo.map(ToString::to_string)),
+        );
+    }
+    Ok(())
 }
 
 pub async fn add_todo(
@@ -470,22 +485,66 @@ mod tests {
         assert_eq!(added.todos.len(), 2);
     }
 
+    fn repo_scope(key: &str) -> TodoScope {
+        TodoScope { repo: RepoKey::canonical(key), session: None }
+    }
+
     #[tokio::test]
     async fn a_scoped_todo_lands_in_its_repo_file_with_its_session() {
         let (notes, cache) = dirs();
-        let scope = TodoScope {
-            repo: Some(crate::RepoKey::parse("github.com/o/arc").unwrap()),
-            session: Some(crate::SessionId::parse("s1").unwrap()),
-        };
+        let scope = TodoScope { session: Some(crate::SessionId::parse("s1").unwrap()), ..repo_scope("github.com/o/arc") };
         let added = add_todo_in(notes.path(), cache.path(), "ship".into(), date(9), scope.clone()).await.unwrap();
 
-        let written = read(&notes, "todos/o-arc.md");
-        assert!(written.contains("repo: github.com/o/arc"), "{written}");
-        assert!(written.contains("id: o-arc\n"), "{written}");
+        let written = read(&notes, "todos/github.com/o/arc.md");
+        assert!(written.contains("\nrepo: github.com/o/arc\n"), "{written}");
+        assert!(written.contains("id: github.com/o/arc\n"), "{written}");
         assert!(written.ends_with("- [ ] ship @09-10-2026 #session/s1\n"), "{written}");
-        assert_eq!(added.todo.file.as_str(), "todos/o-arc.md");
+        assert_eq!(added.todo.file.as_str(), "todos/github.com/o/arc.md");
         assert_eq!(added.todo.scope, scope);
         assert!(!notes.path().join("todos.md").exists());
+    }
+
+    #[tokio::test]
+    async fn look_alike_repos_get_their_own_files() {
+        let (notes, cache) = dirs();
+        for key in [
+            "github.com/a-b/c",
+            "github.com/a/b-c",
+            "github.com/o/my_repo",
+            "github.com/o/my.repo",
+            "gitlab.com/g/sub/r",
+            "gitlab.com/g/sub-r",
+        ] {
+            let added = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope(key)).await.unwrap();
+            assert_eq!(added.todo.file.as_str(), format!("todos/{key}.md"));
+            assert_eq!(added.todo.scope.repo.map(|repo| repo.to_string()).as_deref(), Some(key));
+        }
+        assert_eq!(load_todos(cache.path()).await.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn adding_to_a_file_owned_by_another_repo_fails_without_writing() {
+        let (notes, cache) = dirs();
+        let squatter = "---\nid: x\nrepo: github.com/someone/else\n---\n- [ ] theirs\n";
+        std::fs::create_dir_all(notes.path().join("todos/github.com/o")).unwrap();
+        std::fs::write(notes.path().join("todos/github.com/o/arc.md"), squatter).unwrap();
+        std::fs::write(notes.path().join("todos.md"), "---\nid: todos\nrepo: github.com/o/arc\n---\n").unwrap();
+
+        let err = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("github.com/someone/else"), "{err:#}");
+        assert_eq!(read(&notes, "todos/github.com/o/arc.md"), squatter);
+        assert!(add_todo(notes.path(), cache.path(), "ship".into(), None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_empty_repo_file_gets_its_frontmatter() {
+        let (notes, cache) = dirs();
+        std::fs::create_dir_all(notes.path().join("todos/github.com/o")).unwrap();
+        std::fs::write(notes.path().join("todos/github.com/o/arc.md"), "").unwrap();
+        let added = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc")).await.unwrap();
+        assert_eq!(added.todo.scope.repo, RepoKey::canonical("github.com/o/arc"));
     }
 
     #[tokio::test]

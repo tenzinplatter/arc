@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::{Mapping, Value};
 
-use crate::scope::RepoKey;
+use crate::scope::{NoteRepo, RepoKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityLink {
@@ -40,7 +40,7 @@ pub struct Frontmatter {
     pub aliases: Vec<String>,
     pub link: EntityLink,
     pub branches: Vec<String>,
-    pub repo: Option<RepoKey>,
+    pub repo: Option<NoteRepo>,
 }
 
 impl Frontmatter {
@@ -106,11 +106,10 @@ impl Frontmatter {
     }
 
     pub fn repo_todos(repo: RepoKey) -> Self {
-        let file = repo.todo_file();
-        let id = file.file_stem().unwrap_or("todos").to_owned();
+        let id = repo.to_string();
         Self {
             note_type: Some("todos".into()),
-            repo: Some(repo),
+            repo: Some(NoteRepo::Key(repo)),
             ..Self::linked(id, EntityLink::None)
         }
     }
@@ -566,7 +565,7 @@ impl From<RawFrontmatter> for Frontmatter {
             aliases: r.aliases,
             link,
             branches: r.branches,
-            repo: r.repo.as_deref().and_then(|repo| RepoKey::parse(repo).ok()),
+            repo: r.repo.map(NoteRepo::parse),
         }
     }
 }
@@ -694,6 +693,27 @@ mod tests {
         let full = format!("{}\nbody", fm.to_block().unwrap());
         let back = Frontmatter::from_note(&full).unwrap();
         assert_eq!(back.branches, vec!["me/sc-42/name"]);
+    }
+
+    #[test]
+    fn a_hand_written_repo_url_reads_as_its_canonical_key() {
+        let fm = Frontmatter::from_note("---\nid: x\nrepo: https://github.com/O/R.git\n---\n").unwrap();
+        assert_eq!(fm.repo.as_ref().and_then(NoteRepo::key), RepoKey::canonical("github.com/o/r").as_ref());
+        assert!(fm.to_block().unwrap().contains("\nrepo: github.com/o/r\n"));
+    }
+
+    #[test]
+    fn an_unrecognised_repo_survives_a_rewrite_but_scopes_nothing() {
+        let fm = Frontmatter::from_note("---\nid: x\nrepo: ../local/thing\n---\n").unwrap();
+        assert_eq!(fm.repo, Some(NoteRepo::Unrecognised("../local/thing".into())));
+        assert!(fm.to_block().unwrap().contains("\nrepo: ../local/thing\n"));
+    }
+
+    #[test]
+    fn repo_todos_are_identified_by_their_key() {
+        let fm = Frontmatter::repo_todos(RepoKey::canonical("git@gitlab.com:g/sub/r.git").unwrap());
+        assert_eq!(fm.id, "gitlab.com/g/sub/r");
+        assert_eq!(fm.to_block().unwrap().matches("gitlab.com/g/sub/r").count(), 2);
     }
 
     #[test]
@@ -1000,7 +1020,7 @@ mod tests {
                 epic_url: Some("https://ep/40".into()),
             },
             branches: vec!["sc-9-branch".into()],
-            repo: Some(RepoKey::parse("github.com/o/r").unwrap()),
+            repo: Some(NoteRepo::parse("https://GitHub.com/O/R.git".into())),
         };
         assert_eq!(
             fm.to_block().unwrap(),

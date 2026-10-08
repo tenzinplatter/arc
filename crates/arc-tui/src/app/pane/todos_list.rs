@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn deleting_removes_todos_from_a_repo_todos_note() {
         let in_repo = Todo {
-            file: NoteRelPath::repo_todos("o-arc"),
+            file: NoteRelPath::repo_todos(&arc_notes::RepoKey::canonical("gitlab.com/g/sub/arc").unwrap()),
             ..manual_undated("repo scoped")
         };
         let mut todos = vec![in_repo.clone()];
