@@ -58,7 +58,7 @@ mcp_token = "a-long-random-string"  # e.g. `openssl rand -hex 32`
 
 Requests are limited to 1 MiB bodies (413 beyond that) and 16 in flight. Only `Host` headers naming loopback, the bound IP or an `--allow-host` name are accepted (403 otherwise), so clients should connect by that IP unless the name is allowed.
 
-A remote server can't see the caller's filesystem: `current_story` and `log_session` reject `cwd` there and take the caller's branch name as `branch` instead. `log_session` also accepts just `story_id` when the caller has no branch.
+A remote server can't see the caller's filesystem: `current_story` and `log_session` reject `cwd` there and take the caller's branch name as `branch` instead. `log_session` also accepts just `story_id` when the caller has no branch. `add_todo` rejects `cwd` too: pass the todo's repo as `repo` (a key like `github.com/owner/repo` or any remote URL of it), or `global: true`; passing neither is an error.
 
 #### Docker
 

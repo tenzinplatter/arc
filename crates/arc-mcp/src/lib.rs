@@ -23,7 +23,7 @@ use arc_context::{
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
-use arc_notes::{BranchName, NoteRelPath, SessionId, TodoScope};
+use arc_notes::{BranchName, NoteRelPath, RepoKey, SessionId, TodoScope};
 use arc_shortcut::api::branch::Branch;
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
@@ -192,13 +192,30 @@ impl Locality {
         }
     }
 
-    fn todo_dir(&self, cwd: Option<&str>) -> Result<PathBuf> {
-        match (self, cwd) {
-            (Locality::Remote, _) => bail!("this server can't see your filesystem; pass `global: true`"),
-            (Locality::Local(server), Some(dir)) => server.work_dir(dir),
-            (Locality::Local(ServerCwd(dir)), None) => Ok(dir.clone()),
+    fn todo_target(&self, cwd: Option<&str>, repo: Option<&str>, global: bool) -> Result<TodoTarget> {
+        match (self, cwd, repo, global) {
+            (_, Some(_), Some(_), _) => bail!("pass either `cwd` or `repo`, not both"),
+            (_, _, Some(_), true) => bail!("pass either `repo` or `global: true`, not both"),
+            (Locality::Remote, Some(_), _, _) => {
+                bail!("this server can't see your filesystem; pass `repo` or `global: true`")
+            }
+            (_, None, Some(repo), false) => RepoKey::canonical(repo)
+                .map(TodoTarget::Repo)
+                .ok_or_else(|| anyhow!("`repo`: '{repo}' is neither a repo key nor a remote URL")),
+            (_, _, None, true) => Ok(TodoTarget::Global),
+            (Locality::Local(server), Some(dir), None, false) => server.work_dir(dir).map(TodoTarget::Checkout),
+            (Locality::Local(ServerCwd(dir)), None, None, false) => Ok(TodoTarget::Checkout(dir.clone())),
+            (Locality::Remote, None, None, false) => bail!(
+                "this arc server runs on another machine and can't see your checkout; pass the todo's repo as `repo`, or `global: true` for a todo that belongs to no repo"
+            ),
         }
     }
+}
+
+enum TodoTarget {
+    Global,
+    Repo(RepoKey),
+    Checkout(PathBuf),
 }
 
 fn session_request(checkout: Option<Checkout>, story: Option<StoryId>) -> Result<SessionRequest> {
@@ -243,13 +260,16 @@ struct AddTodoArgs {
     /// Optional due date, `YYYY-MM-DD`.
     #[serde(default)]
     date: Option<String>,
-    /// Absolute path of your current working directory. The todo is scoped to the repo named by the `origin` remote there. Defaults to the directory the arc MCP server was started in.
+    /// Absolute path of your current working directory. The todo is scoped to the repo named by the `origin` remote there. Defaults to the directory the arc MCP server was started in. Rejected by a remote (HTTP) arc server, which can't see your filesystem; pass `repo` there instead. Don't pass both.
     #[serde(default)]
     cwd: Option<String>,
+    /// The repo the todo belongs to, as a repo key (`github.com/owner/repo`) or any remote URL of it (`git@github.com:owner/repo.git`, `https://github.com/owner/repo`). Scopes the todo without reading a checkout, so it works on a remote (HTTP) arc server.
+    #[serde(default)]
+    repo: Option<String>,
     /// Your Claude Code session id, so the todo shows up as this session's.
     #[serde(default)]
     session_id: Option<String>,
-    /// True for a todo that belongs to no repo; it goes to `todos.md`.
+    /// True for a todo that belongs to no repo; it goes to `todos.md`. Can't be combined with `repo`.
     #[serde(default)]
     global: bool,
 }
@@ -541,11 +561,11 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<host>/<owner>/<repo>.md`, keyed by the `origin` remote of the git repo at `cwd`), or in `todos.md` when `global` is true or `cwd` has no `origin` remote on a host. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
+        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<host>/<owner>/<repo>.md`, keyed by `repo` or by the `origin` remote of the git repo at `cwd`), or in `todos.md` when `global` is true or `cwd` has no `origin` remote on a host. Pass `cwd` or `repo`, not both; `repo` takes a repo key or any remote URL. When the arc server runs on another machine (HTTP transport) it can't see your filesystem and rejects `cwd`: pass `repo`, or `global: true` for a todo that belongs to no repo (passing neither is an error there). Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
     )]
     async fn add_todo(
         &self,
-        Parameters(AddTodoArgs { text, date, cwd, session_id, global }): Parameters<AddTodoArgs>,
+        Parameters(AddTodoArgs { text, date, cwd, repo, session_id, global }): Parameters<AddTodoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let date = match date.as_deref() {
             Some(d) => Some(tool_try!(
@@ -554,10 +574,10 @@ impl ArcMcp {
             None => None,
         };
         let session = tool_try!(session_id.as_deref().map(SessionId::parse).transpose().map_err(|e| format!("{e:#}")));
-        let repo = match global {
-            true => None,
-            false => {
-                let dir = tool_try!(self.locality.todo_dir(cwd.as_deref()));
+        let repo = match tool_try!(self.locality.todo_target(cwd.as_deref(), repo.as_deref(), global)) {
+            TodoTarget::Global => None,
+            TodoTarget::Repo(key) => Some(key),
+            TodoTarget::Checkout(dir) => {
                 let found = tokio::task::spawn_blocking(move || arc_context::git::repo_key(&dir))
                     .await
                     .map_err(internal)?;
@@ -829,18 +849,23 @@ fn create_note(vault: &Vault, title: &str, body: &str, tags: Vec<String>) -> Res
 #[tool_handler]
 impl ServerHandler for ArcMcp {
     fn get_info(&self) -> ServerInfo {
-        let checkout = match self.locality {
-            Locality::Local(_) => {
+        let (checkout, todos) = match self.locality {
+            Locality::Local(_) => (
                 "Always pass your current working directory as `cwd` to both: this server's own \
                  directory is fixed at startup and may be another checkout or worktree. Both echo \
-                 the directory and branch they resolved against"
-            }
-            Locality::Remote => {
+                 the directory and branch they resolved against",
+                "`add_todo` scopes the todo to the repo at `cwd` (pass it too), or to `repo` when \
+                 you name one; pass `global: true` for a todo that belongs to no repo",
+            ),
+            Locality::Remote => (
                 "This server runs on another machine and can't see your filesystem: pass your \
                  current git branch name as `branch` to both (never `cwd`, which is rejected). \
                  `log_session` also accepts just `story_id` when you have no branch, e.g. from a \
-                 phone. Both echo the branch they resolved against"
-            }
+                 phone. Both echo the branch they resolved against",
+                "`add_todo` rejects `cwd` too: pass the todo's repo as `repo` (a key like \
+                 `github.com/owner/repo` or your `origin` remote URL), or `global: true` for a \
+                 todo that belongs to no repo",
+            ),
         };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("arc", env!("CARGO_PKG_VERSION")))
@@ -855,7 +880,7 @@ impl ServerHandler for ArcMcp {
              returns the story for your git branch (story, note, recent \
              `## Sessions` handoffs, open todos); `log_session` records a handoff (done / state / \
              next / open questions) in that story's note — call it at milestones and before \
-             ending a session. {checkout}. `active_stories` lists what the arc TUI last \
+             ending a session. {checkout}. {todos}. `active_stories` lists what the arc TUI last \
              cached for the current iteration(s) and may be stale (use the Shortcut MCP \
              for live search); `get_story` refetches the story from Shortcut, falling back \
              to the cache when it's unreachable. Shortcut writes (creating stories, state changes, \
@@ -1456,6 +1481,90 @@ mod tests {
         );
         assert!(mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
         assert!(!mcp.claim_lookup_refresh(start + LOOKUP_REFRESH_INTERVAL));
+    }
+
+    fn todo_args(v: Value) -> Parameters<AddTodoArgs> {
+        Parameters(serde_json::from_value(v).unwrap())
+    }
+
+    fn notes_file(mcp: &ArcMcp, rel: &str) -> Option<String> {
+        std::fs::read_to_string(mcp.config.notes_dir.join(rel)).ok()
+    }
+
+    #[tokio::test]
+    async fn local_add_todo_scopes_to_the_origin_of_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = git_repo_on(tmp.path(), "main") else { return };
+        let origin = ["remote", "add", "origin", "git@github.com:Owner/Thing.git"];
+        assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(origin).status().unwrap().success());
+        let mcp = ArcMcp::new(config_in(tmp.path()), tmp.path().to_path_buf());
+
+        let cwd = repo.display().to_string();
+        let (is_error, texts) =
+            result_texts(&mcp.add_todo(todo_args(json!({"text": "ship", "cwd": cwd}))).await.unwrap());
+        assert!(!is_error && texts[0].ends_with(" to todos/github.com/owner/thing.md"), "{texts:?}");
+        assert!(notes_file(&mcp, "todos/github.com/owner/thing.md").unwrap().contains("- [ ] ship"));
+    }
+
+    #[tokio::test]
+    async fn remote_add_todo_scopes_to_a_repo_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(config_in(tmp.path()));
+        let args = json!({"text": "ship", "repo": "git@github.com:Example/Demo.git"});
+        let (is_error, texts) = result_texts(&mcp.add_todo(todo_args(args)).await.unwrap());
+        assert!(!is_error && texts[0].ends_with(" to todos/github.com/example/demo.md"), "{texts:?}");
+        let note = notes_file(&mcp, "todos/github.com/example/demo.md").unwrap();
+        assert!(note.contains("repo: github.com/example/demo") && note.contains("- [ ] ship"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn remote_add_todo_rejects_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(config_in(tmp.path()));
+        let cwd = tmp.path().display().to_string();
+        for args in [json!({"text": "ship", "cwd": cwd}), json!({"text": "ship", "cwd": cwd, "global": true})] {
+            let (is_error, texts) = result_texts(&mcp.add_todo(todo_args(args)).await.unwrap());
+            assert!(is_error && texts[0].contains("can't see your filesystem"), "{texts:?}");
+        }
+        assert!(!mcp.config.notes_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn remote_add_todo_needs_a_repo_or_global() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = ArcMcp::remote(config_in(tmp.path()));
+        let (is_error, texts) = result_texts(&mcp.add_todo(todo_args(json!({"text": "ship"}))).await.unwrap());
+        assert!(is_error && texts[0].contains("`repo`") && texts[0].contains("`global: true`"), "{texts:?}");
+        assert!(!mcp.config.notes_dir.exists());
+
+        let (is_error, texts) =
+            result_texts(&mcp.add_todo(todo_args(json!({"text": "ship", "global": true}))).await.unwrap());
+        assert!(!is_error && texts[0].ends_with(" to todos.md"), "{texts:?}");
+    }
+
+    #[test]
+    fn add_todo_targets_follow_the_argument_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = Locality::Local(ServerCwd(tmp.path().to_path_buf()));
+        let cwd = tmp.path().display().to_string();
+        let target = |locality: &Locality, cwd: Option<&str>, repo: Option<&str>, global: bool| {
+            locality.todo_target(cwd, repo, global).map_err(|e| e.to_string())
+        };
+        for locality in [&local, &Locality::Remote] {
+            let err = |cwd, repo, global| target(locality, cwd, repo, global).err().unwrap();
+            assert!(err(Some(&cwd), Some("github.com/o/r"), false).contains("not both"));
+            assert!(err(None, Some("github.com/o/r"), true).contains("not both"));
+            assert!(err(None, Some("not a repo"), false).contains("`repo`"));
+            assert!(matches!(target(locality, None, None, true), Ok(TodoTarget::Global)));
+            assert!(matches!(
+                target(locality, None, Some("https://GitHub.com/o/r"), false),
+                Ok(TodoTarget::Repo(key)) if key.to_string() == "github.com/o/r"
+            ));
+        }
+        assert!(matches!(target(&local, None, None, false), Ok(TodoTarget::Checkout(dir)) if dir == tmp.path()));
+        assert!(matches!(target(&local, Some(&cwd), None, false), Ok(TodoTarget::Checkout(dir)) if dir == tmp.path()));
+        assert!(matches!(target(&local, Some(&cwd), None, true), Ok(TodoTarget::Global)));
+        assert!(target(&local, Some("relative"), None, false).is_err());
     }
 
     #[tokio::test]
