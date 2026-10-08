@@ -20,7 +20,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::ArcMcp;
 
 pub const MCP_PATH: &str = "/mcp";
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
@@ -31,7 +31,7 @@ pub enum Transport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Auth {
+pub(crate) enum Auth {
     Bearer(BearerToken),
     LoopbackOnly,
 }
@@ -61,10 +61,6 @@ impl HttpBinding {
             extra_hosts,
             auth,
         })
-    }
-
-    pub fn auth(&self) -> &Auth {
-        &self.auth
     }
 
     pub async fn listen(self) -> Result<HttpListener> {
@@ -203,12 +199,12 @@ mod tests {
     #[test]
     fn only_loopback_bindings_may_skip_the_token() {
         assert_eq!(
-            binding("127.0.0.1:0", None).unwrap().auth(),
-            &Auth::LoopbackOnly
+            binding("127.0.0.1:0", None).unwrap().auth,
+            Auth::LoopbackOnly
         );
         assert_eq!(
-            binding("[::1]:0", None).unwrap().auth(),
-            &Auth::LoopbackOnly
+            binding("[::1]:0", None).unwrap().auth,
+            Auth::LoopbackOnly
         );
         let err = binding("100.114.114.38:8765", None)
             .unwrap_err()
@@ -216,7 +212,7 @@ mod tests {
         assert!(err.contains("mcp_token"), "{err}");
         assert!(binding("0.0.0.0:8765", None).is_err());
         assert!(matches!(
-            binding("100.114.114.38:8765", Some("t")).unwrap().auth(),
+            binding("100.114.114.38:8765", Some("t")).unwrap().auth,
             Auth::Bearer(_)
         ));
     }

@@ -102,7 +102,7 @@ pub async fn save_todos(cache_dir: &Path, todos: &[Todo]) -> anyhow::Result<()> 
     transform_with_lock(cache_dir, move |_| todos).await.map(drop)
 }
 
-pub async fn transform_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
+async fn transform_with_lock<F>(cache_dir: &Path, f: F) -> anyhow::Result<Vec<Todo>>
 where
     F: FnOnce(Vec<Todo>) -> Vec<Todo> + Send + 'static,
 {

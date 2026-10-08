@@ -73,12 +73,12 @@ pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
     .collect()
 }
 
-pub fn todo_id(file: &NoteRelPath, normalized_text: &str, occurrence: u32) -> Uuid {
+fn todo_id(file: &NoteRelPath, normalized_text: &str, occurrence: u32) -> Uuid {
     let key = format!("{file}\0{normalized_text}\0{occurrence}");
     Uuid::new_v5(&TODO_ID_NAMESPACE, key.as_bytes())
 }
 
-pub fn render_todo_line(state: Checkbox, text: &str, date: Option<NaiveDate>, session: Option<&SessionId>) -> String {
+pub(crate) fn render_todo_line(state: Checkbox, text: &str, date: Option<NaiveDate>, session: Option<&SessionId>) -> String {
     let date = date.map(|date| format!(" @{}", date.format("%d-%m-%Y"))).unwrap_or_default();
     let session = session.map(|session| format!(" {}", session.token())).unwrap_or_default();
     format!("{}{}{date}{session}", state.marker(), collapse_whitespace(text))
