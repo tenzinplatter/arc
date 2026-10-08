@@ -41,6 +41,29 @@ arc migrate       # one-time: move shortcut-notes config/cache/notes to arc
 
 Any note whose frontmatter has `repo: github.com/<owner>/<repo>` scopes its checkboxes to that repo. The key comes from the `origin` remote, lowercased and stripped of scheme, credentials, port and `.git`, so every clone and worktree of it shares the key; a repo without a hosted `origin` gets global todos. A `#session/<id>` token on a checkbox line ties the todo to the Claude Code session that added it.
 
+### MCP over HTTP
+
+`arc mcp` serves the notes/todos/stories tools over stdio. `arc mcp --http ADDR` serves the same tools over MCP streamable HTTP at `http://ADDR/mcp`, so agents on other machines can use a shared notes dir:
+
+```
+arc mcp --http 100.114.114.38:8765                     # bind exactly this address, e.g. the host's Tailscale IP
+arc mcp --http 100.114.114.38:8765 --allow-host raspi  # also accept a MagicDNS name in the Host header
+```
+
+It binds only the address given; keep it on the tailnet. Set `mcp_token` in the config to require `Authorization: Bearer <token>` on every request (requests without it get 401):
+
+```toml
+mcp_token = "a-long-random-string"  # e.g. `openssl rand -hex 32`
+```
+
+A remote server can't see the caller's git checkout, so `current_story` and `log_session` take the caller's branch name as `branch` (plus `story_id` when the branch doesn't name or link the story) and reject calls that pass neither `cwd` nor `branch`.
+
+Register it in Claude Code on another machine:
+
+```
+claude mcp add --transport http arc-remote http://100.114.114.38:8765/mcp --header "Authorization: Bearer <token>"
+```
+
 ### Keys
 
 | Key | Action |
