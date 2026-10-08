@@ -134,7 +134,7 @@ pub enum TodoCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
-    /// Add a todo, scoped to the current directory's git repo unless `--global`.
+    /// Add a todo, scoped to the repo named by the current directory's `origin` remote; global without one or with `--global`.
     Add {
         text: String,
         /// Due date, `YYYY-MM-DD`.
