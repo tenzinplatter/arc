@@ -20,7 +20,7 @@ api_token = "your-token-here"
 ```toml
 [notifier]
 kind = "ntfy"                         # "desktop" (default), "ntfy" or "none"
-url = "http://100.114.114.38:2586"
+url = "http://ntfy.example.ts.net:2586"
 topic = "arc"
 # token = "tk_..."                    # optional ntfy access token
 ```
