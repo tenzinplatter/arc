@@ -147,7 +147,7 @@ pub enum TodoCommands {
         /// The Claude Code session that asked for it.
         #[arg(long)]
         session: Option<SessionId>,
-        /// Add it to `todos.md` instead of the repo's todo note.
+        /// Add it to the global `todos.md`.
         #[arg(long)]
         global: bool,
     },
@@ -173,9 +173,8 @@ pub enum HookCommands {
 
 #[derive(Args)]
 pub struct McpArgs {
-    /// Serve MCP over streamable HTTP at `http://<ADDR>/mcp` instead of stdio. Binds exactly this
-    /// address (e.g. a Tailscale IP and port) and requires `Authorization: Bearer <mcp_token>` from
-    /// the config; only a loopback address may be served without `mcp_token`.
+    /// Serve MCP over streamable HTTP at `http://<ADDR>/mcp`, bound to exactly this address and
+    /// requiring `Authorization: Bearer <mcp_token>`; only loopback may be served without one.
     #[arg(long, value_name = "ADDR")]
     pub http: Option<SocketAddr>,
     /// Extra `Host` header value to accept over HTTP, such as a MagicDNS name. Loopback names and
