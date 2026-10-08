@@ -11,7 +11,7 @@ pub enum Mux {
     Zellij,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NotifierConfig {
     #[default]
@@ -32,7 +32,22 @@ impl NotifierConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for NotifierConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NotifierConfig::Desktop => f.write_str("Desktop"),
+            NotifierConfig::Ntfy { url, topic, token } => f
+                .debug_struct("Ntfy")
+                .field("url", url)
+                .field("topic", topic)
+                .field("token", &token.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            NotifierConfig::Silent => f.write_str("Silent"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Config {
     pub notes_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -42,6 +57,21 @@ pub struct Config {
     pub mux: Mux,
     pub notifier: NotifierConfig,
     pub mcp_token: Option<BearerToken>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("notes_dir", &self.notes_dir)
+            .field("cache_dir", &self.cache_dir)
+            .field("api_token", &"<redacted>")
+            .field("editor", &self.editor)
+            .field("repositories_directory", &self.repositories_directory)
+            .field("mux", &self.mux)
+            .field("notifier", &self.notifier)
+            .field("mcp_token", &self.mcp_token)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -284,6 +314,29 @@ mod tests {
             assert!(!token.matches(wrong), "{wrong}");
         }
         assert_eq!(format!("{token:?}"), "BearerToken(<redacted>)");
+    }
+
+    #[test]
+    fn config_debug_redacts_secrets() {
+        let config = Config {
+            notes_dir: PathBuf::from("/n"),
+            cache_dir: PathBuf::from("/c"),
+            api_token: "shortcut-secret".into(),
+            editor: String::new(),
+            repositories_directory: PathBuf::from("/r"),
+            mux: Mux::default(),
+            notifier: NotifierConfig::Ntfy {
+                url: "http://ntfy.local".into(),
+                topic: "arc".into(),
+                token: Some("ntfy-secret".into()),
+            },
+            mcp_token: Some(BearerToken::parse("mcp-secret").unwrap()),
+        };
+        let debug = format!("{config:?}");
+        for secret in ["shortcut-secret", "mcp-secret", "ntfy-secret"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+        assert!(debug.contains("\"/n\"") && debug.contains("http://ntfy.local"), "{debug}");
     }
 
     #[test]
