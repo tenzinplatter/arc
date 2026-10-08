@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS todos (
     completed INTEGER,
     file      TEXT,
     line      INTEGER,
-    position  INTEGER
+    position  INTEGER,
+    repo      TEXT,
+    session   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_note_tags_path ON note_tags(path);
 CREATE INDEX IF NOT EXISTS idx_note_branches_branch ON note_branches(branch);
@@ -64,8 +66,21 @@ pub fn open_waiting(cache_dir: &Path, busy: std::time::Duration) -> Result<Conne
         .with_context(|| format!("open index at {}", db_path(cache_dir).display()))?;
     conn.busy_timeout(busy)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    drop_todos_without_scope(&conn)?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
+}
+
+fn drop_todos_without_scope(conn: &Connection) -> Result<()> {
+    let (columns, scope_columns): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE name IN ('repo', 'session')) FROM pragma_table_info('todos')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if columns > 0 && scope_columns < 2 {
+        conn.execute_batch("DROP TABLE todos")?;
+    }
+    Ok(())
 }
 
 pub fn open_readonly(cache_dir: &Path) -> Result<Connection> {
@@ -204,8 +219,8 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     tx.execute("DELETE FROM todos", [])?;
     for (pos, t) in todos.iter().enumerate() {
         tx.execute(
-            "INSERT INTO todos (id, text, date, completed, file, line, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO todos (id, text, date, completed, file, line, position, repo, session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 t.id.to_string(),
                 t.text,
@@ -214,6 +229,8 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
                 t.file.as_str(),
                 t.line,
                 pos as i64,
+                t.scope.repo.as_ref().map(ToString::to_string),
+                t.scope.session.as_ref().map(|session| session.as_str()),
             ],
         )?;
     }
@@ -413,6 +430,7 @@ fn note_title(content: &str, fm: Option<&Frontmatter>) -> Option<String> {
 mod tests {
     use super::*;
 
+    use arc_notes::{RepoKey, SessionId, TodoScope};
     use chrono::NaiveDate;
 
     fn rel(s: &str) -> NoteRelPath {
@@ -770,7 +788,7 @@ mod tests {
                 row(
                     "table",
                     "todos",
-                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER\n)"),
+                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER,\n    repo      TEXT,\n    session   TEXT\n)"),
                 ),
             ]
         );
@@ -778,6 +796,31 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(journal_mode, "wal");
+    }
+
+    #[test]
+    fn a_todos_table_from_before_scopes_is_rebuilt_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        Connection::open(db_path(tmp.path()))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE todos (id TEXT PRIMARY KEY, text TEXT, date TEXT, completed INTEGER, file TEXT, line INTEGER, position INTEGER);
+                 INSERT INTO todos (id, text) VALUES ('stale', 'old row');",
+            )
+            .unwrap();
+
+        let mut conn = open(tmp.path()).unwrap();
+        mirror_todos(&mut conn, &arc_notes::scanner::parse_note("- [ ] fresh #session/s", &rel("todos.md"))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&select(&conn, "SELECT text, repo, session FROM todos").unwrap()).unwrap(),
+            serde_json::json!([{"text": "fresh", "repo": null, "session": "s"}])
+        );
+        drop(conn);
+        let reopened = open(tmp.path()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&select(&reopened, "SELECT text FROM todos").unwrap()).unwrap(),
+            serde_json::json!([{"text": "fresh"}])
+        );
     }
 
     #[test]
@@ -805,7 +848,10 @@ mod tests {
                 completed: true,
                 file: rel("stories/sc-7.md"),
                 line: 12,
-                scope: Default::default(),
+                scope: TodoScope {
+                    repo: RepoKey::canonical("github.com/o/r"),
+                    session: SessionId::parse("s-1").ok(),
+                },
             },
         ]).unwrap();
         let rows = |sql: &str| -> serde_json::Value { serde_json::from_str(&select(&conn, sql).unwrap()).unwrap() };
@@ -829,8 +875,8 @@ mod tests {
         assert_eq!(
             rows("SELECT * FROM todos ORDER BY position"),
             serde_json::json!([
-                {"id": "00000000-0000-0000-0000-000000000001", "text": "added", "date": "2026-05-31", "completed": 0, "file": "todos.md", "line": 4, "position": 0},
-                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "file": "stories/sc-7.md", "line": 12, "position": 1}
+                {"id": "00000000-0000-0000-0000-000000000001", "text": "added", "date": "2026-05-31", "completed": 0, "file": "todos.md", "line": 4, "position": 0, "repo": null, "session": null},
+                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "file": "stories/sc-7.md", "line": 12, "position": 1, "repo": "github.com/o/r", "session": "s-1"}
             ])
         );
     }

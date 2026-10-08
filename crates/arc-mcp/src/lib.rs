@@ -187,7 +187,7 @@ struct AddTodoArgs {
     /// Optional due date, `YYYY-MM-DD`.
     #[serde(default)]
     date: Option<String>,
-    /// Absolute path of your current working directory. The todo is scoped to the git repo there. Defaults to the directory the arc MCP server was started in.
+    /// Absolute path of your current working directory. The todo is scoped to the repo named by the `origin` remote there. Defaults to the directory the arc MCP server was started in.
     #[serde(default)]
     cwd: Option<String>,
     /// Your Claude Code session id, so the todo shows up as this session's.
@@ -306,7 +306,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, text, date, completed, file, line, position). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
+        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, text, date, completed, file, line, position, repo['<host>/<owner>/<repo>'|null], session). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
     )]
     async fn query(
         &self,
@@ -475,7 +475,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<owner>-<repo>.md`) for the git repo at `cwd`, or in `todos.md` when `global` is true or `cwd` is no repo. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
+        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<host>/<owner>/<repo>.md`, keyed by the `origin` remote of the git repo at `cwd`), or in `todos.md` when `global` is true or `cwd` has no `origin` remote on a host. Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
     )]
     async fn add_todo(
         &self,
