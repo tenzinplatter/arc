@@ -211,6 +211,8 @@ mod tests {
     fn dated(text: &str, date: NaiveDate) -> Todo {
         Todo {
             id: uuid::Uuid::new_v4(),
+            parent: None,
+            description: None,
             text: text.to_string(),
             date: Some(date),
             completed: false,
@@ -223,6 +225,8 @@ mod tests {
     fn undated(text: &str) -> Todo {
         Todo {
             id: uuid::Uuid::new_v4(),
+            parent: None,
+            description: None,
             text: text.to_string(),
             date: None,
             completed: false,
@@ -235,6 +239,8 @@ mod tests {
     fn completed(text: &str) -> Todo {
         Todo {
             id: uuid::Uuid::new_v4(),
+            parent: None,
+            description: None,
             text: text.to_string(),
             date: None,
             completed: true,

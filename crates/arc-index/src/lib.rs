@@ -34,15 +34,17 @@ CREATE TABLE IF NOT EXISTS note_branches (
     branch TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS todos (
-    id        TEXT PRIMARY KEY,
-    text      TEXT,
-    date      TEXT,
-    completed INTEGER,
-    file      TEXT,
-    line      INTEGER,
-    position  INTEGER,
-    repo      TEXT,
-    session   TEXT
+    id          TEXT PRIMARY KEY,
+    parent      TEXT,
+    text        TEXT,
+    description TEXT,
+    date        TEXT,
+    completed   INTEGER,
+    file        TEXT,
+    line        INTEGER,
+    position    INTEGER,
+    repo        TEXT,
+    session     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_note_tags_path ON note_tags(path);
 CREATE INDEX IF NOT EXISTS idx_note_branches_branch ON note_branches(branch);
@@ -66,18 +68,18 @@ pub fn open_waiting(cache_dir: &Path, busy: std::time::Duration) -> Result<Conne
         .with_context(|| format!("open index at {}", db_path(cache_dir).display()))?;
     conn.busy_timeout(busy)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    drop_todos_without_scope(&conn)?;
+    drop_outdated_todos(&conn)?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
 
-fn drop_todos_without_scope(conn: &Connection) -> Result<()> {
-    let (columns, scope_columns): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COUNT(*) FILTER (WHERE name IN ('repo', 'session')) FROM pragma_table_info('todos')",
+fn drop_outdated_todos(conn: &Connection) -> Result<()> {
+    let (columns, current_columns): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE name IN ('repo', 'session', 'parent', 'description')) FROM pragma_table_info('todos')",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if columns > 0 && scope_columns < 2 {
+    if columns > 0 && current_columns < 4 {
         conn.execute_batch("DROP TABLE todos")?;
     }
     Ok(())
@@ -219,11 +221,13 @@ pub fn mirror_todos(conn: &mut Connection, todos: &[Todo]) -> Result<()> {
     tx.execute("DELETE FROM todos", [])?;
     for (pos, t) in todos.iter().enumerate() {
         tx.execute(
-            "INSERT INTO todos (id, text, date, completed, file, line, position, repo, session)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO todos (id, parent, text, description, date, completed, file, line, position, repo, session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 t.id.to_string(),
+                t.parent.map(|parent| parent.to_string()),
                 t.text,
+                t.description.as_ref().map(|description| description.as_str()),
                 t.date.map(|d| d.to_string()),
                 t.completed as i64,
                 t.file.as_str(),
@@ -787,7 +791,7 @@ mod tests {
                 row(
                     "table",
                     "todos",
-                    Some("CREATE TABLE todos (\n    id        TEXT PRIMARY KEY,\n    text      TEXT,\n    date      TEXT,\n    completed INTEGER,\n    file      TEXT,\n    line      INTEGER,\n    position  INTEGER,\n    repo      TEXT,\n    session   TEXT\n)"),
+                    Some("CREATE TABLE todos (\n    id          TEXT PRIMARY KEY,\n    parent      TEXT,\n    text        TEXT,\n    description TEXT,\n    date        TEXT,\n    completed   INTEGER,\n    file        TEXT,\n    line        INTEGER,\n    position    INTEGER,\n    repo        TEXT,\n    session     TEXT\n)"),
                 ),
             ]
         );
@@ -798,27 +802,31 @@ mod tests {
     }
 
     #[test]
-    fn a_todos_table_from_before_scopes_is_rebuilt_on_open() {
+    fn an_outdated_todos_table_is_rebuilt_on_open() {
         let tmp = tempfile::tempdir().unwrap();
         Connection::open(db_path(tmp.path()))
             .unwrap()
             .execute_batch(
-                "CREATE TABLE todos (id TEXT PRIMARY KEY, text TEXT, date TEXT, completed INTEGER, file TEXT, line INTEGER, position INTEGER);
+                "CREATE TABLE todos (id TEXT PRIMARY KEY, text TEXT, date TEXT, completed INTEGER, file TEXT, line INTEGER, position INTEGER, repo TEXT, session TEXT);
                  INSERT INTO todos (id, text) VALUES ('stale', 'old row');",
             )
             .unwrap();
 
         let mut conn = open(tmp.path()).unwrap();
-        mirror_todos(&mut conn, &arc_notes::scanner::parse_note("- [ ] fresh #session/s", &rel("todos.md"))).unwrap();
+        let todos = arc_notes::scanner::parse_note("- [ ] fresh #session/s\n  why\n  - [ ] child", &rel("todos.md"));
+        mirror_todos(&mut conn, &todos).unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&select(&conn, "SELECT text, repo, session FROM todos").unwrap()).unwrap(),
-            serde_json::json!([{"text": "fresh", "repo": null, "session": "s"}])
+            serde_json::from_str::<serde_json::Value>(&select(&conn, "SELECT text, description, parent, repo, session FROM todos").unwrap()).unwrap(),
+            serde_json::json!([
+                {"text": "fresh", "description": "why", "parent": null, "repo": null, "session": "s"},
+                {"text": "child", "description": null, "parent": todos[0].id.to_string(), "repo": null, "session": null},
+            ])
         );
         drop(conn);
         let reopened = open(tmp.path()).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&select(&reopened, "SELECT text FROM todos").unwrap()).unwrap(),
-            serde_json::json!([{"text": "fresh"}])
+            serde_json::json!([{"text": "fresh"}, {"text": "child"}])
         );
     }
 
@@ -833,6 +841,8 @@ mod tests {
         mirror_todos(&mut conn, &[
             Todo {
                 id: uuid::Uuid::from_u128(1),
+                parent: None,
+                description: None,
                 text: "added".into(),
                 date: NaiveDate::from_ymd_opt(2026, 5, 31),
                 completed: false,
@@ -842,6 +852,8 @@ mod tests {
             },
             Todo {
                 id: uuid::Uuid::from_u128(2),
+                parent: Some(uuid::Uuid::from_u128(1)),
+                description: arc_notes::Description::parse("why").unwrap(),
                 text: "parsed".into(),
                 date: None,
                 completed: true,
@@ -874,8 +886,8 @@ mod tests {
         assert_eq!(
             rows("SELECT * FROM todos ORDER BY position"),
             serde_json::json!([
-                {"id": "00000000-0000-0000-0000-000000000001", "text": "added", "date": "2026-05-31", "completed": 0, "file": "todos.md", "line": 4, "position": 0, "repo": null, "session": null},
-                {"id": "00000000-0000-0000-0000-000000000002", "text": "parsed", "date": null, "completed": 1, "file": "stories/sc-7.md", "line": 12, "position": 1, "repo": "github.com/o/r", "session": "s-1"}
+                {"id": "00000000-0000-0000-0000-000000000001", "parent": null, "text": "added", "description": null, "date": "2026-05-31", "completed": 0, "file": "todos.md", "line": 4, "position": 0, "repo": null, "session": null},
+                {"id": "00000000-0000-0000-0000-000000000002", "parent": "00000000-0000-0000-0000-000000000001", "text": "parsed", "description": "why", "date": null, "completed": 1, "file": "stories/sc-7.md", "line": 12, "position": 1, "repo": "github.com/o/r", "session": "s-1"}
             ])
         );
     }

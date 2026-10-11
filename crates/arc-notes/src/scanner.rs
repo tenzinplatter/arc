@@ -7,6 +7,7 @@ use regex::Regex;
 use uuid::Uuid;
 
 use crate::checkbox::{Checkbox, split_checkbox};
+use crate::description::{Description, leading_width};
 use crate::note::frontmatter::Frontmatter;
 use crate::path::NoteRelPath;
 use crate::scope::{SessionId, TodoScope};
@@ -31,46 +32,78 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+struct OpenTodo {
+    indent: usize,
+    at: usize,
+}
+
 pub fn parse_note(content: &str, file: &NoteRelPath) -> Vec<Todo> {
-    let re = date_token_regex();
     let repo = Frontmatter::from_note(content).and_then(|frontmatter| frontmatter.repo?.key().cloned());
     let mut occurrences: HashMap<String, u32> = HashMap::new();
+    let mut todos: Vec<Todo> = Vec::new();
+    let mut bodies: Vec<Vec<&str>> = Vec::new();
+    let mut open: Vec<OpenTodo> = Vec::new();
 
-    content.lines().enumerate().filter_map(|(idx, raw_line)| {
-        let line_no = (idx as u32) + 1;
-        let (checkbox, rest) = split_checkbox(raw_line.trim_start())?;
-
-        let (date, text) = match re
-            .captures(rest)
-            .and_then(|c| {
-                let m = c.get(0)?;
-                let d = NaiveDate::parse_from_str(&c[1], "%d-%m-%Y").ok()?;
-                Some((d, m.range()))
-            }) {
-            Some((d, range)) => (
-                Some(d),
-                collapse_whitespace(&format!("{}{}", &rest[..range.start], &rest[range.end..])),
-            ),
-            None => (None, collapse_whitespace(rest)),
+    for (idx, raw_line) in content.lines().enumerate() {
+        if raw_line.trim().is_empty() {
+            open.clear();
+            continue;
+        }
+        let indent = leading_width(raw_line);
+        while open.last().is_some_and(|todo| todo.indent >= indent) {
+            open.pop();
+        }
+        let Some((checkbox, rest)) = split_checkbox(raw_line.trim_start()) else {
+            if let Some(todo) = open.last() {
+                bodies[todo.at].push(raw_line);
+            }
+            continue;
         };
-
+        let (date, text) = take_date(rest);
         let (session, text) = take_sessions(&text);
         let normalized = text.to_lowercase();
         let occurrence = occurrences.entry(normalized.clone()).or_default();
         let id = todo_id(file, &normalized, *occurrence);
         *occurrence += 1;
 
-        Some(Todo {
+        open.push(OpenTodo { indent, at: todos.len() });
+        todos.push(Todo {
             id,
+            parent: open.iter().rev().nth(1).map(|parent| todos[parent.at].id),
             text,
+            description: None,
             date,
             completed: checkbox.is_done(),
             file: file.clone(),
-            line: line_no,
+            line: (idx as u32) + 1,
             scope: TodoScope { repo: repo.clone(), session },
-        })
-    })
-    .collect()
+        });
+        bodies.push(Vec::new());
+    }
+
+    for (todo, body) in todos.iter_mut().zip(bodies) {
+        todo.description = Description::parse(&body.join("\n")).ok().flatten();
+    }
+    todos
+}
+
+fn take_date(rest: &str) -> (Option<NaiveDate>, String) {
+    let found = date_token_regex().captures(rest).and_then(|c| {
+        let m = c.get(0)?;
+        let d = NaiveDate::parse_from_str(&c[1], "%d-%m-%Y").ok()?;
+        Some((d, m.range()))
+    });
+    match found {
+        Some((d, range)) => (Some(d), collapse_whitespace(&format!("{}{}", &rest[..range.start], &rest[range.end..]))),
+        None => (None, collapse_whitespace(rest)),
+    }
+}
+
+pub(crate) fn block_end(content: &str, line_1based: u32) -> u32 {
+    let mut lines = content.lines().skip(line_1based as usize - 1);
+    let indent = lines.next().map_or(0, leading_width);
+    let owned = lines.take_while(|line| !line.trim().is_empty() && leading_width(line) > indent).count();
+    line_1based + owned as u32
 }
 
 fn todo_id(file: &NoteRelPath, normalized_text: &str, occurrence: u32) -> Uuid {
@@ -246,6 +279,42 @@ mod tests {
     fn duplicate_checkboxes_get_distinct_ids() {
         let t = parse_note("- [ ] call\n- [x] call\n", &f());
         assert_ne!(t[0].id, t[1].id);
+    }
+
+    #[test]
+    fn indented_text_under_a_todo_is_its_description() {
+        let t = parse_note("- [ ] ship\n  why it matters\n    - a detail\n- [ ] next", &f());
+        assert_eq!(t[0].description.as_ref().map(Description::as_str), Some("why it matters\n  - a detail"));
+        assert_eq!(t[1].description, None);
+    }
+
+    #[test]
+    fn a_blank_or_unindented_line_ends_the_description() {
+        let t = parse_note("- [ ] a\n  kept\n\n  not kept\n- [ ] b\n  kept\nprose", &f());
+        assert_eq!(t[0].description.as_ref().map(Description::as_str), Some("kept"));
+        assert_eq!(t[1].description.as_ref().map(Description::as_str), Some("kept"));
+    }
+
+    #[test]
+    fn indented_checkboxes_are_children_of_the_todo_above() {
+        let t = parse_note("- [ ] root\n  - [ ] child\n    - [ ] grandchild\n  - [ ] second child\n  root again\n- [ ] other", &f());
+        let parents: Vec<_> = t.iter().map(|todo| todo.parent).collect();
+        assert_eq!(parents, [None, Some(t[0].id), Some(t[1].id), Some(t[0].id), None]);
+        assert_eq!(t[0].description.as_ref().map(Description::as_str), Some("root again"));
+    }
+
+    #[test]
+    fn indented_checkboxes_without_a_todo_above_are_roots() {
+        let t = parse_note("intro\n  - [ ] floating", &f());
+        assert_eq!(t[0].parent, None);
+    }
+
+    #[test]
+    fn a_block_ends_before_its_next_sibling() {
+        let content = "- [ ] a\n  ctx\n  - [ ] child\n- [ ] b";
+        assert_eq!(block_end(content, 1), 3);
+        assert_eq!(block_end(content, 3), 3);
+        assert_eq!(block_end(content, 4), 4);
     }
 
     #[test]

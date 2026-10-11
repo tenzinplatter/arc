@@ -3,10 +3,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::checkbox::{Checkbox, split_checkbox};
+use crate::description::{Description, leading_width};
 use crate::note::frontmatter::Frontmatter;
 use crate::path::NoteRelPath;
-use crate::scanner::{parse_note, render_todo_line};
-use crate::scope::{NoteRepo, RepoKey, TodoScope};
+use crate::scanner::{block_end, parse_note, render_todo_line};
+use crate::scope::{NoteRepo, RepoKey, SessionId, TodoScope};
 use crate::write::{self, NoteLocks};
 
 use anyhow::{Context, anyhow, bail};
@@ -18,13 +19,40 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: Uuid,
+    pub parent: Option<Uuid>,
     pub text: String,
+    pub description: Option<Description>,
     pub date: Option<NaiveDate>,
     pub completed: bool,
     pub file: NoteRelPath,
     pub line: u32,
-    #[serde(default)]
     pub scope: TodoScope,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewTodo {
+    pub text: String,
+    pub date: Option<NaiveDate>,
+    pub description: Option<Description>,
+    pub session: Option<SessionId>,
+}
+
+impl NewTodo {
+    pub fn titled(text: String) -> Self {
+        Self { text, date: None, description: None, session: None }
+    }
+
+    fn lines(&self, indent: &str) -> Vec<String> {
+        let first = format!("{indent}{}", render_todo_line(Checkbox::Open, &self.text, self.date, self.session.as_ref()));
+        let body_indent = format!("{indent}  ");
+        std::iter::once(first).chain(self.description.iter().flat_map(|d| d.indented(&body_indent))).collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Placement {
+    List(Option<RepoKey>),
+    Under(Uuid),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,8 +61,8 @@ pub struct Edited {
     pub todos: Vec<Todo>,
 }
 
-const CACHE_FILE: &str = "todos.v2.json";
-const CACHE_LOCK_FILE: &str = "todos.v2.json.lock";
+const CACHE_FILE: &str = "todos.v3.json";
+const CACHE_LOCK_FILE: &str = "todos.v3.json.lock";
 const LEGACY_FILE: &str = "todos.json";
 const LEGACY_LOCK_FILE: &str = "todos.json.lock";
 const ADOPTED_LEGACY_FILE: &str = "todos.json.adopted";
@@ -164,31 +192,50 @@ fn appended(content: Option<&str>, lines: &[String], fresh: &Frontmatter) -> any
     Ok(format!("{base}{separator}{}\n", lines.join("\n")))
 }
 
-fn add_todo_blocking(
-    notes_dir: &Path,
-    cache_dir: &Path,
-    text: &str,
-    date: Option<NaiveDate>,
-    scope: &TodoScope,
-) -> anyhow::Result<Edited> {
-    if text.trim().is_empty() {
+fn add_todo_blocking(notes_dir: &Path, cache_dir: &Path, todo: &NewTodo, placement: &Placement) -> anyhow::Result<Edited> {
+    if todo.text.trim().is_empty() {
         bail!("todo text is empty");
     }
-    let line = render_todo_line(Checkbox::Open, text, date, scope.session.as_ref());
-    let file = scope.file();
-    let fresh = scope.repo.clone().map_or_else(Frontmatter::todos, Frontmatter::repo_todos);
-    let mut appended_at = 0;
+    match placement {
+        Placement::List(repo) => append_to_list(notes_dir, cache_dir, todo, repo.as_ref()),
+        Placement::Under(parent) => insert_under(notes_dir, cache_dir, todo, *parent),
+    }
+}
+
+fn append_to_list(notes_dir: &Path, cache_dir: &Path, todo: &NewTodo, repo: Option<&RepoKey>) -> anyhow::Result<Edited> {
+    let file = repo.map_or_else(NoteRelPath::todos, NoteRelPath::repo_todos);
+    let fresh = repo.cloned().map_or_else(Frontmatter::todos, Frontmatter::repo_todos);
+    let lines = todo.lines("");
+    let mut added_at = 0;
     let edit = edit_note(notes_dir, cache_dir, &file, |content| {
         let content = content.filter(|existing| !existing.trim().is_empty());
-        content.map_or(Ok(()), |existing| ensure_scoped_to(existing, &file, scope.repo.as_ref()))?;
-        let after = appended(content, std::slice::from_ref(&line), &fresh)?;
-        appended_at = after.lines().count() as u32;
+        content.map_or(Ok(()), |existing| ensure_scoped_to(existing, &file, repo))?;
+        let after = appended(content, &lines, &fresh)?;
+        added_at = (after.lines().count() + 1 - lines.len()) as u32;
         Ok(after)
     })?;
+    added(edit, &file, added_at)
+}
+
+fn insert_under(notes_dir: &Path, cache_dir: &Path, todo: &NewTodo, parent: Uuid) -> anyhow::Result<Edited> {
+    let file = cached(cache_dir, parent)?.file;
+    let mut added_at = 0;
+    let edit = edit_note(notes_dir, cache_dir, &file, |content| {
+        let parent_line = line_of(content, &file, parent)?;
+        let content = content.unwrap_or_default();
+        let end = block_end(content, parent_line);
+        let parent_indent = content.lines().nth(parent_line as usize - 1).map_or(0, leading_width);
+        added_at = end + 1;
+        Ok(inserted_after(content, end, &todo.lines(&" ".repeat(parent_indent + 2))))
+    })?;
+    added(edit, &file, added_at)
+}
+
+fn added(edit: NoteEdit, file: &NoteRelPath, line: u32) -> anyhow::Result<Edited> {
     let todo = edit
         .parsed
         .into_iter()
-        .find(|t| t.line == appended_at)
+        .find(|t| t.line == line)
         .ok_or_else(|| anyhow!("added todo is missing from {file}"))?;
     Ok(Edited { todo, todos: edit.todos })
 }
@@ -212,18 +259,17 @@ pub async fn add_todo(
     text: String,
     date: Option<NaiveDate>,
 ) -> anyhow::Result<Edited> {
-    add_todo_in(notes_dir, cache_dir, text, date, TodoScope::default()).await
+    add_todo_in(notes_dir, cache_dir, NewTodo { date, ..NewTodo::titled(text) }, Placement::List(None)).await
 }
 
 pub async fn add_todo_in(
     notes_dir: &Path,
     cache_dir: &Path,
-    text: String,
-    date: Option<NaiveDate>,
-    scope: TodoScope,
+    todo: NewTodo,
+    placement: Placement,
 ) -> anyhow::Result<Edited> {
     let (notes_dir, cache_dir) = (notes_dir.to_path_buf(), cache_dir.to_path_buf());
-    tokio::task::spawn_blocking(move || add_todo_blocking(&notes_dir, &cache_dir, &text, date, &scope)).await?
+    tokio::task::spawn_blocking(move || add_todo_blocking(&notes_dir, &cache_dir, &todo, &placement)).await?
 }
 
 fn cached(cache_dir: &Path, id: Uuid) -> anyhow::Result<Todo> {
@@ -276,7 +322,8 @@ fn remove_todo_blocking(notes_dir: &Path, cache_dir: &Path, id: Uuid) -> anyhow:
     let todo = cached(cache_dir, id)?;
     let edit = edit_note(notes_dir, cache_dir, &todo.file, |content| {
         let line = line_of(content, &todo.file, id)?;
-        Ok(without_line(content.unwrap_or_default(), line))
+        let content = content.unwrap_or_default();
+        Ok(without_lines(content, line..=block_end(content, line)))
     })?;
     Ok(Edited { todo, todos: edit.todos })
 }
@@ -361,13 +408,27 @@ fn rewrite_checkbox_in_segment(segment: &str, state: Checkbox) -> Option<String>
     Some(format!("{leading}{}{body}", state.marker()))
 }
 
-fn without_line(content: &str, line_1based: u32) -> String {
+fn without_lines(content: &str, lines: std::ops::RangeInclusive<u32>) -> String {
     content
         .split_inclusive('\n')
         .enumerate()
-        .filter(|(idx, _)| *idx as u32 + 1 != line_1based)
+        .filter(|(idx, _)| !lines.contains(&(*idx as u32 + 1)))
         .map(|(_, segment)| segment)
         .collect()
+}
+
+fn inserted_after(content: &str, line_1based: u32, lines: &[String]) -> String {
+    let segments: Vec<&str> = content.split_inclusive('\n').collect();
+    let (before, after) = segments.split_at((line_1based as usize).min(segments.len()));
+    let mut out = before.concat();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    lines.iter().for_each(|line| {
+        out.push_str(line);
+        out.push('\n');
+    });
+    out + &after.concat()
 }
 
 #[cfg(test)]
@@ -499,22 +560,27 @@ mod tests {
         assert_eq!(added.todos.len(), 2);
     }
 
-    fn repo_scope(key: &str) -> TodoScope {
-        TodoScope { repo: RepoKey::canonical(key), session: None }
+    fn repo_list(key: &str) -> Placement {
+        Placement::List(RepoKey::canonical(key))
+    }
+
+    fn ship() -> NewTodo {
+        NewTodo::titled("ship".into())
     }
 
     #[tokio::test]
     async fn a_scoped_todo_lands_in_its_repo_file_with_its_session() {
         let (notes, cache) = dirs();
-        let scope = TodoScope { session: Some(crate::SessionId::parse("s1").unwrap()), ..repo_scope("github.com/o/arc") };
-        let added = add_todo_in(notes.path(), cache.path(), "ship".into(), date(9), scope.clone()).await.unwrap();
+        let session = Some(SessionId::parse("s1").unwrap());
+        let todo = NewTodo { date: date(9), session: session.clone(), ..ship() };
+        let added = add_todo_in(notes.path(), cache.path(), todo, repo_list("github.com/o/arc")).await.unwrap();
 
         let written = read(&notes, "todos/github.com/o/arc.md");
         assert!(written.contains("\nrepo: github.com/o/arc\n"), "{written}");
         assert!(written.contains("id: github.com/o/arc\n"), "{written}");
         assert!(written.ends_with("- [ ] ship @09-10-2026 #session/s1\n"), "{written}");
         assert_eq!(added.todo.file.as_str(), "todos/github.com/o/arc.md");
-        assert_eq!(added.todo.scope, scope);
+        assert_eq!(added.todo.scope, TodoScope { repo: RepoKey::canonical("github.com/o/arc"), session });
         assert!(!notes.path().join("todos.md").exists());
     }
 
@@ -529,7 +595,7 @@ mod tests {
             "gitlab.com/g/sub/r",
             "gitlab.com/g/sub-r",
         ] {
-            let added = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope(key)).await.unwrap();
+            let added = add_todo_in(notes.path(), cache.path(), ship(), repo_list(key)).await.unwrap();
             assert_eq!(added.todo.file.as_str(), format!("todos/{key}.md"));
             assert_eq!(added.todo.scope.repo.map(|repo| repo.to_string()).as_deref(), Some(key));
         }
@@ -544,7 +610,7 @@ mod tests {
         std::fs::write(notes.path().join("todos/github.com/o/arc.md"), squatter).unwrap();
         std::fs::write(notes.path().join("todos.md"), "---\nid: todos\nrepo: github.com/o/arc\n---\n").unwrap();
 
-        let err = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc"))
+        let err = add_todo_in(notes.path(), cache.path(), ship(), repo_list("github.com/o/arc"))
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("github.com/someone/else"), "{err:#}");
@@ -559,7 +625,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), notes.path().join("todos")).unwrap();
 
-        let err = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc"))
+        let err = add_todo_in(notes.path(), cache.path(), ship(), repo_list("github.com/o/arc"))
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("outside the notes dir"), "{err:#}");
@@ -571,8 +637,54 @@ mod tests {
         let (notes, cache) = dirs();
         std::fs::create_dir_all(notes.path().join("todos/github.com/o")).unwrap();
         std::fs::write(notes.path().join("todos/github.com/o/arc.md"), "").unwrap();
-        let added = add_todo_in(notes.path(), cache.path(), "ship".into(), None, repo_scope("github.com/o/arc")).await.unwrap();
+        let added = add_todo_in(notes.path(), cache.path(), ship(), repo_list("github.com/o/arc")).await.unwrap();
         assert_eq!(added.todo.scope.repo, RepoKey::canonical("github.com/o/arc"));
+    }
+
+    #[tokio::test]
+    async fn a_description_is_written_indented_under_its_todo() {
+        let (notes, cache) = dirs();
+        std::fs::write(notes.path().join("todos.md"), "- [ ] first").unwrap();
+        let todo = NewTodo { description: Description::parse("why\n  and how").unwrap(), ..ship() };
+        let added = add_todo_in(notes.path(), cache.path(), todo, Placement::List(None)).await.unwrap();
+
+        assert_eq!(read(&notes, "todos.md"), "- [ ] first\n- [ ] ship\n  why\n    and how\n");
+        assert_eq!(added.todo.line, 2);
+        assert_eq!(added.todo.description.unwrap().as_str(), "why\n  and how");
+    }
+
+    #[tokio::test]
+    async fn a_child_goes_after_its_parents_whole_block() {
+        let (notes, cache) = dirs();
+        let content = "- [ ] parent\n  context\n  - [ ] older child\n    its context\n- [ ] sibling\n";
+        std::fs::write(notes.path().join("todos.md"), content).unwrap();
+        let parsed = refresh_note(cache.path(), &NoteRelPath::todos(), Some(content)).await.unwrap();
+
+        let child = NewTodo { description: Description::parse("detail").unwrap(), ..NewTodo::titled("new child".into()) };
+        let added = add_todo_in(notes.path(), cache.path(), child, Placement::Under(parsed[0].id)).await.unwrap();
+
+        assert_eq!(
+            read(&notes, "todos.md"),
+            "- [ ] parent\n  context\n  - [ ] older child\n    its context\n  - [ ] new child\n    detail\n- [ ] sibling\n"
+        );
+        assert_eq!((added.todo.line, added.todo.parent), (5, Some(parsed[0].id)));
+    }
+
+    #[tokio::test]
+    async fn a_child_of_an_unknown_parent_fails() {
+        let (notes, cache) = dirs();
+        assert!(add_todo_in(notes.path(), cache.path(), ship(), Placement::Under(Uuid::new_v4())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn removing_a_parent_takes_its_description_and_children() {
+        let (notes, cache) = dirs();
+        let content = "- [ ] keep\n- [ ] drop\n  context\n  - [ ] child\n- [ ] also keep\n";
+        std::fs::write(notes.path().join("todos.md"), content).unwrap();
+        let parsed = refresh_note(cache.path(), &NoteRelPath::todos(), Some(content)).await.unwrap();
+
+        remove_todo(notes.path(), cache.path(), parsed[1].id).await.unwrap();
+        assert_eq!(read(&notes, "todos.md"), "- [ ] keep\n- [ ] also keep\n");
     }
 
     #[tokio::test]
@@ -759,7 +871,9 @@ mod tests {
     const GOLDEN_TODOS_JSON: &str = r#"[
   {
     "id": "00000000-0000-0000-0000-000000000001",
+    "parent": "00000000-0000-0000-0000-000000000002",
     "text": "parsed todo",
+    "description": "why\n  and how",
     "date": "2026-05-31",
     "completed": true,
     "file": "stories/a.md",
@@ -774,7 +888,9 @@ mod tests {
     fn golden_todos() -> Vec<Todo> {
         vec![Todo {
             id: Uuid::from_u128(1),
+            parent: Some(Uuid::from_u128(2)),
             text: "parsed todo".into(),
+            description: Description::parse("why\n  and how").unwrap(),
             date: NaiveDate::from_ymd_opt(2026, 5, 31),
             completed: true,
             file: NoteRelPath::parse("stories/a.md").unwrap(),

@@ -34,12 +34,12 @@ arc               # launch TUI
 arc open          # open note for active story in $EDITOR
 arc tmux          # open/attach tmux session for active story
 arc todo list     # open todos with ids (--format json)
-arc todo add TEXT # add a todo to this repo's todos/<host>/<owner>/<repo>.md (--date YYYY-MM-DD, --session ID, --global for todos.md)
+arc todo add TEXT # add a todo to this repo's todos/<host>/<owner>/<repo>.md (--date YYYY-MM-DD, --description TEXT, --parent ID, --session ID, --global for todos.md)
 arc todo done ID  # complete a todo, ticking its note checkbox
 arc migrate       # one-time: move shortcut-notes config/cache/notes to arc
 ```
 
-Any note whose frontmatter has `repo: github.com/<owner>/<repo>` scopes its checkboxes to that repo. The key comes from the `origin` remote, lowercased and stripped of scheme, credentials, port and `.git`, so every clone and worktree of it shares the key; a repo without a hosted `origin` gets global todos. A `#session/<id>` token on a checkbox line ties the todo to the Claude Code session that added it.
+Any note whose frontmatter has `repo: github.com/<owner>/<repo>` scopes its checkboxes to that repo. The key comes from the `origin` remote, lowercased and stripped of scheme, credentials, port and `.git`, so every clone and worktree of it shares the key; a repo without a hosted `origin` gets global todos. A `#session/<id>` token on a checkbox line ties the todo to the Claude Code session that added it. Indented lines under a checkbox form its description, up to the next blank or less-indented line, and an indented checkbox is a child of the todo above it.
 
 ### MCP over HTTP
 

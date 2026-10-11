@@ -329,13 +329,15 @@ async fn todo(command: TodoCommands, config: &Config) -> anyhow::Result<()> {
                 }
             }
         }
-        TodoCommands::Add { text, date, session, global } => {
-            let repo = match global {
-                true => None,
-                false => arc_context::git::repo_key(&env::current_dir()?)?,
+        TodoCommands::Add { text, description, parent, date, session, global } => {
+            let placement = match (parent, global) {
+                (Some(parent), _) => arc_notes::Placement::Under(parent),
+                (None, true) => arc_notes::Placement::List(None),
+                (None, false) => arc_notes::Placement::List(arc_context::git::repo_key(&env::current_dir()?)?),
             };
-            let scope = arc_notes::TodoScope { repo, session };
-            let todo = arc_context::add_todo(&config.notes_dir, &config.cache_dir, text, date, scope).await?;
+            let description = description.as_deref().map(arc_notes::Description::parse).transpose()?.flatten();
+            let new = arc_notes::NewTodo { text, date, description, session };
+            let todo = arc_context::add_todo(&config.notes_dir, &config.cache_dir, new, placement).await?;
             println!("{}", todo.id);
         }
         TodoCommands::Done { id } => {

@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use slugify::slugify;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
 
 use arc_context::{
     Checkout, EntryText, GitHead, Handoff, LoggedSession, NoteLinks, SectionHeading,
@@ -23,7 +24,7 @@ use arc_context::{
 use arc_core::{Config, StoryId};
 use arc_index::Connection;
 use arc_notes::note::frontmatter::Frontmatter;
-use arc_notes::{BranchName, NoteRelPath, RepoKey, SessionId, TodoScope};
+use arc_notes::{BranchName, Description, NewTodo, NoteRelPath, Placement, RepoKey, SessionId};
 use arc_shortcut::api::branch::Branch;
 use arc_shortcut::api::story::Story;
 use arc_shortcut::{ApiClient, Cache};
@@ -255,8 +256,14 @@ impl LogSessionArgs {
 
 #[derive(Deserialize, JsonSchema)]
 struct AddTodoArgs {
-    /// Todo text.
+    /// Todo text: a one-line title.
     text: String,
+    /// Optional longer description, written as indented lines under the todo's checkbox.
+    #[serde(default)]
+    description: Option<String>,
+    /// Id of an existing todo to nest this one under, in that todo's note. Takes the place of `repo` and `global`; `cwd` is ignored.
+    #[serde(default)]
+    parent: Option<String>,
     /// Optional due date, `YYYY-MM-DD`.
     #[serde(default)]
     date: Option<String>,
@@ -390,7 +397,7 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, text, date, completed, file, line, position, repo['<host>/<owner>/<repo>'|null], session). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
+        description = "Run a read-only SQL query against the notes index and return rows as a JSON array of objects (at most 200 rows). Tables: notes(path, id, title, created, type, link_kind['story'|'iteration'|'epic'|null], entity_id, entity_url, entity_name, iteration_url, epic_url); note_tags(path, tag); note_branches(path, branch); todos(id, parent, text, description, date, completed, file, line, position, repo['<host>/<owner>/<repo>'|null], session). Only SELECT/WITH/EXPLAIN/PRAGMA are permitted."
     )]
     async fn query(
         &self,
@@ -561,11 +568,11 @@ impl ArcMcp {
     }
 
     #[tool(
-        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<host>/<owner>/<repo>.md`, keyed by `repo` or by the `origin` remote of the git repo at `cwd`), or in `todos.md` when `global` is true or `cwd` has no `origin` remote on a host. Pass `cwd` or `repo`, not both; `repo` takes a repo key or any remote URL. When the arc server runs on another machine (HTTP transport) it can't see your filesystem and rejects `cwd`: pass `repo`, or `global: true` for a todo that belongs to no repo (passing neither is an error there). Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD. Returns the new todo's id and the note it went to."
+        description = "Add a todo as a checkbox in the notes dir: in the repo's todo note (`todos/<host>/<owner>/<repo>.md`, keyed by `repo` or by the `origin` remote of the git repo at `cwd`), or in `todos.md` when `global` is true or `cwd` has no `origin` remote on a host. Pass `cwd` or `repo`, not both; `repo` takes a repo key or any remote URL. When the arc server runs on another machine (HTTP transport) it can't see your filesystem and rejects `cwd`: pass `repo`, or `global: true` for a todo that belongs to no repo (passing neither is an error there). Shows up in the arc TUI and is indexed for querying. Optional due date as YYYY-MM-DD and optional multi-line `description`. Pass `parent` (a todo id) to nest it under that todo instead. Returns the new todo's id and the note it went to."
     )]
     async fn add_todo(
         &self,
-        Parameters(AddTodoArgs { text, date, cwd, repo, session_id, global }): Parameters<AddTodoArgs>,
+        Parameters(AddTodoArgs { text, description, parent, date, cwd, repo, session_id, global }): Parameters<AddTodoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let date = match date.as_deref() {
             Some(d) => Some(tool_try!(
@@ -574,18 +581,23 @@ impl ArcMcp {
             None => None,
         };
         let session = tool_try!(session_id.as_deref().map(SessionId::parse).transpose().map_err(|e| format!("{e:#}")));
-        let repo = match tool_try!(self.locality.todo_target(cwd.as_deref(), repo.as_deref(), global)) {
-            TodoTarget::Global => None,
-            TodoTarget::Repo(key) => Some(key),
-            TodoTarget::Checkout(dir) => {
-                let found = tokio::task::spawn_blocking(move || arc_context::git::repo_key(&dir))
-                    .await
-                    .map_err(internal)?;
-                tool_try!(found.map_err(|e| format!("{e:#}")))
-            }
+        let description = tool_try!(description.as_deref().map(Description::parse).transpose().map_err(|e| format!("`description`: {e:#}"))).flatten();
+        let placement = match parent {
+            Some(_) if repo.is_some() || global => return Ok(fail("pass either `parent` or `repo`/`global`, not both")),
+            Some(parent) => Placement::Under(tool_try!(Uuid::parse_str(&parent).map_err(|e| format!("`parent`: {e}")))),
+            None => Placement::List(match tool_try!(self.locality.todo_target(cwd.as_deref(), repo.as_deref(), global)) {
+                TodoTarget::Global => None,
+                TodoTarget::Repo(key) => Some(key),
+                TodoTarget::Checkout(dir) => {
+                    let found = tokio::task::spawn_blocking(move || arc_context::git::repo_key(&dir))
+                        .await
+                        .map_err(internal)?;
+                    tool_try!(found.map_err(|e| format!("{e:#}")))
+                }
+            }),
         };
-        let scope = TodoScope { repo, session };
-        let todo = tool_try!(arc_context::add_todo(&self.config.notes_dir, &self.config.cache_dir, text, date, scope).await);
+        let new = NewTodo { text, date, description, session };
+        let todo = tool_try!(arc_context::add_todo(&self.config.notes_dir, &self.config.cache_dir, new, placement).await);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!("added {} to {}", todo.id, todo.file))]))
     }
 }

@@ -141,6 +141,12 @@ pub enum TodoCommands {
     /// Add a todo, scoped to the repo named by the current directory's `origin` remote; global without one or with `--global`.
     Add {
         text: String,
+        /// A longer description, written as indented lines under the checkbox.
+        #[arg(long)]
+        description: Option<String>,
+        /// Nest it under this todo, in that todo's note.
+        #[arg(long, conflicts_with = "global")]
+        parent: Option<Uuid>,
         /// Due date, `YYYY-MM-DD`.
         #[arg(long)]
         date: Option<NaiveDate>,
